@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(owprov VERSION 3.2.1)
+project(owprov VERSION 4.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -242,4 +242,3 @@ target_link_libraries(owprov PUBLIC
         CppKafka::cppkafka
         resolv
         fmt::fmt)
-
