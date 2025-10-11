@@ -1,38 +1,50 @@
+# Contributing to OpenWiFi Cloud (Router Architects Fork)
+
+We’re excited that you’re interested in contributing! This project extends the Telecom Infra Project (TIP) wlan-cloud-owprov codebase with new features and improvements. 
+To protect both the community and our business model, contributions follow a dual-license process.
+
+# License Model
+
+This project is dual-licensed:
+
+## Community Edition: GNU Affero General Public License v3.0 (AGPL-3.0)
+## Commercial License: Available from Infernet Systems Pvt Ltd (Router Architects)
+
+Contributions to this repository are included under AGPL-3.0 by default.
+To allow us to also make contributions available under our commercial license, all contributors must sign a Contributor License Agreement (CLA).
+
+# Contributor License Agreement (CLA)
+
+Before we can accept your pull request, you must agree to our CLA:
+
+## Individual contributors: CLA-Individual.md
+
+## Corporate contributors (on behalf of your employer): CLA-Corporate.md
+If you are contributing on behalf of your employer:
+1. Please ensure your organization has signed the Corporate CLA ([CLA-Corporate.md]). Please sign and email it support@routerarchitects.com, with email subject "Corporate CLA"
+2. Provide the GitHub usernames of authorized contributors to Router Architects so they can be whitelisted in the email.
+3. Once authorized, contributions will be automatically marked as CLA-signed.
+
+By signing the CLA, you:
+
+Keep ownership of your code.
+Grant Infernet Systems the right to use, distribute, and relicense your contributions under AGPL-3.0 and/or commercial terms.
+Confirm that you have the right to contribute (no hidden employer/IP conflicts).
+
+We use CLA Assistant to handle signatures automatically during pull requests.
+
 # How to Contribute
 
-We'd love to accept your patches and contributions to this project. There are
-just a few small guidelines you need to follow.
+Fork this repository.
+Create a branch for your changes.
+Sign the CLA (prompted automatically on your first PR).
+Submit a pull request with a clear description of your changes.
 
-## Version of C++
-This project is based on the C++17 standard and compiles as-is on most platforms 
-using either clang or g++. Do not use C++21 or C++23 features for now. Some core 
-libraries used in this project do not support C++21 or C++23 yet.
+Code Guidelines
 
-## Variable Naming
-Naming of pretty much anything uses Pascal naming. Longer explicit names using casing. 
-Member variable naming adds a `_` at the end of the vars. Try to
-keep this standard going. Sometimes you must override a base class function and then of course
-you need to follow the base class.
+Follow existing coding style and conventions.
+Include SPDX license headers in modified or new files:
 
-## This is a cmake project
-This is a cmake project, and you need to adhere to the cmake rules. If you need
-to add a package to the CMakeList, you need to ensure that the package is available
-on all required platforms and compiles. Remember that this project runs on Linux, OS X, 
-and the Raspberry PI.
-
-## Licensed packages
-When adding a package, you must also state the licensing for the package. MIT, BSD, Apache licenses
-are acceptable. No commercial licenses are allowed. 
-
-## clang formatting
-Please format your code using the included `.clang-format` file included in the project.
-
-```bash
-clang-format -i --style=<project root>/.clang-format myfile.cpp
-```
-
-## Pull Requests
-All submissions, including submissions by project members, require review. We
-accept GitHub pull requests. Please create a branch with the Jira name for addressing the issue you are fixing or the 
-feature you are implementing.
-Create a pull-request from the branch into master. 
+// SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+// Copyright (c) 2025 Infernet Systems Pvt Ltd
+// Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
