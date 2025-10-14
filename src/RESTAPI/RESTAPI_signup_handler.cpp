@@ -41,10 +41,6 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
 		}
 
-		if (registrationId.empty()) {
-			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
-		}
-
 		// find the operator id
 		ProvObjects::Operator SignupOperator;
 		if (!StorageService()->OperatorDB().GetRecord("registrationId", registrationId,
@@ -55,7 +51,7 @@ namespace OpenWifi {
 		//  if a signup already exists for this user, we should just return its value completion
 		SignupDB::RecordVec SEs;
 		if (StorageService()->SignupDB().GetRecords(
-				0, 100, SEs, " email='" + UserName + "' and serialNumber='" + macAddress + "' ")) {
+				0, 100, SEs, " email='" + UserName + "' and macAddress='" + macAddress + "' ")) {
 			for (const auto &i : SEs) {
 
 				if (!i.deviceID.empty() && i.deviceID != deviceID) {
@@ -73,6 +69,20 @@ namespace OpenWifi {
 					return ReturnObject(Answer);
 				}
 			}
+		}
+
+		// Return error if user already exists
+		SignupDB::RecordVec UserInv;
+		if (StorageService()->SignupDB().GetRecords(0, 100, UserInv, " email='" + UserName + "' ")) {
+			poco_error(Logger(), fmt::format("SIGNUP: Email {} already registered", UserName));
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+		}
+
+		// Return error if device is already provisioned with another subscriber
+		SignupDB::RecordVec inv;
+		if (StorageService()->SignupDB().GetRecords(0, 100, inv, " macAddress='" + macAddress + "' ")) {
+			poco_error(Logger(), fmt::format("SIGNUP: Device {} already provisioned with another subscriber", macAddress));
+			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
 		}
 
 		//  So we do not have an outstanding signup...

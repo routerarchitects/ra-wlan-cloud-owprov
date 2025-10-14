@@ -323,6 +323,7 @@ namespace OpenWifi {
 					Existing.deviceConfiguration = "";
 				}
 				Existing.subscriber = "";
+				Existing.devClass = Provisioning::DeviceClass::ANY;
 				Poco::JSON::Object state;
 				state.set("date", Utils::Now());
 				state.set("method", "auto-discovery");
@@ -331,6 +332,9 @@ namespace OpenWifi {
 				state.stringify(OO);
 				Existing.state = OO.str();
 				StorageService()->InventoryDB().UpdateRecord("id", Existing.info.id, Existing);
+				StorageService()->SignupDB().DeleteRecord("userid", RemoveSubscriber);
+				StorageService()->SubscriberDeviceDB().DeleteRecord("subscriberid", RemoveSubscriber);
+
 				RemoveMembership(StorageService()->EntityDB(), &ProvObjects::Entity::devices, "id",
 								 Existing.info.id);
 				Poco::JSON::Object Answer;
