@@ -71,14 +71,15 @@ namespace OpenWifi {
 			}
 		}
 
-		// Return error if user already exists
+		// Return error if user already exists. We do not allow multiple users with same email
 		SignupDB::RecordVec UserInv;
 		if (StorageService()->SignupDB().GetRecords(0, 100, UserInv, " email='" + UserName + "' ")) {
 			poco_error(Logger(), fmt::format("SIGNUP: Email {} already registered", UserName));
 			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
 		}
 
-		// Return error if device is already provisioned with another subscriber
+		// Return error if device is already provisioned with another subscriber. We do not
+		// allow multiple users with same device
 		SignupDB::RecordVec inv;
 		if (StorageService()->SignupDB().GetRecords(0, 100, inv, " macAddress='" + macAddress + "' ")) {
 			poco_error(Logger(), fmt::format("SIGNUP: Device {} already provisioned with another subscriber", macAddress));

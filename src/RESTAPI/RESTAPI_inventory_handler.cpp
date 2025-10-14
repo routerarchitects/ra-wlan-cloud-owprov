@@ -332,6 +332,8 @@ namespace OpenWifi {
 				state.stringify(OO);
 				Existing.state = OO.str();
 				StorageService()->InventoryDB().UpdateRecord("id", Existing.info.id, Existing);
+
+				// Delete subsriber and associated device records from other databases.
 				StorageService()->SignupDB().DeleteRecord("userid", RemoveSubscriber);
 				StorageService()->SubscriberDeviceDB().DeleteRecord("subscriberid", RemoveSubscriber);
 
