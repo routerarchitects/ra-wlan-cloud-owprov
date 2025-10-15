@@ -1,3 +1,9 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
+
 //
 //	License type: BSD 3-Clause License
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
@@ -323,6 +329,7 @@ namespace OpenWifi {
 					Existing.deviceConfiguration = "";
 				}
 				Existing.subscriber = "";
+				Existing.devClass = Provisioning::DeviceClass::ANY;
 				Poco::JSON::Object state;
 				state.set("date", Utils::Now());
 				state.set("method", "auto-discovery");
@@ -331,6 +338,11 @@ namespace OpenWifi {
 				state.stringify(OO);
 				Existing.state = OO.str();
 				StorageService()->InventoryDB().UpdateRecord("id", Existing.info.id, Existing);
+
+				// Delete subsriber and associated device records from other databases.
+				StorageService()->SignupDB().DeleteRecord("userid", RemoveSubscriber);
+				StorageService()->SubscriberDeviceDB().DeleteRecord("subscriberid", RemoveSubscriber);
+
 				RemoveMembership(StorageService()->EntityDB(), &ProvObjects::Entity::devices, "id",
 								 Existing.info.id);
 				Poco::JSON::Object Answer;
