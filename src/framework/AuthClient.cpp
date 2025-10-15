@@ -1,3 +1,9 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
+
 //
 // Created by stephane bourque on 2022-10-25.
 //
@@ -70,7 +76,15 @@ namespace OpenWifi {
 			UInfo = *User;
 			return true;
 		}
-		return RetrieveTokenInformation(SessionToken, UInfo, TID, Expired, Contacted, Sub);
+		if (RetrieveTokenInformation(SessionToken, UInfo, TID, Expired, Contacted, Sub))
+			return true;
+
+		/*
+		 * TODO:
+		 * If we reach here, the token was not found. Try validating it as a subscriber token.
+		 * Temporary fix; a proper solution may be needed in the future.
+		 */
+		return RetrieveTokenInformation(SessionToken, UInfo, TID, Expired, Contacted, true);
 	}
 
 	bool AuthClient::RetrieveApiKeyInformation(const std::string &SessionToken,
