@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 //	License type: BSD 3-Clause License
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
@@ -12,6 +17,9 @@
 #include "Poco/Util/Option.h"
 
 #include "AutoDiscovery.h"
+#ifdef CGW_INTEGRATION
+#include "SubscriberEvents.h"
+#endif
 #include "Daemon.h"
 #include "DeviceTypeCache.h"
 #include "FileDownloader.h"
@@ -43,6 +51,11 @@ namespace OpenWifi {
                                                 OpenRoaming_GlobalReach(),
                                                 OpenRoaming_Orion(), OpenRoaming_Radsec(),
                                                 OpenRoaming_GenericRadius()
+// This subsystem service is initialized when the microservice starts.
+// It listens to Kafka topic (subscriber_event) and processes messages related to subscriber creation and deletion.
+#ifdef CGW_INTEGRATION
+                                                , SubscriberEventsProcessor()
+#endif
             });
 		}
 		return instance_;

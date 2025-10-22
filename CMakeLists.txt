@@ -1,8 +1,17 @@
+#[[
+   SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+   Copyright (c) 2025 Infernet Systems Pvt Ltd
+   Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ ]]
 cmake_minimum_required(VERSION 3.13)
 project(owprov VERSION 4.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 
+option(CGW_INTEGRATION "Enable CGW Integration" ON)
+if(CGW_INTEGRATION)
+    add_compile_definitions(CGW_INTEGRATION)
+endif()
 if(UNIX AND APPLE)
     set(OPENSSL_ROOT_DIR /usr/local/opt/openssl)
     set(MYSQL_ROOT_DIR /usr/local/opt/mysql-client)
@@ -150,6 +159,7 @@ add_executable(owprov
         src/storage/storage_signup.cpp src/storage/storage_signup.h
         src/storage/storage_variables.cpp src/storage/storage_variables.h
         src/storage/storage_overrides.cpp src/storage/storage_overrides.h
+        src/storage/storage_groupsmap.cpp src/storage/storage_groupsmap.h
 
         src/RESTAPI/RESTAPI_entity_handler.cpp src/RESTAPI/RESTAPI_entity_handler.h
         src/RESTAPI/RESTAPI_contact_handler.cpp src/RESTAPI/RESTAPI_contact_handler.h
@@ -181,9 +191,11 @@ add_executable(owprov
         src/sdks/SDK_gw.cpp src/sdks/SDK_gw.h
         src/sdks/SDK_prov.cpp src/sdks/SDK_prov.h
         src/sdks/SDK_sec.cpp src/sdks/SDK_sec.h
+        src/sdks/SDK_cgw.cpp src/sdks/SDK_cgw.h
         src/SerialNumberCache.h src/SerialNumberCache.cpp
         src/APConfig.cpp src/APConfig.h
         src/AutoDiscovery.cpp src/AutoDiscovery.h
+        src/SubscriberEvents.cpp src/SubscriberEvents.h
         src/ConfigSanityChecker.cpp src/ConfigSanityChecker.h
         src/TagServer.cpp src/TagServer.h
         src/JobController.cpp src/JobController.h

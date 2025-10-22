@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 // Created by stephane bourque on 2022-04-06.
 //
@@ -5,8 +10,12 @@
 #include "RESTAPI_sub_devices_handler.h"
 #include "APConfig.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "fmt/format.h"
 #include "sdks/SDK_gw.h"
 #include "sdks/SDK_sec.h"
+#ifdef CGW_INTEGRATION
+#include "sdks/SDK_cgw.h"
+#endif
 
 namespace OpenWifi {
 
@@ -43,6 +52,40 @@ namespace OpenWifi {
 		if (!DB_.Exists("id", uuid)) {
 			return NotFound();
 		}
+		/* When device is removed from the subscriber, if group present in groupsmap table.
+		*  Call cgw-rest DeleteDeviceFromGroup
+		*/
+#ifdef CGW_INTEGRATION
+		// Load existing record to obtain subscriberId and MAC/serial
+		ProvObjects::SubscriberDevice Existing;
+		if (!DB_.GetRecord("id", uuid, Existing)) {
+			return NotFound();
+		}
+
+		// Resolve CGW groupId from subscriberId via groupsmap
+		uint64_t groupId = 0;
+		if (!StorageService()->GroupsMapDB().GetGroup(Existing.subscriberId, groupId) ) {
+			poco_warning(Logger(), fmt::format("Subscriber {} has no CGW groupsmap entry", Existing.subscriberId));
+			return BadRequest(RESTAPI::Errors::InvalidSubscriberId);
+		}
+
+		std::string macHex =  Existing.serialNumber;
+		Poco::replaceInPlace(macHex, ":", "");
+		Poco::replaceInPlace(macHex, "-", "");
+		Poco::toLowerInPlace(macHex);
+		if (macHex.size() != 12) {
+			poco_warning(Logger(), fmt::format("Invalid MAC/Serial format for CGW delete: {}", macHex));
+			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
+		}
+		auto macColon = Utils::SerialToMAC(macHex);
+
+			// Call CGW to remove device from group
+			if (!SDK::CGW::DeleteDeviceFromGroup(groupId, macColon)) {
+				poco_warning(Logger(), fmt::format("CGW DeleteDeviceFromGroup failed gid={} mac={}", groupId, macColon));
+				return BadRequest(RESTAPI::Errors::InternalError);
+			}
+
+#endif
 
 		DB_.DeleteRecord("id", uuid);
 		return OK();
@@ -69,6 +112,30 @@ namespace OpenWifi {
 		}
 
 		ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info);
+#ifdef CGW_INTEGRATION
+		// Lookup groupId for this subscriber in groupsmap
+		uint64_t groupId = 0;
+		if (!StorageService()->GroupsMapDB().GetGroup(NewObject.subscriberId, groupId)) {
+			poco_warning(Logger(), fmt::format("Subscriber {} has no CGW groupsmap entry", NewObject.subscriberId));
+			return BadRequest(RESTAPI::Errors::InvalidSubscriberId);
+		}
+
+		std::string macHex = NewObject.serialNumber;
+		Poco::replaceInPlace(macHex, ":", "");
+		Poco::replaceInPlace(macHex, "-", "");
+		Poco::toLowerInPlace(macHex);
+		if (macHex.size() != 12) {
+			poco_warning(Logger(), fmt::format("Invalid MAC/Serial format for CGW mapping: {}", macHex));
+			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
+		}
+		auto macColon = Utils::SerialToMAC(macHex);
+
+		// Call CGW to add device to group
+		if (!SDK::CGW::AddDeviceToGroup(/*this,*/ groupId, macColon)) {
+			poco_warning(Logger(), fmt::format("CGW AddDeviceToGroup failed gid={} mac={}", groupId, macColon));
+			return BadRequest(RESTAPI::Errors::InternalError);
+		}
+#endif
 		return ReturnCreatedObject(DB_, NewObject, *this);
 	}
 

@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 //	License type: BSD 3-Clause License
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
@@ -18,6 +23,9 @@
 #include "framework/MicroServiceFuncs.h"
 
 #include "Kafka_ProvUpdater.h"
+#ifdef CGW_INTEGRATION
+#include "sdks/SDK_cgw.h"
+#endif
 
 namespace OpenWifi {
 
@@ -89,6 +97,20 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
 
+		/* When venue is deleted, if group present in groupsmap table.
+		*  Call cgw-rest DeleteGroup on Success delete from groupsmap and venue.
+		*/
+#ifdef CGW_INTEGRATION
+                uint64_t groupId = 0;
+                if (!StorageService()->GroupsMapDB().GetGroup(UUID, groupId)) {
+                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete groupsmap lookup failure");
+                        return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+                }
+                if (!SDK::CGW::DeleteGroup(groupId)) {
+                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete CGW deleteGroup failure");
+                        return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+                }
+#endif
 		if (!Existing.contacts.empty()) {
 			for (const auto &contact_uuid : Existing.contacts)
 				StorageService()->ContactDB().DeleteInUse(
@@ -109,8 +131,19 @@ namespace OpenWifi {
 			StorageService()->VenueDB().DeleteChild("id", Existing.parent, UUID);
 		if (!Existing.entity.empty())
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
+#ifdef CGW_INTEGRATION
+                if (!DB_.DeleteRecord("id", UUID)) {
+                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete venue delete failure");
+                        return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+                }
+                if (!StorageService()->GroupsMapDB().DeleteVenue(UUID)) {
+                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete groupsmap delete failure");
+                        return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+                }
+#else
 		DB_.DeleteRecord("id", UUID);
 
+#endif
 		UpdateKafkaProvisioningObject(ProvisioningOperation::removal, Existing);
 
 		return OK();
@@ -200,6 +233,21 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InternalError);
 		}
 
+		/* When venue is created,Insert in the groupsmap table.
+		*  Call cgw-rest CreateGroup if fail then Delete entry from groupsmap.
+		*/
+#ifdef CGW_INTEGRATION
+                uint64_t groupId = 0;
+                if (!StorageService()->GroupsMapDB().AddVenue(NewObject.info.id, groupId)) {
+                        poco_information(Logger(), "RESTAPI_venue_handler::DoPost groupsmap failure");
+                        return InternalError(RESTAPI::Errors::RecordNotCreated);
+                }
+                if (!SDK::CGW::CreateGroup(groupId)) {
+                        StorageService()->GroupsMapDB().DeleteVenue(NewObject.info.id);
+                        poco_information(Logger(), "RESTAPI_venue_handler::DoPost CGW createGroup failure");
+                        return InternalError(RESTAPI::Errors::RecordNotCreated);
+                }
+#endif
 		if (DB_.CreateRecord(NewObject)) {
 			MoveUsage(StorageService()->ContactDB(), DB_, {}, NewObject.contacts,
 					  NewObject.info.id);

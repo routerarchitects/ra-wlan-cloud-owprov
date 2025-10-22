@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 // Created by stephane bourque on 2022-10-25.
 //
@@ -251,6 +256,19 @@ namespace OpenWifi {
 
 				Poco::Net::HTTPRequest Request(Poco::Net::HTTPRequest::HTTP_DELETE, Path,
 											   Poco::Net::HTTPMessage::HTTP_1_1);
+#ifdef CGW_INTEGRATION
+				// Optional JSON body for DELETE (CGW integration only)
+				std::string payload{};
+				bool hasBody = false;
+				if (Body_.size() > 0) {
+					std::ostringstream obody;
+					Poco::JSON::Stringifier::stringify(Body_, obody);
+					payload = obody.str();
+					Request.setContentType("application/json");
+					Request.setContentLength( payload.size());
+					hasBody = true;
+				}
+#endif
 				if (BearerToken.empty()) {
 					Request.add("X-API-KEY", Svc.AccessKey);
 					Request.add("X-INTERNAL-NAME", MicroServicePublicEndPoint());
@@ -262,14 +280,33 @@ namespace OpenWifi {
 				if (Secure) {
 					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort());
 					Session.setTimeout(Poco::Timespan(msTimeout_ / 1000, msTimeout_ % 1000));
+
+#ifdef CGW_INTEGRATION
+					if (hasBody) {
+						std::ostream &os = Session.sendRequest(Request);
+						os << payload;
+					} else {
+						Session.sendRequest(Request);
+					}
+#else
 					Session.sendRequest(Request);
+#endif
 					Poco::Net::HTTPResponse Response;
 					Session.receiveResponse(Response);
 					return Response.getStatus();
 				} else {
 					Poco::Net::HTTPClientSession Session(URI.getHost(), URI.getPort());
 					Session.setTimeout(Poco::Timespan(msTimeout_ / 1000, msTimeout_ % 1000));
+#ifdef CGW_INTEGRATION
+					if (hasBody) {
+						std::ostream &os = Session.sendRequest(Request);
+						os << payload;
+					} else {
+						Session.sendRequest(Request);
+					}
+#else
 					Session.sendRequest(Request);
+#endif
 					Poco::Net::HTTPResponse Response;
 					Session.receiveResponse(Response);
 					return Response.getStatus();
