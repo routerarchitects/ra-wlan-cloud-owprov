@@ -46,7 +46,7 @@ namespace OpenWifi::SDK::CGW {
         Macs.add(mac);
         Body.set("mac_addrs", Macs);
         std::string EP = fmt::format("/api/v1/groups/{}/infra", groupId);
-        OpenAPIRequestDelete R(uSERVICE_CGW, EP, {}, Body, 10000);
+        OpenAPIRequestDelete R(uSERVICE_CGW, EP, {}, 10000,"", Body);
         auto Status = R.Do();
         bool Ok = Status == Poco::Net::HTTPResponse::HTTP_OK;
         return Ok;

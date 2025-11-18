@@ -70,7 +70,7 @@ configure_file(src/ow_version.h.in ${PROJECT_SOURCE_DIR}/src/ow_version.h @ONLY)
 
 add_definitions(-DPOCO_LOG_DEBUG="1")
 
-add_compile_options(-Wall -Wextra)
+add_compile_options(-Wall -Wextra -Werror)
 if(ASAN)
     add_compile_options(-fsanitize=address)
     add_link_options(-fsanitize=address)

@@ -49,7 +49,7 @@ namespace OpenWifi {
         OrionAccountsDB_ = std::make_unique<OpenWifi::OrionAccountsDB>(dbType_, *Pool_, Logger());
         RadiusEndpointDB_ = std::make_unique<OpenWifi::RadiusEndpointDB>(dbType_, *Pool_, Logger());
 
-		#ifdef CGW_INTEGRATION
+#ifdef CGW_INTEGRATION
         GroupsMapDB_ = std::make_unique<OpenWifi::GroupsMapDB>(dbType_, *Pool_, Logger());
 #endif
 		EntityDB_->Create();
@@ -76,7 +76,7 @@ namespace OpenWifi {
         OrionAccountsDB_->Create();
         RadiusEndpointDB_->Create();
 
-		#ifdef CGW_INTEGRATION
+#ifdef CGW_INTEGRATION
         GroupsMapDB_->Create();
 #endif
 		ExistFunc_[EntityDB_->Prefix()] = [=](const char *F, std::string &V) -> bool {
@@ -149,7 +149,7 @@ namespace OpenWifi {
             return RadiusEndpointDB_->Exists(F, V);
         };
 
-		#ifdef CGW_INTEGRATION
+#ifdef CGW_INTEGRATION
         ExistFunc_[GroupsMapDB_->Prefix()] = [=](const char *F, std::string &V) -> bool {
             return GroupsMapDB_->Exists(F, V);
         };

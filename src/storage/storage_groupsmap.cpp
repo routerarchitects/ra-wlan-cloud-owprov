@@ -19,7 +19,7 @@ namespace OpenWifi {
     };
 
     GroupsMapDB::GroupsMapDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L)
-        : DB(T, "groupsmap", GroupsMapDB_Fields, GroupsMapDB_Indexes, P, L, "gmp") {}
+        : DB(T, "groupsmap", GroupsMapDB_Fields, GroupsMapDB_Indexes, P, L, "gmap") {}
 
     uint64_t GroupsMapDB::NextId() {
         uint64_t id = 0;
@@ -28,6 +28,7 @@ namespace OpenWifi {
             Poco::Data::Statement Select(Session);
             Select << "select max(groupid) from " + TableName_, Poco::Data::Keywords::into(id), Poco::Data::Keywords::now;
         } catch (...) {
+            poco_error(Logger(), "Exception in GroupsMapDB::NextId");
         }
         return id + 1;
     }
@@ -38,36 +39,18 @@ namespace OpenWifi {
         R.groupid = NextId();
         groupId = R.groupid;
         bool ok = CreateRecord(R);
+        poco_debug(Logger(), fmt::format("Added venue {} with group id {}", venueId, groupId));
         return ok;
     }
 
     bool GroupsMapDB::GetGroup(const std::string &venueId, uint64_t &groupId) {
-    bool found = false;
-    try {
-        Poco::Data::Session Session = Pool_.get();
-        Poco::Data::Statement Select(Session);
-        std::string id = venueId;   // make a non-const copy
-        std::string sql = "select groupid from " + TableName_ + " where venueid=$1";
-
-        Select << sql,
-            Poco::Data::Keywords::into(groupId),
-            Poco::Data::Keywords::use(id),
-            Poco::Data::Keywords::now;
-
-        found = true;
-
-    } catch (const Poco::Exception &E) {
-        poco_error(Logger(), "Exception: " + E.displayText());
-        found = false;
-    } catch (const std::exception &E) {
-        poco_error(Logger(), std::string("std::exception: ") + E.what());
-        found = false;
-    } catch (...) {
-        poco_error(Logger(), "Unknown exception in GetGroup");
-        found = false;
+        GroupsMapRecord rec;
+        if (GetRecord("venueid", venueId, rec)) {
+            groupId = rec.groupid;
+            return true;
+        }
+        return false;
     }
-    return found;
-}
 
     bool GroupsMapDB::DeleteVenue(const std::string &venueId) {
         bool ok = DeleteRecord("venueid", venueId);

@@ -83,7 +83,7 @@ namespace OpenWifi {
         inline OpenWifi::OrionAccountsDB &OrionAccountsDB() { return *OrionAccountsDB_; }
         inline OpenWifi::RadiusEndpointDB &RadiusEndpointDB() { return *RadiusEndpointDB_; }
 
-		#ifdef CGW_INTEGRATION
+#ifdef CGW_INTEGRATION
         inline OpenWifi::GroupsMapDB &GroupsMapDB() { return *GroupsMapDB_; }
 #endif
 		bool Validate(const Poco::URI::QueryParameters &P, RESTAPI::Errors::msg &Error);

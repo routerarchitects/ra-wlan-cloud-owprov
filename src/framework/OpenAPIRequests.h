@@ -79,28 +79,19 @@ namespace OpenWifi {
 
 	class OpenAPIRequestDelete {
 	  public:
+		explicit OpenAPIRequestDelete(const std::string &Type, const std::string &EndPoint,
+									  const Types::StringPairVec &QueryData, uint64_t msTimeout,
+									  const std::string &LoggingStr = ""
 #ifdef CGW_INTEGRATION
-		// CGW build: support DELETE with or without JSON body
-		explicit OpenAPIRequestDelete(const std::string &Type, const std::string &EndPoint,
-									  const Types::StringPairVec &QueryData,
-									  const Poco::JSON::Object &Body, uint64_t msTimeout,
-									  const std::string &LoggingStr = "")
-			: Type_(Type), EndPoint_(EndPoint), QueryData_(QueryData), msTimeout_(msTimeout), Body_(Body),
-			  LoggingStr_(LoggingStr){};
-
-		explicit OpenAPIRequestDelete(const std::string &Type, const std::string &EndPoint,
-									  const Types::StringPairVec &QueryData, uint64_t msTimeout,
-									  const std::string &LoggingStr = "")
-			: Type_(Type), EndPoint_(EndPoint), QueryData_(QueryData), msTimeout_(msTimeout),
-			  LoggingStr_(LoggingStr){};
-#else
-		// Non-CGW build: classic constructor, no body
-		explicit OpenAPIRequestDelete(const std::string &Type, const std::string &EndPoint,
-									  const Types::StringPairVec &QueryData, uint64_t msTimeout,
-									  const std::string &LoggingStr = "")
-			: Type_(Type), EndPoint_(EndPoint), QueryData_(QueryData), msTimeout_(msTimeout),
-			  LoggingStr_(LoggingStr){};
+									, const Poco::JSON::Object& Body = Poco::JSON::Object()
 #endif
+									)
+			: Type_(Type), EndPoint_(EndPoint), QueryData_(QueryData), msTimeout_(msTimeout),
+			  LoggingStr_(LoggingStr)
+#ifdef CGW_INTEGRATION
+					, Body_(Body)
+#endif				
+			{};
 		Poco::Net::HTTPServerResponse::HTTPStatus Do(const std::string &BearerToken = "");
 
 	  private:
@@ -108,8 +99,8 @@ namespace OpenWifi {
 		std::string EndPoint_;
 		Types::StringPairVec QueryData_;
 		uint64_t msTimeout_;
-		Poco::JSON::Object Body_;
 		std::string LoggingStr_;
+		Poco::JSON::Object Body_;
 	};
 
 } // namespace OpenWifi

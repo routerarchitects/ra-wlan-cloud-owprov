@@ -17,9 +17,6 @@
 #include "Poco/Util/Option.h"
 
 #include "AutoDiscovery.h"
-#ifdef CGW_INTEGRATION
-#include "SubscriberEvents.h"
-#endif
 #include "Daemon.h"
 #include "DeviceTypeCache.h"
 #include "FileDownloader.h"
@@ -35,6 +32,9 @@
 #include <RadiusEndpointTypes/OrionWifi.h>
 #include <RadiusEndpointTypes/Radsec.h>
 #include <RadiusEndpointTypes/GenericRadius.h>
+#ifdef CGW_INTEGRATION
+#include "SubscriberEvents.h"
+#endif
 
 namespace OpenWifi {
 	class Daemon *Daemon::instance_ = nullptr;

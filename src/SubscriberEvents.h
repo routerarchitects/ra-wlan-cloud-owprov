@@ -40,6 +40,16 @@ namespace OpenWifi {
             static auto instance_ = new SubscriberEvents;
             return instance_;
         }
+        
+        /**
+         * @brief If subscriberId Exists in groupsMap,call DELETE DeleteGroup of CGW-REST,then delete entry from groupsMap
+         */
+        void HandleSubscriberDelete(const std::string &subscriberId);
+        
+        /**
+         * @brief If subscriberId not in groupsMap, add groupsMap entry, call CGW-REST CreateGroup, and rollback the entry on failure
+         */
+        void HandleSubscriberCreate(const std::string &subscriberId);
 
         /**
          * @brief Start the subscriber event worker thread and register the watcher.
@@ -69,10 +79,9 @@ namespace OpenWifi {
         * The loop blocks on the internal notification queue, parses each JSON payload,
         * and identifies the event `type` and `subscriberid`. For create events it
         * inserts a venue-to-group mapping in the GroupsMap database, attempts to
-        * provision the group(call cgw-rest api) in CGW, and rolls back the DB entry if CGW provisioning
-        * errors do not terminate the worker thread.
-        * fails. For delete events it looks up the persisted mapping, triggers CGW
-        * deletion, and removes the mapping from storage.
+        * provision the group(call POST /CreateGroup of cgw-rest) in CGW,if failed rolls back the DB entry.
+        * For delete events, it looks up the persisted mapping, triggers CGW
+        * deletion(call DELETE /DeleteGroup of cgw-rest), and removes the mapping from storage.
         */
         void run() override;
 

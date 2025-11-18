@@ -97,17 +97,17 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
 
-		/* When venue is deleted, if group present in groupsmap table.
-		*  Call cgw-rest DeleteGroup on Success delete from groupsmap and venue.
+		/* When venue is deleted, if venueID is present in groupsmap table.
+		*  Call DELETE /DeleteGroup of CGW-REST on Success delete from groupsmap and venue.
 		*/
 #ifdef CGW_INTEGRATION
                 uint64_t groupId = 0;
                 if (!StorageService()->GroupsMapDB().GetGroup(UUID, groupId)) {
-                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete groupsmap lookup failure");
+                        poco_error(Logger(), "DoDelete groupsmap lookup failure");
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
                 if (!SDK::CGW::DeleteGroup(groupId)) {
-                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete CGW deleteGroup failure");
+                        poco_error(Logger(), "DoDelete CGW deleteGroup failure");
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
 #endif
@@ -133,11 +133,11 @@ namespace OpenWifi {
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
 #ifdef CGW_INTEGRATION
                 if (!DB_.DeleteRecord("id", UUID)) {
-                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete venue delete failure");
+                        poco_error(Logger(), "DoDelete venue delete failure");
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
                 if (!StorageService()->GroupsMapDB().DeleteVenue(UUID)) {
-                        poco_information(Logger(), "RESTAPI_venue_handler::DoDelete groupsmap delete failure");
+                        poco_error(Logger(), "DoDelete groupsmap delete failure");
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
 #else
@@ -234,17 +234,17 @@ namespace OpenWifi {
 		}
 
 		/* When venue is created,Insert in the groupsmap table.
-		*  Call cgw-rest CreateGroup if fail then Delete entry from groupsmap.
+		*  Call POST /CreateGroup of CGW-REST if fail then Delete entry from groupsmap.
 		*/
 #ifdef CGW_INTEGRATION
                 uint64_t groupId = 0;
                 if (!StorageService()->GroupsMapDB().AddVenue(NewObject.info.id, groupId)) {
-                        poco_information(Logger(), "RESTAPI_venue_handler::DoPost groupsmap failure");
+                        poco_error(Logger(), "DoPost groupsmap failure");
                         return InternalError(RESTAPI::Errors::RecordNotCreated);
                 }
                 if (!SDK::CGW::CreateGroup(groupId)) {
                         StorageService()->GroupsMapDB().DeleteVenue(NewObject.info.id);
-                        poco_information(Logger(), "RESTAPI_venue_handler::DoPost CGW createGroup failure");
+                        poco_error(Logger(), "DoPost CGW createGroup failure");
                         return InternalError(RESTAPI::Errors::RecordNotCreated);
                 }
 #endif

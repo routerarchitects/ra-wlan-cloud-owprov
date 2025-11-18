@@ -18,6 +18,49 @@
 
 namespace OpenWifi {
 
+	void SubscriberEvents::HandleSubscriberDelete(const std::string &subscriberId) {
+		auto &db = StorageService()->GroupsMapDB();
+		OpenWifi::GroupsMapRecord rec{};
+		if (!db.GetRecord("venueid", subscriberId, rec)) {
+			poco_error(Logger(), fmt::format("No groupsmap entry found for subscriber {} on delete event", subscriberId));
+			return;
+		}
+
+		poco_information(Logger(), fmt::format("Deleting CGW group {} for subscriber {}", rec.groupid, subscriberId));
+		if (!SDK::CGW::DeleteGroup(rec.groupid)) {
+			poco_error(Logger(), fmt::format("CGW DeleteGroup failed for subscriber {} (group {})", subscriberId, rec.groupid));
+			return;
+		}
+
+		if (!db.DeleteVenue(subscriberId)) {
+			poco_error(Logger(), fmt::format("Failed to delete groupsmap entry for subscriber {} after CGW deletion", subscriberId));
+		} else {
+			poco_information(Logger(), fmt::format("Deleted groupsmap entry for subscriber {} group {}", subscriberId, rec.groupid));
+		}
+	}
+
+	void SubscriberEvents::HandleSubscriberCreate(const std::string &subscriberId) {
+		auto &db = StorageService()->GroupsMapDB();
+		if (db.Exists("venueid", subscriberId)) {
+			poco_debug(Logger(), fmt::format("Subscriber {} already in groupsmap; skipping CGW create", subscriberId));
+			return;
+		}
+
+		uint64_t groupId = 0;
+		if (!db.AddVenue(subscriberId, groupId)) {
+			poco_error(Logger(), fmt::format("Failed to create groupsmap entry for subscriber {}", subscriberId));
+			return;
+		}
+
+		poco_information(Logger(), fmt::format("Created groupsmap entry for subscriber {} with group {}", subscriberId, groupId));
+		if (SDK::CGW::CreateGroup(groupId)) return;
+
+		poco_error(Logger(), fmt::format("CGW CreateGroup failed for subscriber {} (group {}), rolling back groupsmap entry", subscriberId, groupId));
+		if (!db.DeleteVenue(subscriberId)) {
+			poco_error(Logger(), fmt::format("Rollback failed: could not delete groupsmap entry for subscriber {}", subscriberId));
+		}
+	}
+
 	static inline Poco::JSON::Object::Ptr ExtractPayloadOrSelf(const Poco::JSON::Object::Ptr &Obj) {
 		if (Obj && Obj->has("payload")) {
 			try {
@@ -54,60 +97,37 @@ namespace OpenWifi {
 		Utils::SetThreadName("subscriber-events");
 		Poco::AutoPtr<Poco::Notification> Note(Queue_.waitDequeueNotification());
 		while (Note && Running_) {
-			auto Msg = dynamic_cast<SubscriberEventMessage *>(Note.get());
-			if (Msg != nullptr) {
-				try {
-					Poco::JSON::Parser Parser;
-					auto Root = Parser.parse(Msg->Payload()).extract<Poco::JSON::Object::Ptr>();
-					auto Obj = ExtractPayloadOrSelf(Root);
-					if (!Obj.isNull()) {
-						std::string Type{};
-						std::string SubscriberId{};
-						if (Obj->has("type"))
-							Type = Obj->get("type").toString();
-						if (Obj->has("subscriberid"))
-							SubscriberId = Obj->get("subscriberid").toString();
-
-						if (!SubscriberId.empty() && Type == "infrastructure_subscriber_create") {
-							bool exists =StorageService()->GroupsMapDB().Exists("venueid", SubscriberId);
-							if (!exists) {
-								uint64_t groupId = 0;
-								if (StorageService()->GroupsMapDB().AddVenue(SubscriberId,groupId)) {
-									poco_information(Logger(),fmt::format("Created groupsmap entry for subscriber {} with group {}", SubscriberId, groupId));
-									if (!SDK::CGW::CreateGroup(groupId)) {
-										poco_warning(Logger(),fmt::format("CGW CreateGroup failed for subscriber {}(group {}), rolling back groupsmap entry",SubscriberId, groupId));
-										if (!StorageService()->GroupsMapDB().DeleteVenue(SubscriberId)) {
-											poco_warning(Logger(),fmt::format("Rollback failed: could not delete groupsmap entry for subscriber {}",SubscriberId));
-										}
-									}
-								} else {
-									poco_warning(Logger(),fmt::format("Failed to create groupsmap entry for subscriber {}",SubscriberId));
-								}
-							} else {
-								poco_debug(Logger(),fmt::format("Subscriber {} already in groupsmap; skipping CGW create",SubscriberId));
-							}
-						} else if (!SubscriberId.empty() && Type == "infrastructure_subscriber_delete") {
-							OpenWifi::GroupsMapRecord rec{};
-							if (StorageService()->GroupsMapDB().GetRecord("venueid", SubscriberId,rec)) {
-								poco_information(Logger(), fmt::format("Deleting CGW group {} for subscriber {}",rec.groupid, SubscriberId));
-								if (SDK::CGW::DeleteGroup(rec.groupid)) {
-									if (StorageService()->GroupsMapDB().DeleteVenue(SubscriberId)) {
-										poco_information(Logger(),fmt::format("Deleted groupsmap entry for subscriber {} group {}",SubscriberId, rec.groupid));
-									} else {
-										poco_warning(Logger(),fmt::format("Failed to delete groupsmap entry for subscriber {} after CGW deletion",SubscriberId));
-									}
-								} else {
-									poco_warning(Logger(),fmt::format("CGW DeleteGroup failed for subscriber {} (group {})",SubscriberId, rec.groupid));
-								}
-							} else {
-								poco_warning(Logger(), fmt::format("No groupsmap entry found for subscriber {} on delete event",SubscriberId));
-							}
-						}
-					}
-				} catch (const Poco::Exception &E) {
-					Logger().log(E);
-				}
+			auto *Msg = dynamic_cast<SubscriberEventMessage *>(Note.get());
+			if (!Msg) {
+				Note = Queue_.waitDequeueNotification();
+				continue;
 			}
+
+			try {
+				Poco::JSON::Parser parser;
+				auto root = parser.parse(Msg->Payload()).extract<Poco::JSON::Object::Ptr>();
+				auto obj = ExtractPayloadOrSelf(root);
+				if (obj.isNull()) {
+					Note = Queue_.waitDequeueNotification();
+					continue;
+				}
+
+				const std::string type = obj->has("type") ? obj->get("type").toString() : "";
+				const std::string subscriberId = obj->has("subscriberid") ? obj->get("subscriberid").toString() : "";
+				if (subscriberId.empty()) {
+					Note = Queue_.waitDequeueNotification();
+					continue;
+				}
+
+				if (type == "infrastructure_subscriber_create") {
+					HandleSubscriberCreate(subscriberId);
+				} else if (type == "infrastructure_subscriber_delete") {
+					HandleSubscriberDelete(subscriberId);
+				}
+			} catch (const Poco::Exception &e) {
+				Logger().log(e);
+			}
+		
 			Note = Queue_.waitDequeueNotification();
 		}
 	}
