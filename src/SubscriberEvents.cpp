@@ -124,8 +124,8 @@ namespace OpenWifi {
 				} else if (type == "infrastructure_subscriber_delete") {
 					HandleSubscriberDelete(subscriberId);
 				}
-			} catch (const Poco::Exception &e) {
-				Logger().log(e);
+			} catch (const std::exception &e) {
+				poco_error(Logger(), fmt::format("Subscriber Event std::exception {}", e.what()));
 			}
 		
 			Note = Queue_.waitDequeueNotification();

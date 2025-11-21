@@ -27,8 +27,8 @@ namespace OpenWifi {
             Poco::Data::Session Session = Pool_.get();
             Poco::Data::Statement Select(Session);
             Select << "select max(groupid) from " + TableName_, Poco::Data::Keywords::into(id), Poco::Data::Keywords::now;
-        } catch (...) {
-            poco_error(Logger(), "Exception in GroupsMapDB::NextId");
+        } catch (const std::exception &E) {
+            poco_error(Logger(), fmt::format("Exception in GroupsMapDB::NextId {}", E.what()));
         }
         return id + 1;
     }

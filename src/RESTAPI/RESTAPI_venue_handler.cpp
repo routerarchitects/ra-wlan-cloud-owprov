@@ -103,11 +103,11 @@ namespace OpenWifi {
 #ifdef CGW_INTEGRATION
                 uint64_t groupId = 0;
                 if (!StorageService()->GroupsMapDB().GetGroup(UUID, groupId)) {
-                        poco_error(Logger(), "DoDelete groupsmap lookup failure");
+						poco_error(Logger(), fmt::format("DoDelete groupsmap lookup failure {}", UUID));
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
                 if (!SDK::CGW::DeleteGroup(groupId)) {
-                        poco_error(Logger(), "DoDelete CGW deleteGroup failure");
+                        poco_error(Logger(), fmt::format("DoDelete CGW deleteGroup failure {}", groupId));
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
 #endif
@@ -133,11 +133,11 @@ namespace OpenWifi {
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
 #ifdef CGW_INTEGRATION
                 if (!DB_.DeleteRecord("id", UUID)) {
-                        poco_error(Logger(), "DoDelete venue delete failure");
+                        poco_error(Logger(), fmt::format("DoDelete venue delete failure {}", UUID));
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
                 if (!StorageService()->GroupsMapDB().DeleteVenue(UUID)) {
-                        poco_error(Logger(), "DoDelete groupsmap delete failure");
+                        poco_error(Logger(), fmt::format("DoDelete groupsmap delete failure {}", UUID));
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
 #else
@@ -239,12 +239,12 @@ namespace OpenWifi {
 #ifdef CGW_INTEGRATION
                 uint64_t groupId = 0;
                 if (!StorageService()->GroupsMapDB().AddVenue(NewObject.info.id, groupId)) {
-                        poco_error(Logger(), "DoPost groupsmap failure");
+                        poco_error(Logger(), fmt::format("DoPost groupsmap failure {}", NewObject.info.id));
                         return InternalError(RESTAPI::Errors::RecordNotCreated);
                 }
                 if (!SDK::CGW::CreateGroup(groupId)) {
                         StorageService()->GroupsMapDB().DeleteVenue(NewObject.info.id);
-                        poco_error(Logger(), "DoPost CGW createGroup failure");
+                        poco_error(Logger(), fmt::format("DoPost CGW createGroup failure{}", NewObject.info.id));
                         return InternalError(RESTAPI::Errors::RecordNotCreated);
                 }
 #endif

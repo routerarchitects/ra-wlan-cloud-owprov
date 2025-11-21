@@ -172,7 +172,7 @@ namespace OpenWifi {
 			}
 		}
 		else{
-			poco_error(Logger(), fmt::format("Venue empty"));
+			poco_error(Logger(), fmt::format("Venue empty for serial number {}", SerialNumber));
 		}
 
 #endif
