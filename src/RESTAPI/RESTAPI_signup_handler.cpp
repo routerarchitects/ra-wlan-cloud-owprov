@@ -18,168 +18,133 @@
 namespace OpenWifi {
 
 	void RESTAPI_signup_handler::DoPost() {
-		auto UserName = GetParameter("email");
-		Poco::toLowerInPlace(UserName);
-		Poco::trimInPlace(UserName);
+		auto norm = [](std::string s) {
+			Poco::toLowerInPlace(s);
+			Poco::trimInPlace(s);
+			return s;
+		};
 
-		auto macAddress = GetParameter("macAddress");
-		Poco::toLowerInPlace(macAddress);
-		Poco::trimInPlace(macAddress);
-
-		auto deviceID = GetParameter("deviceID");
-		Poco::toLowerInPlace(deviceID);
-		Poco::trimInPlace(deviceID);
-
-		auto registrationId = GetParameter("registrationId");
-		Poco::toLowerInPlace(registrationId);
-		Poco::trimInPlace(registrationId);
+		const auto UserName       = norm(GetParameter("email"));
+		const auto macAddress     = norm(GetParameter("macAddress"));
+		const auto deviceID       = norm(GetParameter("deviceID"));
+		const auto registrationId = norm(GetParameter("registrationId"));
+		const bool resend         = GetBoolParameter("resend", false);
 
 		if (UserName.empty() || macAddress.empty() || registrationId.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
-
 		if (!Utils::ValidEMailAddress(UserName)) {
 			return BadRequest(RESTAPI::Errors::InvalidEmailAddress);
 		}
-
 		if (!Utils::ValidSerialNumber(macAddress)) {
 			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
 		}
 
-		// find the operator id
+		Logger_.information(fmt::format(
+			"SIGNUP: Signup request for '{}' mac='{}' reg='{}' resend={}",
+			UserName, macAddress, registrationId, resend));
+
 		ProvObjects::Operator SignupOperator;
-		if (!StorageService()->OperatorDB().GetRecord("registrationId", registrationId,
-													  SignupOperator)) {
+		if (!StorageService()->OperatorDB().GetRecord("registrationId", registrationId, SignupOperator)) {
 			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
 		}
 
-		//  if a signup already exists for this user, we should just return its value completion
-		SignupDB::RecordVec SEs;
-		if (StorageService()->SignupDB().GetRecords(
-				0, 100, SEs, " email='" + UserName + "' and macAddress='" + macAddress + "' ")) {
-			for (const auto &i : SEs) {
+		// Lookup existing signup entries by email and device
+		ProvObjects::SignupEntry byEmail{};
+		const bool foundByEmail = StorageService()->SignupDB().GetRecord("email", UserName, byEmail);
 
-				if (!i.deviceID.empty() && i.deviceID != deviceID) {
-					return BadRequest(RESTAPI::Errors::InvalidDeviceID);
-				}
+		ProvObjects::SignupEntry byMac{};
+		const bool foundByMac = StorageService()->SignupDB().GetRecord("macAddress", macAddress, byMac);
 
-				if (i.statusCode == ProvObjects::SignupStatusCodes::SignupWaitingForEmail ||
-					i.statusCode == ProvObjects::SignupStatusCodes::SignupWaitingForDevice ||
-					i.statusCode == ProvObjects::SignupStatusCodes::SignupSuccess) {
-					poco_debug(
-						Logger(),
-						fmt::format("SIGNUP: Returning existing signup record for '{}'", i.email));
-					Poco::JSON::Object Answer;
-					i.to_json(Answer);
-					return ReturnObject(Answer);
-				}
-			}
-		}
-
-		// Return error if user already exists. We do not allow multiple users with same email
-		SignupDB::RecordVec UserInv;
-		if (StorageService()->SignupDB().GetRecords(0, 100, UserInv, " email='" + UserName + "' ")) {
-			poco_error(Logger(), fmt::format("SIGNUP: Email {} already registered", UserName));
+		// 1) Email exists but tied to another device => reject
+		if (foundByEmail && Poco::icompare(byEmail.macAddress, macAddress) != 0) {
+			poco_error(Logger(), fmt::format("SIGNUP: Email {} already registered (mac={})",
+											UserName, byEmail.macAddress));
 			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
 		}
 
-		// Return error if device is already provisioned with another subscriber. We do not
-		// allow multiple users with same device
-		SignupDB::RecordVec inv;
-		if (StorageService()->SignupDB().GetRecords(0, 100, inv, " macAddress='" + macAddress + "' ")) {
-			poco_error(Logger(), fmt::format("SIGNUP: Device {} already provisioned with another subscriber", macAddress));
+		// 2) Device exists but tied to another email => reject
+		if (foundByMac && Poco::icompare(byMac.email, UserName) != 0) {
+			poco_error(Logger(), fmt::format(
+				"SIGNUP: Device {} already provisioned with another subscriber (email={})",
+				macAddress, byMac.email));
 			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
 		}
 
-		//  So we do not have an outstanding signup...
-		//  Can we actually claim this serial number??? if not, we need to return an error
-		ProvObjects::InventoryTag IT;
-		std::string SerialNumber;
-		bool FoundIT = false;
-		for (int Index = 0; Index < 4; Index++) {
-			auto TrySerialNumber = Utils::SerialNumberToInt(macAddress);
-			for (uint i = 0; i < 4; ++i) {
-				SerialNumber = Utils::IntToSerialNumber(TrySerialNumber + i);
-				if (StorageService()->InventoryDB().GetRecord("serialNumber", SerialNumber, IT)) {
-					if (!IT.subscriber.empty()) {
-						return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
-					}
+		// Same (email, mac) entry (if any) will be reused if resend is true
+		ProvObjects::SignupEntry existing{};
+		bool haveSamePair = false;
 
-					if (!(IT.devClass.empty() || IT.devClass == "subscriber" ||
-						  IT.devClass == "any")) {
-						return BadRequest(RESTAPI::Errors::SerialNumberNotTheProperClass);
-					}
-					FoundIT = true;
-					break;
-				}
-			}
+		if (foundByEmail && Poco::icompare(byEmail.macAddress, macAddress) == 0) {
+			existing = byEmail;
+			haveSamePair = true;
+		} else if (foundByMac && Poco::icompare(byMac.email, UserName) == 0) {
+			existing = byMac;
+			haveSamePair = true;
 		}
 
-		//  OK, we can claim this device, can we create a userid?
-		//  Let's create one
-		//  If sec.signup("email",uuid);
-		auto SignupUUID = MicroServiceCreateUUID();
-		poco_debug(Logger(), fmt::format("SIGNUP: Creating signup entry for '{}', uuid='{}'",
-										 UserName, SignupUUID));
+		const bool reuseExisting = resend && haveSamePair;
 
+		// Reuse existing signup UUID for resend; otherwise generate a new one.
+		const auto SignupUUID = reuseExisting ? existing.info.id : MicroServiceCreateUUID();
+
+		poco_debug(Logger(), fmt::format(
+			"SIGNUP: {} request for '{}' mac='{}' reg='{}' uuid='{}'",
+			reuseExisting ? "Resend(reuse)" : "Create(new)",
+			UserName, macAddress, registrationId, SignupUUID));
+
+		// Forward request to security
 		Poco::JSON::Object Body;
-		OpenAPIRequestPost CreateUser(uSERVICE_SECURITY, "/api/v1/signup",
-									  {{"email", UserName},
-									   {"signupUUID", SignupUUID},
-									   {"owner", SignupOperator.info.id},
-									   {"operatorName", SignupOperator.registrationId}},
-									  Body, 30000);
+		OpenAPIRequestPost CreateUser(
+			uSERVICE_SECURITY,
+			"/api/v1/signup",
+			{{"email", UserName},
+			{"signupUUID", SignupUUID},
+			{"owner", SignupOperator.info.id},
+			{"operatorName", SignupOperator.registrationId},
+			{"resend", resend ? "true" : "false"}},
+			Body,
+			30000);
 
 		Poco::JSON::Object::Ptr Answer;
-		if (CreateUser.Do(Answer) == Poco::Net::HTTPServerResponse::HTTP_OK) {
-			SecurityObjects::UserInfo UI;
-
-			UI.from_json(Answer);
-			std::ostringstream os;
-			Answer->stringify(os);
-			poco_debug(Logger(), fmt::format("SIGNUP: email: '{}' signupID: '{}' userId: '{}'",
-											 UserName, SignupUUID, UI.id));
-
-			//  so create the Signup entry and modify the inventory
-			ProvObjects::SignupEntry SE;
-			SE.info.id = SignupUUID;
-			SE.info.created = SE.info.modified = SE.submitted = Utils::Now();
-			SE.completed = 0;
-			SE.macAddress = macAddress;
-			SE.error = 0;
-			SE.userId = UI.id;
-			SE.email = UserName;
-			SE.deviceID = deviceID;
-			SE.registrationId = registrationId;
-			SE.status = "waiting-for-email-verification";
-			SE.operatorId = SignupOperator.info.id;
-			SE.statusCode = ProvObjects::SignupStatusCodes::SignupWaitingForEmail;
-			StorageService()->SignupDB().CreateRecord(SE);
-			Signup()->AddOutstandingSignup(SE);
-
-			if (FoundIT) {
-				Poco::JSON::Object StateDoc;
-				StateDoc.set("method", "signup");
-				StateDoc.set("claimer", UserName);
-				StateDoc.set("claimerId", UI.id);
-				StateDoc.set("signupUUID", SignupUUID);
-				StateDoc.set("errorCode", 0);
-				StateDoc.set("date", Utils::Now());
-				StateDoc.set("status", "waiting for email-verification");
-				std::ostringstream os2;
-				StateDoc.stringify(os2);
-				IT.realMacAddress = macAddress;
-				IT.state = os2.str();
-				IT.info.modified = Utils::Now();
-				std::cout << "Updating inventory entry: " << SE.macAddress << std::endl;
-				StorageService()->InventoryDB().UpdateRecord("id", IT.info.id, IT);
-			}
-
-			Poco::JSON::Object SEAnswer;
-			SE.to_json(SEAnswer);
-			return ReturnObject(SEAnswer);
+		if (CreateUser.Do(Answer) != Poco::Net::HTTPServerResponse::HTTP_OK) {
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
 		}
-		return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+
+		SecurityObjects::UserInfo UI;
+		UI.from_json(Answer);
+
+		// Build the SignupEntry to return, then persist it (update vs create)
+		ProvObjects::SignupEntry se = reuseExisting ? existing : ProvObjects::SignupEntry{};
+
+		const auto now = Utils::Now();
+		if (reuseExisting) {
+			se.info.modified = now;
+		} else {
+			se.info.id = SignupUUID;
+			se.info.created = se.info.modified = se.submitted = now;
+			se.completed = 0;
+			se.macAddress = macAddress;
+			se.error = 0;
+			se.userId = UI.id;
+			se.email = UserName;
+			se.deviceID = deviceID;
+			se.registrationId = registrationId;
+			se.status = "waiting-for-email-verification";
+			se.operatorId = SignupOperator.info.id;
+			se.statusCode = ProvObjects::SignupStatusCodes::SignupWaitingForEmail;
+		}
+
+		if (reuseExisting) {
+			StorageService()->SignupDB().UpdateRecord("id", se.info.id, se);
+		} else {
+			StorageService()->SignupDB().CreateRecord(se);
+			Signup()->AddOutstandingSignup(se);
+		}
+
+		Poco::JSON::Object SEAnswer;
+		se.to_json(SEAnswer);
+		return ReturnObject(SEAnswer);
 	}
 
 	//  this will be called by the SEC backend once the password has been verified.
