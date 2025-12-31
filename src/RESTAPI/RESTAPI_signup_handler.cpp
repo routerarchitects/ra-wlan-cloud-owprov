@@ -17,6 +17,14 @@
 
 namespace OpenWifi {
 
+	/*
+		1) Record notExists + resend=true/false -> Create new UUID and call Security
+		2) Record exists(waiting-for-email-verification) + resend=true -> Reuse existing UUID and call Security
+		3) Record exists(waiting-for-email-verification) + resend=false -> UserAlreadyExists
+		4) Record exists(emailVerified) + resend=true/false -> UserAlreadyExists
+		5) Record exists(email) with different mac -> UserAlreadyExists
+		6) Record exists(mac) with different email -> SerialNumberAlreadyProvisioned
+	*/
 	void RESTAPI_signup_handler::DoPost() {
 		auto norm = [](std::string s) {
 			Poco::toLowerInPlace(s);
@@ -71,19 +79,12 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
 		}
 
-		// Same (email, mac) entry (if any) will be reused if resend is true
 		ProvObjects::SignupEntry existing{};
-		bool haveSamePair = false;
-
-		if (foundByEmail && Poco::icompare(byEmail.macAddress, macAddress) == 0) {
+		if (foundByEmail) { // If you are here and email exists, mac matches too
 			existing = byEmail;
-			haveSamePair = true;
-		} else if (foundByMac && Poco::icompare(byMac.email, UserName) == 0) {
-			existing = byMac;
-			haveSamePair = true;
 		}
 
-		const bool reuseExisting = resend && haveSamePair;
+		const bool reuseExisting = resend && foundByEmail;
 
 		// Reuse existing signup UUID for resend; otherwise generate a new one.
 		const auto SignupUUID = reuseExisting ? existing.info.id : MicroServiceCreateUUID();
@@ -107,8 +108,20 @@ namespace OpenWifi {
 			30000);
 
 		Poco::JSON::Object::Ptr Answer;
-		if (CreateUser.Do(Answer) != Poco::Net::HTTPServerResponse::HTTP_OK) {
-			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+		auto status = CreateUser.Do(Answer);
+
+		if (status != Poco::Net::HTTPServerResponse::HTTP_OK) {
+			// Pass through OWSEC's HTTP status and JSON body
+			Response->setStatus(status);
+
+			std::stringstream ss;
+			Poco::JSON::Stringifier::condense(Answer, ss);
+
+			Response->setContentType("application/json");
+			Response->setContentLength(ss.str().size());
+			auto &os = Response->send();
+			os << ss.str();
+			return;
 		}
 
 		SecurityObjects::UserInfo UI;
@@ -118,9 +131,7 @@ namespace OpenWifi {
 		ProvObjects::SignupEntry se = reuseExisting ? existing : ProvObjects::SignupEntry{};
 
 		const auto now = Utils::Now();
-		if (reuseExisting) {
-			se.info.modified = now;
-		} else {
+		if (!reuseExisting) {
 			se.info.id = SignupUUID;
 			se.info.created = se.info.modified = se.submitted = now;
 			se.completed = 0;
