@@ -25,6 +25,9 @@
 #include "sdks/SDK_gw.h"
 #include "sdks/SDK_sec.h"
 
+#ifdef CGW_INTEGRATION
+#include "sdks/SDK_cgw.h"
+#endif
 namespace OpenWifi {
 
 	void RESTAPI_inventory_handler::DoGet() {
@@ -142,6 +145,37 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		/* When device is removed from the venue, if venueId is present in groupsmap table.
+		*  Call DELETE /DeleteDeviceFromGroup of CGW-REST
+		*/
+#ifdef CGW_INTEGRATION
+		if (!Existing.venue.empty()) {
+			uint64_t groupId = 0;
+			if (!StorageService()->GroupsMapDB().GetGroup(Existing.venue, groupId)) {
+				poco_error(Logger(), fmt::format("{}: CGW groupsmap lookup failed for venue {}", SerialNumber, Existing.venue));
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
+
+
+			if (!Utils::ValidSerialNumber(SerialNumber)) {
+				poco_error(Logger(), fmt::format("{}: Invalid MAC/Serial for CGW mapping: {}", SerialNumber));
+				return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
+			}
+			std::string macHex = SerialNumber;
+			Poco::trimInPlace(macHex);
+			Poco::toLowerInPlace(macHex);
+			auto macColon = Utils::SerialToMAC(macHex);
+			// Call CGW API to remove device from infra for this group
+			if (!SDK::CGW::DeleteDeviceFromGroup(groupId, macColon)) {
+				poco_error(Logger(), fmt::format("{}: CGW DeleteDeviceFromGroup failed gid={} mac={}", SerialNumber, groupId, macColon));
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
+		}
+		else{
+			poco_error(Logger(), fmt::format("Venue empty for serial number {}", SerialNumber));
+		}
+
+#endif
 		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
 				  Existing.info.id);
 		RemoveMembership(StorageService()->VenueDB(), &ProvObjects::Venue::configurations,
@@ -267,6 +301,31 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
 
+		/* When device is added in the venue, if venueID is present in groupsmap table.
+		*  Call POST /AddDeviceToGroup of CGW-REST
+		*/
+#ifdef CGW_INTEGRATION
+		if (!NewObject.venue.empty()) {
+			uint64_t groupId = 0;
+			if (!StorageService()->GroupsMapDB().GetGroup(NewObject.venue, groupId)) {
+				poco_error(Logger(), fmt::format("{}: No CGW group mapping for venue {}", SerialNumber, NewObject.venue));
+				return BadRequest(RESTAPI::Errors::InternalError);
+			}
+
+			if (!Utils::ValidSerialNumber(SerialNumber)) {
+				poco_error(Logger(), fmt::format("Invalid MAC/Serial for CGW mapping: {}", SerialNumber));
+				return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
+			}
+			std::string macHex = SerialNumber;
+			Poco::trimInPlace(macHex);
+			Poco::toLowerInPlace(macHex);
+			auto macColon = Utils::SerialToMAC(macHex);
+			if (!SDK::CGW::AddDeviceToGroup(groupId, macColon)) {
+				poco_error(Logger(), fmt::format("{}: CGW AddDeviceToGroup failed gid={}", SerialNumber, groupId));
+				return BadRequest(RESTAPI::Errors::InternalError);
+			}
+		}
+#endif
 		if (DB_.CreateRecord(NewObject)) {
 			SDK::GW::Device::SetOwnerShip(this, SerialNumber, NewObject.entity, NewObject.venue,
 										  NewObject.subscriber);

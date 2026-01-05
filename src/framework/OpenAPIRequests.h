@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 // Created by stephane bourque on 2022-10-25.
 //
@@ -76,9 +81,17 @@ namespace OpenWifi {
 	  public:
 		explicit OpenAPIRequestDelete(const std::string &Type, const std::string &EndPoint,
 									  const Types::StringPairVec &QueryData, uint64_t msTimeout,
-									  const std::string &LoggingStr = "")
+									  const std::string &LoggingStr = ""
+#ifdef CGW_INTEGRATION
+									, const Poco::JSON::Object& Body = Poco::JSON::Object()
+#endif
+									)
 			: Type_(Type), EndPoint_(EndPoint), QueryData_(QueryData), msTimeout_(msTimeout),
-			  LoggingStr_(LoggingStr){};
+			  LoggingStr_(LoggingStr)
+#ifdef CGW_INTEGRATION
+					, Body_(Body)
+#endif				
+			{};
 		Poco::Net::HTTPServerResponse::HTTPStatus Do(const std::string &BearerToken = "");
 
 	  private:
@@ -86,8 +99,8 @@ namespace OpenWifi {
 		std::string EndPoint_;
 		Types::StringPairVec QueryData_;
 		uint64_t msTimeout_;
-		Poco::JSON::Object Body_;
 		std::string LoggingStr_;
+		Poco::JSON::Object Body_;
 	};
 
 } // namespace OpenWifi

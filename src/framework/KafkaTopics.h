@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 //	License type: BSD 3-Clause License
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
@@ -22,6 +27,10 @@ namespace OpenWifi::KafkaTopics {
 	inline const char * PROVISIONING_CHANGE = "provisioning_change";
 	inline const char * RRM = "rrm";
 
+//This is new topic on KAFKA introduced for subscriber creation/deletion messages  
+#ifdef CGW_INTEGRATION
+	inline const char * SUBSCRIBER_EVENT = "subscriber_event";
+#endif
 	namespace ServiceEvents {
 		inline const char * EVENT_JOIN = "join";
 		inline const char * EVENT_LEAVE = "leave";
