@@ -163,7 +163,6 @@ namespace OpenWifi {
 		auto SignupUUID = GetParameter("signupUUID");
 		auto Operation = GetParameter("operation");
 		auto UserId = GetParameter("userId");
-		auto macAddress = GetParameter("mac");
 
 		poco_information(Logger(), fmt::format("signup-progress: {} - {} ", SignupUUID, Operation));
 		if ((SignupUUID.empty() && UserId.empty()) || Operation.empty()) {
@@ -193,8 +192,15 @@ namespace OpenWifi {
 			SE.to_json(Answer);
 			return ReturnObject(Answer);
 		}
-
+		/*
+		 - For updateMac operation, the mac parameter must be present.
+		 - An empty value (mac="") is allowed and denotes deletion of macAddress from table.
+		*/
 		if (Operation == "updateMac") {
+			std::string macAddress;
+			if (!HasParameter("mac", macAddress)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
 			poco_information(Logger(),fmt::format("Updating Signup device to [{}] for subscriber: [{}].", macAddress, SE.email));
 			SE.macAddress = macAddress;
 			SE.serialNumber = macAddress;
