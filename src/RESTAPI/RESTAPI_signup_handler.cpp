@@ -162,16 +162,18 @@ namespace OpenWifi {
 	void RESTAPI_signup_handler::DoPut() {
 		auto SignupUUID = GetParameter("signupUUID");
 		auto Operation = GetParameter("operation");
+		auto UserId = GetParameter("userId");
 
 		poco_information(Logger(), fmt::format("signup-progress: {} - {} ", SignupUUID, Operation));
-		if (SignupUUID.empty() || Operation.empty()) {
+		if ((SignupUUID.empty() && UserId.empty()) || Operation.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
 		ProvObjects::SignupEntry SE;
 		poco_information(Logger(), fmt::format("signup-progress: {} - {} fetching entry",
 											   SignupUUID, Operation));
-		if (!StorageService()->SignupDB().GetRecord("id", SignupUUID, SE)) {
+		if (!StorageService()->SignupDB().GetRecord("id", SignupUUID, SE) &&
+			!StorageService()->SignupDB().GetRecord("userid", UserId, SE)) {
 			return NotFound();
 		}
 
@@ -186,6 +188,24 @@ namespace OpenWifi {
 			SE.statusCode = ProvObjects::SignupStatusCodes::SignupWaitingForDevice;
 			StorageService()->SignupDB().UpdateRecord("id", SE.info.id, SE);
 			Signup()->AddOutstandingSignup(SE);
+			Poco::JSON::Object Answer;
+			SE.to_json(Answer);
+			return ReturnObject(Answer);
+		}
+		/*
+		 - For updateMac operation, the mac parameter must be present.
+		 - An empty value (mac="") is allowed and denotes deletion of macAddress from table.
+		*/
+		if (Operation == "updateMac") {
+			std::string macAddress;
+			if (!HasParameter("mac", macAddress)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
+			poco_information(Logger(),fmt::format("Updating Signup device to [{}] for subscriber: [{}].", macAddress, SE.email));
+			SE.macAddress = macAddress;
+			SE.serialNumber = macAddress;
+			SE.info.modified = Utils::Now();
+			StorageService()->SignupDB().UpdateRecord("id", SE.info.id, SE);
 			Poco::JSON::Object Answer;
 			SE.to_json(Answer);
 			return ReturnObject(Answer);
