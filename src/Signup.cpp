@@ -117,10 +117,6 @@ namespace OpenWifi {
 								Logger(),
 								fmt::format("Creating subscriber device for {}", SD.serialNumber));
 							StorageService()->SubscriberDeviceDB().CreateRecord(SD);
-							poco_information(Logger(), fmt::format("Removing old inventory for {}",
-																   SD.serialNumber));
-							StorageService()->InventoryDB().DeleteRecord("serialNumber",
-																		 SD.serialNumber);
 
 							SE.status = "signup completed";
 							SE.serialNumber = SerialNumber;
