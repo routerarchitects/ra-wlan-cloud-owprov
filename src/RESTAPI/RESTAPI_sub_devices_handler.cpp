@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 // Created by stephane bourque on 2022-04-06.
 //
@@ -118,7 +123,9 @@ namespace OpenWifi {
 			Existing.configuration = UpdateObj.configuration;
 		}
 		StorageService()->SubscriberDeviceDB().UpdateRecord("id", uuid, Existing);
-		ApplyConfiguration(Existing.serialNumber);
+		if (!ApplyConfiguration(Existing.serialNumber)) {
+			return BadRequest(RESTAPI::Errors::SubConfigNotRefreshed);
+		}
 		return ReturnUpdatedObject(DB_, Existing, *this);
 	}
 
