@@ -135,6 +135,7 @@ namespace OpenWifi {
 			se.info.id = SignupUUID;
 			se.info.created = se.info.modified = se.submitted = now;
 			se.completed = 0;
+			se.serialNumber = macAddress;
 			se.macAddress = macAddress;
 			se.error = 0;
 			se.userId = UI.id;
@@ -246,7 +247,7 @@ namespace OpenWifi {
 			poco_information(Logger(),
 							 fmt::format("Looking for signup for {}: Mac {}", EMail, macAddress));
 			if (StorageService()->SignupDB().GetRecords(0, 100, SEs,
-														" serialNumber='" + macAddress + "' ")) {
+														" macAddress='" + macAddress + "' ")) {
 				return ReturnObject("signups", SEs);
 			}
 			return NotFound();
