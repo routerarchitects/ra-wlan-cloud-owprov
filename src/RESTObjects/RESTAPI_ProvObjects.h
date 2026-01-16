@@ -624,6 +624,7 @@ namespace OpenWifi::ProvObjects {
         std::string userId;
         std::string macAddress;
         std::string serialNumber;
+        std::string venueId;
         uint64_t submitted = 0;
         uint64_t completed = 0;
         std::string status;
@@ -689,6 +690,7 @@ namespace OpenWifi::ProvObjects {
         bool defaultOperator = false;
         Types::StringVec sourceIP;
         std::string registrationId;
+        Types::UUID_t entityId;
 
         void to_json(Poco::JSON::Object &Obj) const;
 

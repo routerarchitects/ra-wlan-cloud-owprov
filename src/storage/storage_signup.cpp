@@ -27,6 +27,7 @@ namespace OpenWifi {
 		ORM::Field{"email", ORM::FieldType::FT_TEXT},
 		ORM::Field{"userId", ORM::FieldType::FT_TEXT},
 		ORM::Field{"serialNumber", ORM::FieldType::FT_TEXT},
+		ORM::Field{"venueId", ORM::FieldType::FT_TEXT},
 		ORM::Field{"submitted", ORM::FieldType::FT_BIGINT},
 		ORM::Field{"completed", ORM::FieldType::FT_BIGINT},
 		ORM::Field{"status", ORM::FieldType::FT_TEXT},
@@ -135,15 +136,16 @@ void ORM::DB<OpenWifi::SignupDBRecordType, OpenWifi::ProvObjects::SignupEntry>::
 	Out.email = In.get<6>();
 	Out.userId = In.get<7>();
 	Out.serialNumber = In.get<8>();
-	Out.submitted = In.get<9>();
-	Out.completed = In.get<10>();
-	Out.status = In.get<11>();
-	Out.error = In.get<12>();
-	Out.statusCode = In.get<13>();
-	Out.macAddress = In.get<14>();
-	Out.deviceID = In.get<15>();
-	Out.registrationId = In.get<16>();
-	Out.operatorId = In.get<17>();
+	Out.venueId = In.get<9>();
+	Out.submitted = In.get<10>();
+	Out.completed = In.get<11>();
+	Out.status = In.get<12>();
+	Out.error = In.get<13>();
+	Out.statusCode = In.get<14>();
+	Out.macAddress = In.get<15>();
+	Out.deviceID = In.get<16>();
+	Out.registrationId = In.get<17>();
+	Out.operatorId = In.get<18>();
 }
 
 template <>
@@ -158,13 +160,14 @@ void ORM::DB<OpenWifi::SignupDBRecordType, OpenWifi::ProvObjects::SignupEntry>::
 	Out.set<6>(In.email);
 	Out.set<7>(In.userId);
 	Out.set<8>(In.serialNumber);
-	Out.set<9>(In.submitted);
-	Out.set<10>(In.completed);
-	Out.set<11>(In.status);
-	Out.set<12>(In.error);
-	Out.set<13>(In.statusCode);
-	Out.set<14>(In.macAddress);
-	Out.set<15>(In.deviceID);
-	Out.set<16>(In.registrationId);
-	Out.set<17>(In.operatorId);
+	Out.set<9>(In.venueId);
+	Out.set<10>(In.submitted);
+	Out.set<11>(In.completed);
+	Out.set<12>(In.status);
+	Out.set<13>(In.error);
+	Out.set<14>(In.statusCode);
+	Out.set<15>(In.macAddress);
+	Out.set<16>(In.deviceID);
+	Out.set<17>(In.registrationId);
+	Out.set<18>(In.operatorId);
 }

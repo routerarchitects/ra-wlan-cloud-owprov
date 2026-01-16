@@ -192,6 +192,9 @@ namespace OpenWifi::RESTAPI::Errors {
 		1082, "Invalid registration operator name."
 	};
 	static const struct msg RegistrationNameDuplicate { 1083, "Registration name must be unique." };
+	static const struct msg EntityAlreadyHasOperator {
+		1084, "Entity already has an operator."
+	};
 	static const struct msg SMSMFANotEnabled {
 		1084, "SMS is not enabled in the security service."
 	};

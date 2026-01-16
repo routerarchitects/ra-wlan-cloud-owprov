@@ -4,6 +4,7 @@
 
 #include "RESTAPI_operators_handler.h"
 #include "RESTAPI_db_helpers.h"
+#include "framework/orm.h"
 #include "framework/utils.h"
 
 namespace OpenWifi {
@@ -82,6 +83,18 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
 		}
 
+		if (RawObject->has("entityId")) {
+			if (NewObject.entityId.empty() ||
+				!StorageService()->EntityDB().Exists("id", NewObject.entityId)) {
+				return BadRequest(RESTAPI::Errors::EntityMustExist);
+			}
+
+			auto EscapedEntityId = ORM::Escape(NewObject.entityId);
+			if (DB_.Count(" entityId='" + EscapedEntityId + "' ") > 0) {
+				return BadRequest(RESTAPI::Errors::EntityAlreadyHasOperator);
+			}
+		}
+
 		ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info);
 		if (DB_.CreateRecord(NewObject)) {
 
@@ -150,6 +163,20 @@ namespace OpenWifi {
 
 		if (RawObject->has("deviceRules"))
 			Existing.deviceRules = UpdatedObj.deviceRules;
+
+		if (RawObject->has("entityId")) {
+			if (UpdatedObj.entityId.empty() ||
+				!StorageService()->EntityDB().Exists("id", UpdatedObj.entityId)) {
+				return BadRequest(RESTAPI::Errors::EntityMustExist);
+			}
+			auto EscapedEntityId = ORM::Escape(UpdatedObj.entityId);
+			auto EscapedId = ORM::Escape(Existing.info.id);
+			if (DB_.Count(" entityId='" + EscapedEntityId + "' and id!='" + EscapedId + "' ") >
+				0) {
+				return BadRequest(RESTAPI::Errors::EntityAlreadyHasOperator);
+			}
+			Existing.entityId = UpdatedObj.entityId;
+		}
 
 		return ReturnUpdatedObject(DB_, Existing, *this);
 	}
