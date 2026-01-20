@@ -179,6 +179,7 @@ add_executable(owprov
 
         src/FindCountry.h
         src/sdks/SDK_gw.cpp src/sdks/SDK_gw.h
+        src/sdks/SDK_analytics.cpp src/sdks/SDK_analytics.h
         src/sdks/SDK_prov.cpp src/sdks/SDK_prov.h
         src/sdks/SDK_sec.cpp src/sdks/SDK_sec.h
         src/SerialNumberCache.h src/SerialNumberCache.cpp
@@ -196,6 +197,7 @@ add_executable(owprov
         src/Kafka_ProvUpdater.cpp src/Kafka_ProvUpdater.h
         src/RESTAPI/RESTAPI_sub_devices_list_handler.cpp src/RESTAPI/RESTAPI_sub_devices_list_handler.h
         src/RESTAPI/RESTAPI_sub_devices_handler.cpp src/RESTAPI/RESTAPI_sub_devices_handler.h
+        src/RESTAPI/RESTAPI_subscriber_provision_handler.cpp src/RESTAPI/RESTAPI_subscriber_provision_handler.h
         src/RESTAPI/RESTAPI_service_class_list_handler.cpp src/RESTAPI/RESTAPI_service_class_list_handler.h
         src/RESTAPI/RESTAPI_service_class_handler.cpp src/RESTAPI/RESTAPI_service_class_handler.h
         src/RESTAPI/RESTAPI_operators_list_handler.cpp src/RESTAPI/RESTAPI_operators_list_handler.h

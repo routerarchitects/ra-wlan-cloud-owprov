@@ -261,6 +261,9 @@ namespace OpenWifi::RESTAPI::Errors {
 		1115, "Phone number could not be validated."
 	};
 	static const struct msg RootUsersNoOwners { 1116, "ROOT users may not have owners." };
+	static const struct msg EntityAlreadyHasOperator {
+		1117, "Entity already has an operator."
+	};
 	static const struct msg PartnerMustHaveEntity {
 		1118, "Partner user must belong to an entity."
 	};
