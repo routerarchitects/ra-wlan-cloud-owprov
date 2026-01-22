@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <utility>
+
 #include "Poco/StringTokenizer.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
@@ -68,7 +70,7 @@ namespace OpenWifi {
 	}
 	template <typename... Ts> void Extend_venue(Ts... args) { static_assert(sizeof...(args) == 2); }
 
-	template <typename R, typename Q = decltype(R{}.subscriber)>
+	template <typename R, typename Q = decltype(std::declval<R>().subscriber)>
 	void Extend_subscriber(const R &T, Poco::JSON::Object &EI) {
 		if constexpr (std::is_same_v<Q, std::string>) {
 			if (!T.subscriber.empty()) {
