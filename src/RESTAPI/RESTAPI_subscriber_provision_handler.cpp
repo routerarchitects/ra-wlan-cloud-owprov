@@ -105,7 +105,52 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::UpdateInventoryRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_provision_handler::DeleteVenueRecord(ProvisionContext &ctx) {
+		ProvObjects::Venue venueRecord;
+		poco_information(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Deleting venue record {}.",
+											   ctx.venueRecord.info.id));
+		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, venueRecord)) {
+			poco_error(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Venue record {} not found.",
+											 ctx.venueRecord.info.id));
+			NotFound();
+			return false;
+		}
+
+		ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::venues,
+						 ctx.operatorRecord.entityId, "", venueRecord.info.id);
+		VenueDB_.DeleteRecord("id", venueRecord.info.id);
+		return true;
+	}
+
+	bool RESTAPI_subscriber_provision_handler::LinkInventoryRecord(ProvisionContext &ctx) {
+		if (!InventoryDB_.GetRecord("serialNumber", ctx.signupRecord.serialNumber,
+									ctx.inventoryRecord)) {
+		poco_error(
+			Logger(),
+			fmt::format("[SUBSCRIBER_PROVISION]: Device with serial number {} not found.",
+						ctx.signupRecord.serialNumber));
+			NotFound();
+			return false;
+		}
+
+		ctx.inventoryRecord.venue = ctx.venueRecord.info.id;
+		ctx.inventoryRecord.info.modified = Utils::Now();
+
+		if (!InventoryDB_.UpdateRecord("id", ctx.inventoryRecord.info.id, ctx.inventoryRecord)) {
+			InternalError(RESTAPI::Errors::RecordNotUpdated);
+			return false;
+		}
+		AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices,
+					  ctx.inventoryRecord.venue, ctx.inventoryRecord.info.id);
+
+		poco_trace(Logger(),
+				   fmt::format("[SUBSCRIBER_PROVISION]: Device with serial number {} "
+							   "provisioned to subscriber {}.",
+							   ctx.inventoryRecord.serialNumber, ctx.signupRecord.userId));
+		return true;
+	}
+
+	bool RESTAPI_subscriber_provision_handler::UnlinkInventoryRecord(ProvisionContext &ctx) {
 		if (!InventoryDB_.GetRecord("serialNumber", ctx.signupRecord.serialNumber,
 									ctx.inventoryRecord)) {
 			poco_error(
@@ -115,32 +160,18 @@ namespace OpenWifi {
 			NotFound();
 			return false;
 		}
-		const std::string fromEntity = ctx.inventoryRecord.entity;
-		const std::string fromVenue = ctx.inventoryRecord.venue;
 
-		ctx.inventoryRecord.entity = "";
-		ctx.inventoryRecord.venue = ctx.venueRecord.info.id;
-		ctx.inventoryRecord.subscriber = ctx.signupRecord.userId;
-		ctx.inventoryRecord.devClass = Provisioning::DeviceClass::SUBSCRIBER;
+		const auto previousVenueId = ctx.inventoryRecord.venue;
+		ctx.venueRecord.info.id = previousVenueId;
+		ctx.inventoryRecord.venue = "";
 		ctx.inventoryRecord.info.modified = Utils::Now();
 
 		if (!InventoryDB_.UpdateRecord("id", ctx.inventoryRecord.info.id, ctx.inventoryRecord)) {
 			InternalError(RESTAPI::Errors::RecordNotUpdated);
 			return false;
 		}
-		ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::devices, fromEntity,
-						 ctx.inventoryRecord.entity, ctx.inventoryRecord.info.id);
-		ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, fromVenue,
-						 ctx.inventoryRecord.venue, ctx.inventoryRecord.info.id);
-		AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices,
-					  ctx.inventoryRecord.venue, ctx.inventoryRecord.info.id);
-		SDK::GW::Device::SetOwnerShip(this, ctx.inventoryRecord.serialNumber,
-									  ctx.inventoryRecord.entity, ctx.inventoryRecord.venue,
-									  ctx.inventoryRecord.subscriber);
-		poco_trace(Logger(),
-				   fmt::format("[SUBSCRIBER_PROVISION]: Device with serial number {} "
-							   "provisioned to subscriber {}.",
-							   ctx.inventoryRecord.serialNumber, ctx.signupRecord.userId));
+		RemoveMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices,
+						 previousVenueId, ctx.inventoryRecord.info.id);
 		return true;
 	}
 
@@ -196,24 +227,6 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::UnlinkInventoryRecord(ProvisionContext &ctx) {
-		if (!InventoryDB_.GetRecord("serialNumber", ctx.signupRecord.serialNumber,
-									ctx.inventoryRecord)) {
-			NotFound();
-			return false;
-		}
-
-		ctx.venueRecord.info.id = ctx.inventoryRecord.venue;
-		ctx.inventoryRecord.venue = "";
-		ctx.inventoryRecord.info.modified = Utils::Now();
-
-		if (!InventoryDB_.UpdateRecord("id", ctx.inventoryRecord.info.id, ctx.inventoryRecord)) {
-			InternalError(RESTAPI::Errors::RecordNotUpdated);
-			return false;
-		}
-		return true;
-	}
-
 	bool RESTAPI_subscriber_provision_handler::StopMonitoring(ProvisionContext &ctx) {
 		if (ctx.venueRecord.boards.empty()) {
 			return true;
@@ -245,23 +258,6 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::DeleteVenueRecord(ProvisionContext &ctx) {
-		ProvObjects::Venue venueRecord;
-		poco_information(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Deleting venue record {}.",
-											   ctx.venueRecord.info.id));
-		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, venueRecord)) {
-			poco_error(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Venue record {} not found.",
-											 ctx.venueRecord.info.id));
-			NotFound();
-			return false;
-		}
-
-		ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::venues,
-						 ctx.operatorRecord.entityId, "", venueRecord.info.id);
-		VenueDB_.DeleteRecord("id", venueRecord.info.id);
-		return true;
-	}
-
 	void RESTAPI_subscriber_provision_handler::DoPost() {
 		ProvisionContext ctx;
 
@@ -273,7 +269,7 @@ namespace OpenWifi {
 			return;
 		if (!CreateVenueRecord(ctx))
 			return;
-		if (!UpdateInventoryRecord(ctx))
+		if (!LinkInventoryRecord(ctx))
 			return;
 		if (!StartMonitoring(ctx))
 			return;

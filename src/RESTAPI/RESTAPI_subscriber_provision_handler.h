@@ -44,11 +44,11 @@ namespace OpenWifi {
 		bool LoadSignupRecord(ProvisionContext &ctx);
 		bool LoadOperatorRecord(ProvisionContext &ctx);
 		bool CreateVenueRecord(ProvisionContext &ctx);
-		bool UpdateInventoryRecord(ProvisionContext &ctx);
-		bool StartMonitoring(ProvisionContext &ctx);
-		bool UnlinkInventoryRecord(ProvisionContext &ctx);
-		bool StopMonitoring(ProvisionContext &ctx);
 		bool DeleteVenueRecord(ProvisionContext &ctx);
+		bool LinkInventoryRecord(ProvisionContext &ctx);
+		bool UnlinkInventoryRecord(ProvisionContext &ctx);
+		bool StartMonitoring(ProvisionContext &ctx);
+		bool StopMonitoring(ProvisionContext &ctx);
 
 		EntityDB &EntityDB_ = StorageService()->EntityDB();
 		InventoryDB &InventoryDB_ = StorageService()->InventoryDB();
