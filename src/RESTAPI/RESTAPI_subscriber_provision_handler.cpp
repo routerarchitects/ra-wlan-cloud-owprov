@@ -48,11 +48,11 @@ namespace OpenWifi {
 
 	bool RESTAPI_subscriber_provision_handler::LoadSignupRecord(ProvisionContext &ctx) {
 		if (!SignupDB_.GetRecord("userid", ctx.signupRecord.userId, ctx.signupRecord)) {
-			poco_error(
+			poco_trace(
 				Logger(),
 				fmt::format("[SUBSCRIBER_PROVISION]: Signup record for subscriber {} not Found",
 							ctx.signupRecord.userId));
-			NotFound();
+			OK(); // Idempotent operation
 			return false;
 		}
 
@@ -64,7 +64,6 @@ namespace OpenWifi {
 			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			return false;
 		}
-
 		ctx.venueName = ctx.signupRecord.email;
 		return true;
 	}
@@ -110,10 +109,10 @@ namespace OpenWifi {
 		poco_information(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Deleting venue record {}.",
 											   ctx.venueRecord.info.id));
 		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, venueRecord)) {
-			poco_error(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Venue record {} not found.",
+			poco_trace(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Venue record {} not found.",
 											 ctx.venueRecord.info.id));
-			NotFound();
-			return false;
+			OK(); // Idempotent operation
+			return true;
 		}
 
 		ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::venues,
@@ -153,11 +152,10 @@ namespace OpenWifi {
 	bool RESTAPI_subscriber_provision_handler::UnlinkInventoryRecord(ProvisionContext &ctx) {
 		if (!InventoryDB_.GetRecord("serialNumber", ctx.signupRecord.serialNumber,
 									ctx.inventoryRecord)) {
-			poco_error(
-				Logger(),
-				fmt::format("[SUBSCRIBER_PROVISION]: Device with serial number {} not found.",
+			poco_trace(Logger(),
+				fmt::format("[SUBSCRIBER_PROVISION]: Inventory Device with serial number {} not found.",
 							ctx.signupRecord.serialNumber));
-			NotFound();
+			OK(); // Idempotent operation
 			return false;
 		}
 
@@ -234,7 +232,7 @@ namespace OpenWifi {
 
 		ProvObjects::Venue venueRecord;
 		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, venueRecord)) {
-			NotFound();
+			OK(); // Idempotent operation
 			return false;
 		}
 
