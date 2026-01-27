@@ -156,7 +156,7 @@ namespace OpenWifi {
 				fmt::format("[SUBSCRIBER_PROVISION]: Inventory Device with serial number {} not found.",
 							ctx.signupRecord.serialNumber));
 			OK(); // Idempotent operation
-			return false;
+			return true;
 		}
 
 		const auto previousVenueId = ctx.inventoryRecord.venue;
@@ -240,8 +240,11 @@ namespace OpenWifi {
 			Poco::Net::HTTPServerResponse::HTTPStatus callStatus =
 				Poco::Net::HTTPServerResponse::HTTP_INTERNAL_SERVER_ERROR;
 			if (!SDK::Analytics::StopMonitoring(boardId, callStatus)) {
-				InternalError(RESTAPI::Errors::RecordNotUpdated);
-				return false;
+			poco_warning(Logger(),
+				fmt::format(
+				"[SUBSCRIBER_PROVISION][DELETE]: Failed to stop monitoring for board {} "
+				"(status {}). Continuing cleanup.",
+				boardId, static_cast<int>(callStatus)));
 			}
 		}
 
