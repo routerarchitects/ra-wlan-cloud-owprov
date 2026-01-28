@@ -43,6 +43,7 @@ namespace OpenWifi {
 		bool ParseRequest(const Poco::JSON::Object::Ptr &raw, ProvisionContext &ctx);
 		bool LoadSignupRecord(ProvisionContext &ctx);
 		bool LoadOperatorRecord(ProvisionContext &ctx);
+		bool LoadVenueRecord(ProvisionContext &ctx);
 		bool CreateVenueRecord(ProvisionContext &ctx);
 		bool DeleteVenueRecord(ProvisionContext &ctx);
 		bool LinkInventoryRecord(ProvisionContext &ctx);
