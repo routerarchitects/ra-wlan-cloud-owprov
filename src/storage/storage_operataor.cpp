@@ -25,7 +25,8 @@ namespace OpenWifi {
 		ORM::Field{"variables", ORM::FieldType::FT_TEXT},
 		ORM::Field{"defaultOperator", ORM::FieldType::FT_BOOLEAN},
 		ORM::Field{"sourceIP", ORM::FieldType::FT_TEXT},
-		ORM::Field{"registrationId", ORM::FieldType::FT_TEXT}};
+		ORM::Field{"registrationId", ORM::FieldType::FT_TEXT},
+		ORM::Field{"entityId", ORM::FieldType::FT_TEXT}};
 
 	static ORM::IndexVec OperatorDB_Indexes{
 		{std::string("operator2_name_index"),
@@ -84,6 +85,7 @@ void ORM::DB<OpenWifi::OperatorDBRecordType, OpenWifi::ProvObjects::Operator>::C
 	Out.defaultOperator = In.get<10>();
 	Out.sourceIP = OpenWifi::RESTAPI_utils::to_object_array(In.get<11>());
 	Out.registrationId = In.get<12>();
+	Out.entityId = In.get<13>();
 }
 
 template <>
@@ -102,4 +104,5 @@ void ORM::DB<OpenWifi::OperatorDBRecordType, OpenWifi::ProvObjects::Operator>::C
 	Out.set<10>(In.defaultOperator);
 	Out.set<11>(OpenWifi::RESTAPI_utils::to_string(In.sourceIP));
 	Out.set<12>(In.registrationId);
+	Out.set<13>(In.entityId);
 }
