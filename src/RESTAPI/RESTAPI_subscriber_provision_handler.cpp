@@ -85,7 +85,7 @@ namespace OpenWifi {
 	}
 
 	bool RESTAPI_subscriber_provision_handler::LoadVenueRecord(ProvisionContext &ctx) {
-		if (ctx.venueName.empty() && ctx.venueRecord.info.id.empty()) {
+		if (ctx.venueRecord.info.id.empty()) {
 			poco_debug(
 				Logger(),
 				fmt::format(
@@ -94,15 +94,14 @@ namespace OpenWifi {
 			return false;
 		}
 
-		if (!ctx.venueRecord.info.id.empty() &&
-			VenueDB_.GetRecord("id", ctx.venueRecord.info.id, ctx.venueRecord))
-			return true;
+		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, ctx.venueRecord)) {
+			poco_debug(Logger(),
+					   fmt::format("[SUBSCRIBER_PROVISION]: Venue {} not found for subscriber {}.",
+								   ctx.venueRecord.info.id, ctx.signupRecord.userId));
+			return false;
+		}
 
-		if (!ctx.venueName.empty() && VenueDB_.GetRecord("name", ctx.venueName, ctx.venueRecord))
-			return true;
-
-		poco_debug(Logger(), "[SUBSCRIBER_PROVISION]: Venue does not exist.");
-		return false;
+		return true;
 	}
 
 	bool RESTAPI_subscriber_provision_handler::CreateVenueRecord(ProvisionContext &ctx) {
@@ -309,12 +308,18 @@ namespace OpenWifi {
 	void RESTAPI_subscriber_provision_handler::DoPost() {
 		ProvisionContext ctx;
 
-		if (!ParseRequest(ParsedBody_, ctx)) return;
-		if (!LoadSignupRecord(ctx)) return;
-		if (!LoadOperatorRecord(ctx)) return;
-		if (!CreateVenueRecord(ctx))return;
-		if (!LinkInventoryRecord(ctx)) return;
-		if (!StartMonitoring(ctx)) return;
+		if (!ParseRequest(ParsedBody_, ctx))
+			return;
+		if (!LoadSignupRecord(ctx))
+			return;
+		if (!LoadOperatorRecord(ctx))
+			return;
+		if (!CreateVenueRecord(ctx))
+			return;
+		if (!LinkInventoryRecord(ctx))
+			return;
+		if (!StartMonitoring(ctx))
+			return;
 
 		Poco::JSON::Object Answer;
 		Answer.set("boardId", ctx.boardId);
@@ -331,15 +336,24 @@ namespace OpenWifi {
 
 		auto subscriberId = GetBinding("uuid", "");
 		if (subscriberId.empty()) {
-			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters); return;
+			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			return;
 		}
 		ctx.signupRecord.userId = subscriberId;
-		if (!LoadSignupRecord(ctx)) return;
-		if (!LoadOperatorRecord(ctx)) return;
-		if (!UnlinkInventoryRecord(ctx))return;
-		if (!LoadVenueRecord(ctx)) {OK(); return;}
-		if (!StopMonitoring(ctx)) return;
-		if (!DeleteVenueRecord(ctx)) return;
+		if (!LoadSignupRecord(ctx))
+			return;
+		if (!LoadOperatorRecord(ctx))
+			return;
+		if (!UnlinkInventoryRecord(ctx))
+			return;
+		if (!LoadVenueRecord(ctx)) {
+			OK();
+			return;
+		}
+		if (!StopMonitoring(ctx))
+			return;
+		if (!DeleteVenueRecord(ctx))
+			return;
 		OK();
 	}
 
