@@ -4,7 +4,7 @@
  * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
  */
 
-#include "RESTAPI_subscriber_provision_handler.h"
+#include "RESTAPI_subscriber_venue_handler.h"
 #include "Poco/String.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
@@ -17,7 +17,7 @@
 
 namespace OpenWifi {
 
-	bool RESTAPI_subscriber_provision_handler::ParseRequest(const Poco::JSON::Object::Ptr &raw,
+	bool RESTAPI_subscriber_venue_handler::ParseRequest(const Poco::JSON::Object::Ptr &raw,
 															ProvisionContext &ctx) {
 		if (!raw) {
 			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
@@ -46,11 +46,11 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::LoadSignupRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::LoadSignupRecord(ProvisionContext &ctx) {
 		if (!SignupDB_.GetRecord("userid", ctx.signupRecord.userId, ctx.signupRecord)) {
 			poco_error(
 				Logger(),
-				fmt::format("[SUBSCRIBER_PROVISION]: Signup record for subscriber {} not Found",
+				fmt::format("[SUBSCRIBER_VENUE]: Signup record for subscriber {} not Found",
 							ctx.signupRecord.userId));
 			NotFound();
 			return false;
@@ -58,7 +58,7 @@ namespace OpenWifi {
 
 		if (ctx.signupRecord.serialNumber.empty() || ctx.signupRecord.registrationId.empty() ||
 			ctx.signupRecord.email.empty()) {
-			poco_error(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: subscriber {} is missing "
+			poco_error(Logger(), fmt::format("[SUBSCRIBER_VENUE]: subscriber {} is missing "
 											 "required fields SerialNumber/RegistrationId/Email.",
 											 ctx.signupRecord.userId));
 			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
@@ -68,7 +68,7 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::LoadOperatorRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::LoadOperatorRecord(ProvisionContext &ctx) {
 		if (!OperatorDB_.GetRecord("registrationId", ctx.signupRecord.registrationId,
 								   ctx.operatorRecord)) {
 			BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
@@ -84,19 +84,19 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::LoadVenueRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::LoadVenueRecord(ProvisionContext &ctx) {
 		if (ctx.venueRecord.info.id.empty()) {
 			poco_debug(
 				Logger(),
 				fmt::format(
-					"[SUBSCRIBER_PROVISION]: Venue identification missing for subscriber {}.",
+					"[SUBSCRIBER_VENUE]: Venue identification missing for subscriber {}.",
 					ctx.signupRecord.userId));
 			return false;
 		}
 
 		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, ctx.venueRecord)) {
 			poco_debug(Logger(),
-					   fmt::format("[SUBSCRIBER_PROVISION]: Venue {} not found for subscriber {}.",
+					   fmt::format("[SUBSCRIBER_VENUE]: Venue [{} not found for subscriber {}.",
 								   ctx.venueRecord.info.id, ctx.signupRecord.userId));
 			return false;
 		}
@@ -104,10 +104,24 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::CreateVenueRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::CreateVenueRecord(ProvisionContext &ctx) {
 		if (VenueDB_.DoesVenueNameAlreadyExist(ctx.venueName, ctx.operatorRecord.entityId, "")) {
-			BadRequest(RESTAPI::Errors::VenuesNameAlreadyExists);
-			return false;
+			poco_debug(Logger(),
+					   fmt::format("[SUBSCRIBER_VENUE]: Venue name [{}] already exists for entity "
+								   "{}.",
+								   ctx.venueName, ctx.operatorRecord.entityId));
+			const auto upperName = Poco::toUpper(ctx.venueName);
+			const auto where = fmt::format("entity='{}' and upper(name)='{}'",
+										   ctx.operatorRecord.entityId, upperName);
+			if (!VenueDB_.GetRecord(ctx.venueRecord, where)) {
+				poco_error(Logger(),
+						   fmt::format("[SUBSCRIBER_VENUE]: Existing venue name [{}] not found for "
+									   "entity {}.",
+									   ctx.venueName, ctx.operatorRecord.entityId));
+				NotFound();
+				return false;
+			}
+			return true;
 		}
 
 		ProvObjects::CreateObjectInfo(UserInfo_.userinfo, ctx.venueRecord.info);
@@ -124,19 +138,19 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::DeleteVenueRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::DeleteVenueRecord(ProvisionContext &ctx) {
 		auto &venue = ctx.venueRecord;
 
 		if (venue.info.id.empty()) {
 			poco_error(
 				Logger(),
-				fmt::format("[SUBSCRIBER_PROVISION]: Venue record ID missing for deletion."));
+				fmt::format("[SUBSCRIBER_VENUE]: Venue record ID missing for deletion."));
 			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			return false;
 		}
 
 		poco_debug(Logger(),
-				   fmt::format("[SUBSCRIBER_PROVISION]: Deleting venue record {}.", venue.info.id));
+				   fmt::format("[SUBSCRIBER_VENUE]: Deleting venue record {}.", venue.info.id));
 
 		if (!VenueDB_.DeleteRecord("id", venue.info.id)) {
 			return BadRequest(RESTAPI::Errors::NoRecordsDeleted), false;
@@ -146,12 +160,12 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::LinkInventoryRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::LinkInventoryRecord(ProvisionContext &ctx) {
 		if (!InventoryDB_.GetRecord("serialNumber", ctx.signupRecord.serialNumber,
 									ctx.inventoryRecord)) {
 			poco_error(
 				Logger(),
-				fmt::format("[SUBSCRIBER_PROVISION]: Device with serial number {} not found.",
+				fmt::format("[SUBSCRIBER_VENUE]: Device with serial number {} not found.",
 							ctx.signupRecord.serialNumber));
 			NotFound();
 			return false;
@@ -168,19 +182,19 @@ namespace OpenWifi {
 					  ctx.inventoryRecord.venue, ctx.inventoryRecord.info.id);
 
 		poco_trace(Logger(),
-				   fmt::format("[SUBSCRIBER_PROVISION]: Device with serial number {} "
+				   fmt::format("[SUBSCRIBER_VENUE]: Device with serial number {} "
 							   "provisioned to subscriber {}.",
 							   ctx.inventoryRecord.serialNumber, ctx.signupRecord.userId));
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::UnlinkInventoryRecord(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::UnlinkInventoryRecord(ProvisionContext &ctx) {
 		if (!InventoryDB_.GetRecord("serialNumber", ctx.signupRecord.serialNumber,
 									ctx.inventoryRecord)) {
 			poco_trace(
 				Logger(),
 				fmt::format(
-					"[SUBSCRIBER_PROVISION]: Inventory Device with serial number {} not found.",
+					"[SUBSCRIBER_VENUE]: Inventory Device with serial number {} not found.",
 					ctx.signupRecord.serialNumber));
 			// Idempotent: nothing to unlink
 			return true;
@@ -188,7 +202,7 @@ namespace OpenWifi {
 
 		const auto previousVenueId = ctx.inventoryRecord.venue;
 		if (previousVenueId.empty()) {
-			poco_trace(Logger(), fmt::format("[SUBSCRIBER_PROVISION]: Inventory Device with serial "
+			poco_trace(Logger(), fmt::format("[SUBSCRIBER_VENUE]: Inventory Device with serial "
 											 "number {} not linked to any venue.",
 											 ctx.signupRecord.serialNumber));
 			// Idempotent: nothing to unlink
@@ -207,7 +221,7 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::StartMonitoring(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::StartMonitoring(ProvisionContext &ctx) {
 		if (!ctx.enableMonitoring) {
 			return true;
 		}
@@ -228,7 +242,7 @@ namespace OpenWifi {
 		Poco::Net::HTTPServerResponse::HTTPStatus boardStatus;
 		if (!SDK::Analytics::StartMonitoring(boardBody, boardResponse, boardStatus)) {
 			poco_error(Logger(),
-					   fmt::format("[SUBSCRIBER_PROVISION]: Failed to start monitoring "
+					   fmt::format("[SUBSCRIBER_VENUE]: Failed to start monitoring "
 								   "for venue {} (status {}).",
 								   ctx.venueRecord.info.id, static_cast<int>(boardStatus)));
 			InternalError(RESTAPI::Errors::RecordNotCreated);
@@ -237,7 +251,7 @@ namespace OpenWifi {
 
 		if (!boardResponse || !boardResponse->has("id")) {
 			poco_error(Logger(),
-					   "[SUBSCRIBER_PROVISION]: Monitoring started but no boardId returned.");
+					   "[SUBSCRIBER_VENUE]: Monitoring started but no boardId returned.");
 			InternalError(RESTAPI::Errors::RecordNotCreated);
 			return false;
 		}
@@ -245,7 +259,7 @@ namespace OpenWifi {
 		ctx.boardId = boardResponse->get("id").toString();
 		if (ctx.boardId.empty()) {
 			poco_error(Logger(),
-					   "[SUBSCRIBER_PROVISION]: Monitoring started but empty boardId returned.");
+					   "[SUBSCRIBER_VENUE]: Monitoring started but empty boardId returned.");
 			InternalError(RESTAPI::Errors::RecordNotCreated);
 			return false;
 		}
@@ -254,7 +268,7 @@ namespace OpenWifi {
 		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, venueRecord)) {
 			poco_error(
 				Logger(),
-				fmt::format("[SUBSCRIBER_PROVISION]: Venue {} not found after monitoring start.",
+				fmt::format("[SUBSCRIBER_VENUE]: Venue [{}] not found after monitoring start.",
 							ctx.venueRecord.info.id));
 			InternalError(RESTAPI::Errors::MissingOrInvalidParameters);
 			return false;
@@ -265,7 +279,7 @@ namespace OpenWifi {
 		if (!VenueDB_.UpdateRecord("id", venueRecord.info.id, venueRecord)) {
 			poco_error(
 				Logger(),
-				fmt::format("[SUBSCRIBER_PROVISION]: Failed to update venue {} with boardId {}.",
+				fmt::format("[SUBSCRIBER_VENUE]: Failed to update venue {} with boardId {}.",
 							venueRecord.info.id, ctx.boardId));
 			InternalError(RESTAPI::Errors::RecordNotUpdated);
 			return false;
@@ -274,7 +288,7 @@ namespace OpenWifi {
 		return true;
 	}
 
-	bool RESTAPI_subscriber_provision_handler::StopMonitoring(ProvisionContext &ctx) {
+	bool RESTAPI_subscriber_venue_handler::StopMonitoring(ProvisionContext &ctx) {
 		auto &venue = ctx.venueRecord;
 		if (venue.boards.empty()) {
 			return true;
@@ -285,7 +299,7 @@ namespace OpenWifi {
 				Poco::Net::HTTPServerResponse::HTTP_INTERNAL_SERVER_ERROR;
 			if (!SDK::Analytics::StopMonitoring(boardId, callStatus)) {
 				poco_warning(Logger(),
-							 fmt::format("[SUBSCRIBER_PROVISION][DELETE]: Failed to stop "
+							 fmt::format("[SUBSCRIBER_VENUE][DELETE]: Failed to stop "
 										 "monitoring for board {} (status {}). Continuing.",
 										 boardId, static_cast<int>(callStatus)));
 			}
@@ -305,7 +319,7 @@ namespace OpenWifi {
 		return true;
 	}
 
-	void RESTAPI_subscriber_provision_handler::DoPost() {
+	void RESTAPI_subscriber_venue_handler::DoPost() {
 		ProvisionContext ctx;
 
 		if (!ParseRequest(ParsedBody_, ctx))
@@ -331,10 +345,10 @@ namespace OpenWifi {
 		ReturnObject(Answer);
 	}
 
-	void RESTAPI_subscriber_provision_handler::DoDelete() {
+	void RESTAPI_subscriber_venue_handler::DoDelete() {
 		ProvisionContext ctx;
 
-		auto subscriberId = GetBinding("uuid", "");
+		auto subscriberId = GetParameter("subscriberId", "");
 		if (subscriberId.empty()) {
 			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			return;
