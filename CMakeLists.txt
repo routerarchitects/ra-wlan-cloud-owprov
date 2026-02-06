@@ -197,7 +197,7 @@ add_executable(owprov
         src/Kafka_ProvUpdater.cpp src/Kafka_ProvUpdater.h
         src/RESTAPI/RESTAPI_sub_devices_list_handler.cpp src/RESTAPI/RESTAPI_sub_devices_list_handler.h
         src/RESTAPI/RESTAPI_sub_devices_handler.cpp src/RESTAPI/RESTAPI_sub_devices_handler.h
-        src/RESTAPI/RESTAPI_subscriber_provision_handler.cpp src/RESTAPI/RESTAPI_subscriber_provision_handler.h
+        src/RESTAPI/RESTAPI_subscriber_venue_handler.cpp src/RESTAPI/RESTAPI_subscriber_venue_handler.h
         src/RESTAPI/RESTAPI_service_class_list_handler.cpp src/RESTAPI/RESTAPI_service_class_list_handler.h
         src/RESTAPI/RESTAPI_service_class_handler.cpp src/RESTAPI/RESTAPI_service_class_handler.h
         src/RESTAPI/RESTAPI_operators_list_handler.cpp src/RESTAPI/RESTAPI_operators_list_handler.h
