@@ -105,7 +105,12 @@ namespace OpenWifi {
 	}
 
 	bool RESTAPI_subscriber_venue_handler::CreateVenueRecord(ProvisionContext &ctx) {
-		if (VenueDB_.DoesVenueNameAlreadyExist(ctx.venueName, ctx.operatorRecord.entityId, "")) {
+		const auto escapedEntityId = ORM::Escape(ctx.operatorRecord.entityId);
+		const auto escapedUpperName = ORM::Escape(Poco::toUpper(ctx.venueName));
+		const auto where = fmt::format("entity='{}' and upper(name)='{}'",
+									   escapedEntityId, escapedUpperName);
+
+		if (VenueDB_.GetRecord(ctx.venueRecord, where)) {
 			poco_debug(Logger(),
 					   fmt::format("[SUBSCRIBER_VENUE]: Venue name [{}] already exists for entity "
 								   "{}.",
