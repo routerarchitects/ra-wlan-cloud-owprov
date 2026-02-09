@@ -10,9 +10,9 @@
 #include "StorageService.h"
 
 namespace OpenWifi {
-	class RESTAPI_subscriber_provision_handler : public RESTAPIHandler {
+	class RESTAPI_subscriber_venue_handler : public RESTAPIHandler {
 	  public:
-		RESTAPI_subscriber_provision_handler(const RESTAPIHandler::BindingMap &bindings,
+		RESTAPI_subscriber_venue_handler(const RESTAPIHandler::BindingMap &bindings,
 											 Poco::Logger &L,
 											 RESTAPI_GenericServerAccounting &Server,
 											 uint64_t TransactionId, bool Internal)
@@ -22,8 +22,7 @@ namespace OpenWifi {
 													  Poco::Net::HTTPRequest::HTTP_OPTIONS},
 							 Server, TransactionId, Internal) {}
 		static auto PathName() {
-			return std::list<std::string>{"/api/v1/subscriber/provision",
-										  "/api/v1/subscriber/provision/{uuid}"};
+			return std::list<std::string>{"/api/v1/subscriberVenue"};
 		};
 
 	  private:
