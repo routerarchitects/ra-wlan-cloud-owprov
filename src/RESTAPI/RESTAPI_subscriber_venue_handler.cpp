@@ -96,7 +96,7 @@ namespace OpenWifi {
 
 		if (!VenueDB_.GetRecord("id", ctx.venueRecord.info.id, ctx.venueRecord)) {
 			poco_debug(Logger(),
-					   fmt::format("[SUBSCRIBER_VENUE]: Venue [{} not found for subscriber {}.",
+					   fmt::format("[SUBSCRIBER_VENUE]: Venue [{}] not found for subscriber {}.",
 								   ctx.venueRecord.info.id, ctx.signupRecord.userId));
 			return false;
 		}
@@ -110,17 +110,6 @@ namespace OpenWifi {
 					   fmt::format("[SUBSCRIBER_VENUE]: Venue name [{}] already exists for entity "
 								   "{}.",
 								   ctx.venueName, ctx.operatorRecord.entityId));
-			const auto upperName = Poco::toUpper(ctx.venueName);
-			const auto where = fmt::format("entity='{}' and upper(name)='{}'",
-										   ctx.operatorRecord.entityId, upperName);
-			if (!VenueDB_.GetRecord(ctx.venueRecord, where)) {
-				poco_error(Logger(),
-						   fmt::format("[SUBSCRIBER_VENUE]: Existing venue name [{}] not found for "
-									   "entity {}.",
-									   ctx.venueName, ctx.operatorRecord.entityId));
-				NotFound();
-				return false;
-			}
 			return true;
 		}
 
