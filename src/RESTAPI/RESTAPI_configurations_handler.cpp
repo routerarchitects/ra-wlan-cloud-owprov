@@ -14,6 +14,16 @@
 #include "framework/ConfigurationValidator.h"
 
 namespace OpenWifi {
+	namespace {
+		inline ConfigurationValidator::ConfigurationType ResolveValidationType(
+			const Poco::JSON::Object::Ptr &rawObject, const std::string &fallbackType) {
+			std::string validationHint = fallbackType;
+			if (rawObject && rawObject->has("deviceGroup")) {
+				validationHint = rawObject->getValue<std::string>("deviceGroup");
+			}
+			return ConfigurationValidator::GetType(validationHint);
+		}
+	} // namespace
 
 	void RESTAPI_configurations_handler::DoGet() {
 		std::string UUID = GetBinding("uuid", "");
@@ -135,10 +145,13 @@ namespace OpenWifi {
 		}
 
 		std::vector<std::string> Errors;
-        auto deviceType = GetParameter("deviceType", "AP");
-        if (!ValidateConfigBlock(ConfigurationValidator::GetType(deviceType), NewObject, Errors)) {
-            return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
-        }
+		auto validationType = ResolveValidationType(RawObject, GetParameter("deviceType", "AP"));
+		if (!ValidateConfigBlock(validationType, NewObject, Errors)) {
+			for (const auto &Error : Errors) {
+				poco_warning(Logger(), "Configuration validation failed: " + Error);
+			}
+			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
+		}
 
 		Types::UUIDvec_t ToVariables;
 		if (RawObject->has("variables")) {
@@ -202,10 +215,13 @@ namespace OpenWifi {
 			Existing.deviceTypes = NewObject.deviceTypes;
 
 		std::vector<std::string> Errors;
-        auto deviceType = GetParameter("deviceType", "AP");
-        if (!ValidateConfigBlock(ConfigurationValidator::GetType(deviceType), NewObject, Errors)) {
-            return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
-        }
+		auto validationType = ResolveValidationType(RawObject, GetParameter("deviceType", "AP"));
+		if (!ValidateConfigBlock(validationType, NewObject, Errors)) {
+			for (const auto &Error : Errors) {
+				poco_warning(Logger(), "Configuration validation failed: " + Error);
+			}
+			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
+		}
 
 		if (RawObject->has("configuration")) {
 			Existing.configuration = NewObject.configuration;

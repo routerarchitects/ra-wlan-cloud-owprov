@@ -621,8 +621,17 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "realMacAddress", realMacAddress);
 			field_from_json(Obj, "doNotAllowOverrides", doNotAllowOverrides);
             field_from_json(Obj, "imported", imported);
-            field_from_json(Obj, "connected", connected);
-            field_from_json(Obj, "platform", platform);
+			field_from_json(Obj, "connected", connected);
+			field_from_json(Obj, "platform", platform);
+			if (Obj->has("deviceGroup")) {
+				std::string deviceGroup;
+				field_from_json(Obj, "deviceGroup", deviceGroup);
+				if (!deviceGroup.empty()) {
+					// For validation flows, deviceGroup takes precedence over platform.
+					Poco::toUpperInPlace(deviceGroup);
+					platform = deviceGroup;
+				}
+			}
 			return true;
 		} catch (...) {
 		}
