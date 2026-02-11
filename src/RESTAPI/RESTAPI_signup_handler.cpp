@@ -24,6 +24,7 @@ namespace OpenWifi {
 		4) Record exists(emailVerified) + resend=true/false -> UserAlreadyExists
 		5) Record exists(email) with different mac -> UserAlreadyExists
 		6) Record exists(mac) with different email -> SerialNumberAlreadyProvisioned
+		7) Record exists(mac) in inventory with another subscriber -> SerialNumberAlreadyProvisioned
 	*/
 	void RESTAPI_signup_handler::DoPost() {
 		auto norm = [](std::string s) {
@@ -57,12 +58,15 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
 		}
 
-		// Lookup existing signup entries by email and device
+		// Lookup existing signup entries by email and inventory record for device
 		ProvObjects::SignupEntry byEmail{};
 		const bool foundByEmail = StorageService()->SignupDB().GetRecord("email", UserName, byEmail);
 
 		ProvObjects::SignupEntry byMac{};
 		const bool foundByMac = StorageService()->SignupDB().GetRecord("macAddress", macAddress, byMac);
+
+		ProvObjects::InventoryTag bySerial{};
+		const bool foundBySerial = StorageService()->InventoryDB().GetRecord("serialNumber", macAddress, bySerial);
 
 		// 1) Email exists but tied to another device => reject
 		if (foundByEmail && Poco::icompare(byEmail.macAddress, macAddress) != 0) {
@@ -76,6 +80,14 @@ namespace OpenWifi {
 			poco_error(Logger(), fmt::format(
 				"SIGNUP: Device {} already provisioned with another subscriber (email={})",
 				macAddress, byMac.email));
+			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
+		}
+
+		// 3) Device exists in inventory but tied to a subscriber => reject
+		if (foundBySerial && !bySerial.subscriber.empty()) {
+			poco_error(Logger(), fmt::format(
+				"SIGNUP: Device {} already provisioned to another subscriber (id={})",
+				macAddress, bySerial.subscriber));
 			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
 		}
 
