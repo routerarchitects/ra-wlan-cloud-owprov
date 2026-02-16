@@ -18,7 +18,7 @@ namespace OpenWifi {
 	class ConfigurationValidator : public SubSystemServer {
 	  public:
 
-		enum class ConfigurationType { AP = 0 , SWITCH = 1};
+		enum class ConfigurationType { AP = 0 , SWITCH = 1, OLG = 2};
 
 		static auto instance() {
 			static auto instance_ = new ConfigurationValidator;
@@ -36,6 +36,8 @@ namespace OpenWifi {
 				return ConfigurationType::AP;
 			if (Type == "SWITCH")
 				return ConfigurationType::SWITCH;
+			if (Type == "OLG")
+				return ConfigurationType::OLG;
 			return ConfigurationType::AP;
 		}
 
@@ -43,7 +45,7 @@ namespace OpenWifi {
 		bool Initialized_ = false;
 		bool Working_ = false;
 		void Init();
-		std::array<valijson::Schema,2> 			RootSchema_;
+		std::array<valijson::Schema,3> 			RootSchema_;
 		bool SetSchema(ConfigurationType Type, const std::string &SchemaStr);
 
 		ConfigurationValidator()
