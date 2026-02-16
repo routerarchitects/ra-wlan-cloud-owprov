@@ -61,6 +61,10 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 		}
 
+		if (DB_.Exists("serialNumber", NewObject.serialNumber)) {
+			return BadRequest(RESTAPI::Errors::SerialNumberExists);
+		}
+
 		if (!ValidDbId(NewObject.managementPolicy, StorageService()->PolicyDB(), true,
 					   RESTAPI::Errors::UnknownManagementPolicyUUID, *this) ||
 			!ValidDbId(NewObject.operatorId, StorageService()->OperatorDB(), true,
@@ -101,6 +105,11 @@ namespace OpenWifi {
 			(RawObject->has("deviceRules") && !ValidDeviceRules(UpdateObj.deviceRules, *this)) ||
 			!ValidSerialNumber(UpdateObj.serialNumber, false, *this)) {
 			return;
+		}
+		SubscriberDeviceDB::RecordName ExistingSerialNumber;
+		if (DB_.GetRecord("serialNumber", UpdateObj.serialNumber, ExistingSerialNumber) &&
+			ExistingSerialNumber.info.id != uuid) {
+			return BadRequest(RESTAPI::Errors::SerialNumberExists);
 		}
 
 		ProvObjects::UpdateObjectInfo(RawObject, UserInfo_.userinfo, Existing.info);
