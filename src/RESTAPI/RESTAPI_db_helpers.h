@@ -566,7 +566,9 @@ namespace OpenWifi {
 						ProvObjects::DeviceConfiguration DC;
 						if (DC.from_json(ConfigurationDetails)) {
 							if constexpr (std::is_same_v<Type, ProvObjects::InventoryTag>) {
-								if (!ValidateConfigBlock(ConfigurationValidator::ConfigurationType::AP,DC, Errors)) {
+								auto ValidationType =
+									ConfigurationValidator::GetType(NewObject.platform);
+								if (!ValidateConfigBlock(ValidationType, DC, Errors)) {
 									break;
 								}
 								ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, DC.info);
