@@ -464,7 +464,7 @@ namespace OpenWifi {
                                     std::vector<std::string> &Errors) {
         static const std::vector<std::string> SectionNames{
                 "globals",	   "interfaces", "metrics", "radios",	  "services",	"unit",
-                "definitions", "ethernet",	 "switch",	"config-raw", "third-party"};
+                "definitions", "ethernet",	 "switch",	"config-raw", "third-party", "nat"};
 
         for (const auto &i : Config.configuration) {
             Poco::JSON::Parser P;
