@@ -7,13 +7,16 @@
 // Created by stephane bourque on 2022-02-20.
 //
 
-#include "RESTAPI_signup_handler.h"
+#include "RESTAPI_subscriber_handler.h"
+#include "Poco/String.h"
 #include "Signup.h"
 #include "StorageService.h"
 #include "framework/MicroServiceFuncs.h"
 #include "framework/MicroServiceNames.h"
 #include "framework/OpenAPIRequests.h"
+#include "framework/orm.h"
 #include "framework/utils.h"
+#include "sdks/SDK_sec.h"
 
 namespace OpenWifi {
 
@@ -22,11 +25,8 @@ namespace OpenWifi {
 		2) Record exists(waiting-for-email-verification) + resend=true -> Reuse existing UUID and call Security
 		3) Record exists(waiting-for-email-verification) + resend=false -> UserAlreadyExists
 		4) Record exists(emailVerified) + resend=true/false -> UserAlreadyExists
-		5) Record exists(email) with different mac -> UserAlreadyExists
-		6) Record exists(mac) with different email -> SerialNumberAlreadyProvisioned
-		7) Record exists(mac) in inventory with another subscriber -> SerialNumberAlreadyProvisioned
 	*/
-	void RESTAPI_signup_handler::DoPost() {
+	void RESTAPI_subscriber_handler::DoPost() {
 		auto norm = [](std::string s) {
 			Poco::toLowerInPlace(s);
 			Poco::trimInPlace(s);
@@ -34,65 +34,35 @@ namespace OpenWifi {
 		};
 
 		const auto UserName       = norm(GetParameter("email"));
-		const auto macAddress     = norm(GetParameter("macAddress"));
-		const auto deviceID       = norm(GetParameter("deviceID"));
 		const auto registrationId = norm(GetParameter("registrationId"));
 		const bool resend         = GetBoolParameter("resend", false);
 
-		if (UserName.empty() || macAddress.empty() || registrationId.empty()) {
+		if (UserName.empty() || registrationId.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 		if (!Utils::ValidEMailAddress(UserName)) {
 			return BadRequest(RESTAPI::Errors::InvalidEmailAddress);
 		}
-		if (!Utils::ValidSerialNumber(macAddress)) {
-			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
-		}
 
 		Logger_.information(fmt::format(
-			"SIGNUP: Signup request for '{}' mac='{}' reg='{}' resend={}",
-			UserName, macAddress, registrationId, resend));
+			"SIGNUP: Signup request for '{}' reg='{}' resend={}",
+			UserName, registrationId, resend));
 
 		ProvObjects::Operator SignupOperator;
 		if (!StorageService()->OperatorDB().GetRecord("registrationId", registrationId, SignupOperator)) {
 			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
 		}
+		if (SignupOperator.entityId.empty() ||
+			!StorageService()->EntityDB().Exists("id", SignupOperator.entityId)) {
+			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		}
 
-		// Lookup existing signup entries by email and inventory record for device
+		// Lookup existing signup entries by email
 		ProvObjects::SignupEntry byEmail{};
 		const bool foundByEmail = StorageService()->SignupDB().GetRecord("email", UserName, byEmail);
 
-		ProvObjects::SignupEntry byMac{};
-		const bool foundByMac = StorageService()->SignupDB().GetRecord("macAddress", macAddress, byMac);
-
-		ProvObjects::InventoryTag bySerial{};
-		const bool foundBySerial = StorageService()->InventoryDB().GetRecord("serialNumber", macAddress, bySerial);
-
-		// 1) Email exists but tied to another device => reject
-		if (foundByEmail && Poco::icompare(byEmail.macAddress, macAddress) != 0) {
-			poco_error(Logger(), fmt::format("SIGNUP: Email {} already registered (mac={})",
-											UserName, byEmail.macAddress));
-			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
-		}
-
-		// 2) Device exists but tied to another email => reject
-		if (foundByMac && Poco::icompare(byMac.email, UserName) != 0) {
-			poco_error(Logger(), fmt::format(
-				"SIGNUP: Device {} already provisioned with another subscriber (email={})",
-				macAddress, byMac.email));
-			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
-		}
-
-		// 3) Device exists in inventory but tied to a subscriber => reject
-		if (foundBySerial && !bySerial.subscriber.empty()) {
-			poco_error(Logger(), fmt::format(
-				"SIGNUP: Device {} already provisioned to another subscriber (id={})",
-				macAddress, bySerial.subscriber));
-			return BadRequest(RESTAPI::Errors::SerialNumberAlreadyProvisioned);
-		}
-
 		ProvObjects::SignupEntry existing{};
-		if (foundByEmail) { // If you are here and email exists, mac matches too
+		if (foundByEmail) {
 			existing = byEmail;
 		}
 
@@ -102,9 +72,9 @@ namespace OpenWifi {
 		const auto SignupUUID = reuseExisting ? existing.info.id : MicroServiceCreateUUID();
 
 		poco_debug(Logger(), fmt::format(
-			"SIGNUP: {} request for '{}' mac='{}' reg='{}' uuid='{}'",
+			"SIGNUP: {} request for '{}' reg='{}' uuid='{}'",
 			reuseExisting ? "Resend(reuse)" : "Create(new)",
-			UserName, macAddress, registrationId, SignupUUID));
+			UserName, registrationId, SignupUUID));
 
 		// Forward request to security
 		Poco::JSON::Object Body;
@@ -147,12 +117,9 @@ namespace OpenWifi {
 			se.info.id = SignupUUID;
 			se.info.created = se.info.modified = se.submitted = now;
 			se.completed = 0;
-			se.serialNumber = macAddress;
-			se.macAddress = macAddress;
 			se.error = 0;
 			se.userId = UI.id;
 			se.email = UserName;
-			se.deviceID = deviceID;
 			se.registrationId = registrationId;
 			se.status = "waiting-for-email-verification";
 			se.operatorId = SignupOperator.info.id;
@@ -166,13 +133,27 @@ namespace OpenWifi {
 			Signup()->AddOutstandingSignup(se);
 		}
 
+		// Ensure a subscriber-scoped venue exists under the operator's entity.
+		if (!StorageService()->VenueDB().DoesVenueNameAlreadyExist(
+				UserName, SignupOperator.entityId, "")) {
+			ProvObjects::Venue SubscriberVenue;
+			ProvObjects::CreateObjectInfo(UserInfo_.userinfo, SubscriberVenue.info);
+			SubscriberVenue.info.name = UserName;
+			SubscriberVenue.entity = SignupOperator.entityId;
+			if (!StorageService()->VenueDB().CreateRecord(SubscriberVenue)) {
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
+			StorageService()->EntityDB().AddVenue("id", SubscriberVenue.entity,
+												  SubscriberVenue.info.id);
+		}
+
 		Poco::JSON::Object SEAnswer;
 		se.to_json(SEAnswer);
 		return ReturnObject(SEAnswer);
 	}
 
 	//  this will be called by the SEC backend once the password has been verified.
-	void RESTAPI_signup_handler::DoPut() {
+	void RESTAPI_subscriber_handler::DoPut() {
 		auto SignupUUID = GetParameter("signupUUID");
 		auto Operation = GetParameter("operation");
 		auto UserId = GetParameter("userId");
@@ -229,7 +210,7 @@ namespace OpenWifi {
 		return BadRequest(RESTAPI::Errors::UnknownId);
 	}
 
-	void RESTAPI_signup_handler::DoGet() {
+	void RESTAPI_subscriber_handler::DoGet() {
 		auto EMail = ORM::Escape(GetParameter("email"));
 		auto SignupUUID = GetParameter("signupUUID");
 		auto macAddress = ORM::Escape(GetParameter("macAddress"));
@@ -274,29 +255,76 @@ namespace OpenWifi {
 		return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 	}
 
-	void RESTAPI_signup_handler::DoDelete() {
-		auto EMail = GetParameter("email", "");
-		auto SignupUUID = GetParameter("signupUUID", "");
-		auto macAddress = GetParameter("macAddress", "");
-		auto deviceID = GetParameter("deviceID", "");
+	void RESTAPI_subscriber_handler::DoDelete() {
+		auto subscriberId = GetBinding("id", "");
+		if (subscriberId.empty()) {
+			subscriberId = GetParameter("subscriberId", "");
+		}
+		if (subscriberId.empty()) {
+			poco_warning(Logger(),
+						 "[SUBSCRIBER_DELETE]: Missing subscriberId in request.");
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		}
 
-		if (!SignupUUID.empty()) {
-			if (StorageService()->SignupDB().DeleteRecord("id", SignupUUID)) {
-				return OK();
-			}
-			return NotFound();
-		} else if (!EMail.empty()) {
-			if (StorageService()->SignupDB().DeleteRecord("email", EMail)) {
-				return OK();
-			}
-			return NotFound();
-		} else if (!macAddress.empty()) {
-			if (StorageService()->SignupDB().DeleteRecord("serialNumber", macAddress)) {
-				return OK();
-			}
+		ProvObjects::SignupEntry signupRecord;
+		if (!StorageService()->SignupDB().GetRecord("userid", subscriberId, signupRecord)) {
+			poco_warning(Logger(), fmt::format(
+									 "[SUBSCRIBER_DELETE]: Signup record not found for subscriber [{}].",
+									 subscriberId));
 			return NotFound();
 		}
-		return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+
+		auto inventoryCount = StorageService()->InventoryDB().Count(
+			StorageService()->InventoryDB().OP("subscriber", ORM::EQ, subscriberId));
+		auto subscriberDeviceCount = StorageService()->SubscriberDeviceDB().Count(
+			StorageService()->SubscriberDeviceDB().OP("subscriberId", ORM::EQ, subscriberId));
+		if (inventoryCount > 0 || subscriberDeviceCount > 0) {
+			poco_warning(Logger(),
+						 fmt::format("[SUBSCRIBER_DELETE]: subscriber [{}] still has associated "
+									 "devices. Deletion rejected.",
+									 subscriberId));
+			return BadRequest(RESTAPI::Errors::StillInUse);
+		}
+
+		if (!signupRecord.registrationId.empty() && !signupRecord.email.empty()) {
+			ProvObjects::Operator signupOperator;
+			if (StorageService()->OperatorDB().GetRecord("registrationId", signupRecord.registrationId,
+														 signupOperator) &&
+				!signupOperator.entityId.empty()) {
+				const auto where =
+					fmt::format("entity='{}' and upper(name)='{}'",
+								ORM::Escape(signupOperator.entityId),
+								ORM::Escape(Poco::toUpper(signupRecord.email)));
+
+				ProvObjects::Venue subscriberVenue;
+				if (StorageService()->VenueDB().GetRecord(subscriberVenue, where)) {
+					if (!subscriberVenue.devices.empty()) {
+						poco_warning(Logger(), fmt::format(
+												 "[SUBSCRIBER_DELETE]: Venue [{}] still has {} "
+												 "devices for subscriber [{}].",
+												 subscriberVenue.info.id,
+												 subscriberVenue.devices.size(), subscriberId));
+						return BadRequest(RESTAPI::Errors::StillInUse);
+					}
+					if (!subscriberVenue.entity.empty()) {
+						StorageService()->EntityDB().DeleteVenue("id", subscriberVenue.entity,
+																 subscriberVenue.info.id);
+					}
+					if (!StorageService()->VenueDB().DeleteRecord("id", subscriberVenue.info.id)) {
+						return BadRequest(RESTAPI::Errors::NoRecordsDeleted);
+					}
+				}
+			}
+		}
+
+		if (!SDK::Sec::Subscriber::Delete(this, subscriberId)) {
+			return BadRequest(RESTAPI::Errors::CouldNotBeDeleted);
+		}
+
+		if (!StorageService()->SignupDB().DeleteRecord("id", signupRecord.info.id)) {
+			return BadRequest(RESTAPI::Errors::NoRecordsDeleted);
+		}
+		return OK();
 	}
 
 } // namespace OpenWifi

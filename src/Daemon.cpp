@@ -39,7 +39,7 @@ namespace OpenWifi {
 												ConfigurationValidator(), SerialNumberCache(),
 												AutoDiscovery(), JobController(),
 												UI_WebSocketClientServer(), FindCountryFromIP(),
-												Signup(), FileDownloader(),
+												FileDownloader(),
                                                 OpenRoaming_GlobalReach(),
                                                 OpenRoaming_Orion(), OpenRoaming_Radsec(),
                                                 OpenRoaming_GenericRadius()
