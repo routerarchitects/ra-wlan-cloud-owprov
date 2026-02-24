@@ -47,7 +47,7 @@ namespace OpenWifi {
 
 		//  Let's see if there are any subscribers in this operator
 		auto Count =
-			StorageService()->SubscriberDeviceDB().Count(fmt::format(" operatorId='{}'", uuid));
+			StorageService()->SignupDB().Count(fmt::format(" operatorId='{}'", uuid));
 		if (Count > 0) {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}

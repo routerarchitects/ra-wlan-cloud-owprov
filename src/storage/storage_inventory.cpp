@@ -10,6 +10,7 @@
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
 #include "SerialNumberCache.h"
 #include "StorageService.h"
+#include "framework/SubscriberProvisioning.h"
 #include "framework/MicroServiceFuncs.h"
 #include "framework/OpenWifiTypes.h"
 #include "framework/RESTAPI_utils.h"
@@ -143,6 +144,15 @@ namespace OpenWifi {
 							"%s: could not set GW entity/venue property.", NewDevice.serialNumber));
 					}
 				}
+
+				SubscriberProvisioning::SyncOptions syncOptions;
+				if (!SubscriberProvisioning::SyncInventoryForSerialNumber(NewDevice.serialNumber,
+																		  Logger(), syncOptions)) {
+					poco_warning(Logger(),
+								 Poco::format("%s: subscriber auto-sync failed.",
+											  NewDevice.serialNumber));
+				}
+
 				Logger().information(Poco::format("Adding %s to inventory.", SerialNumber));
 				return true;
 			} else {

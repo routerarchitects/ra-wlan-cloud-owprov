@@ -21,6 +21,7 @@
 #include "SerialNumberCache.h"
 #include "StorageService.h"
 #include "Tasks/VenueConfigUpdater.h"
+#include "framework/SubscriberProvisioning.h"
 #include "framework/utils.h"
 #include "sdks/SDK_gw.h"
 #include "sdks/SDK_sec.h"
@@ -140,6 +141,17 @@ namespace OpenWifi {
 		if (SerialNumber.empty() ||
 			!DB_.GetRecord(RESTAPI::Protocol::SERIALNUMBER, SerialNumber, Existing)) {
 			return NotFound();
+		}
+
+		const auto subscriberAssociationExists =
+			!Existing.subscriber.empty() ||
+			StorageService()->SubscriberDeviceDB().Exists("serialNumber", Existing.serialNumber);
+		if (subscriberAssociationExists) {
+			poco_warning(Logger(), fmt::format("[INVENTORY_DELETE]: Rejecting delete for serial "
+											   "[{}] because it is subscriber-associated. "
+											   "Use subscriber device delete API.",
+											   Existing.serialNumber));
+			return BadRequest(RESTAPI::Errors::SubscriberDeviceDeleteRequiresSubscriberApi);
 		}
 
 		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
@@ -282,6 +294,14 @@ namespace OpenWifi {
 							 NewObject.entity, NewObject.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, "",
 							 NewObject.venue, NewObject.info.id);
+			SubscriberProvisioning::SyncOptions syncOptions;
+			syncOptions.client = this;
+			if (!SubscriberProvisioning::SyncInventoryForSerialNumber(SerialNumber, Logger(),
+																	  syncOptions)) {
+				poco_warning(Logger(), fmt::format("[INVENTORY_CREATE]: Subscriber sync failed for "
+												   "serial [{}].",
+												   SerialNumber));
+			}
 
 			ProvObjects::InventoryTag NewTag;
 			DB_.GetRecord("id", NewObject.info.id, NewTag);

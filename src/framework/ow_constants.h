@@ -435,6 +435,21 @@ namespace OpenWifi::RESTAPI::Errors {
     static const struct msg InvalidRadiusServer { 1191, "Invalid Radius Server." };
 
 	static const struct msg InvalidRRMAction { 1192, "Invalid RRM Action." };
+	static const struct msg InvalidSubscriberDeviceGroup {
+		1193, "Invalid deviceGroup. Must be either 'olg' or 'ap'."
+	};
+	static const struct msg FirstSubscriberDeviceMustBeOLG {
+		1194, "First subscriber device must have deviceGroup 'olg'."
+	};
+	static const struct msg OnlyFirstSubscriberDeviceCanBeOLG {
+		1195, "Only the first subscriber device can have deviceGroup 'olg'."
+	};
+	static const struct msg MustDeleteAPDevicesBeforeOLG {
+		1196, "Delete subscriber AP devices first. The OLG device can only be deleted last."
+	};
+	static const struct msg SubscriberDeviceDeleteRequiresSubscriberApi {
+		1197, "This device is linked to a subscriber. Delete it from the Subscriber page."
+	};
 
     static const struct msg SimulationDoesNotExist {
         7000, "Simulation Instance ID does not exist."
