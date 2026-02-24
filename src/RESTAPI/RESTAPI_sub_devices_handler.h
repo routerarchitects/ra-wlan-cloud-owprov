@@ -19,12 +19,49 @@ namespace OpenWifi {
 													  Poco::Net::HTTPRequest::HTTP_DELETE,
 													  Poco::Net::HTTPRequest::HTTP_OPTIONS},
 							 Server, TransactionId, Internal) {}
-		static auto PathName() {
-			return std::list<std::string>{"/api/v1/subscriberDevice/{uuid}"};
-		};
-		bool ApplyConfiguration(const std::string &SerialNumber);
+			static auto PathName() {
+				return std::list<std::string>{"/api/v1/subscriberDevice/{uuid}"};
+			};
+			bool PushConfigurationToDevice(const std::string &SerialNumber);
+			bool PushConfigurationIfInInventory(const std::string &SerialNumber);
 
 	  private:
+		bool LoadDeviceFromBinding(ProvObjects::SubscriberDevice &device, bool allowSerialLookup);
+		bool ValidateDeleteRequest(const std::string &deviceIdOrSerial,
+								   ProvObjects::SubscriberDevice &device);
+		bool ParseAndValidatePutRequest(const std::string &uuid,
+										SubscriberDeviceDB::RecordName &existingObject,
+										SubscriberDeviceDB::RecordName &updateObject);
+		bool ParseAndValidatePostRequest(SubscriberDeviceDB::RecordName &newObject);
+		bool ValidateAndNormalizeDeviceGroupForUpdate(
+			SubscriberDeviceDB::RecordName &existingObject,
+			const SubscriberDeviceDB::RecordName &updateObject,
+			const Poco::JSON::Object::Ptr &rawObject);
+		bool ValidateAndNormalizeDeviceGroup(SubscriberDeviceDB::RecordName &newObject);
+		bool HasPutRequestChanges(const SubscriberDeviceDB::RecordName &existingObject,
+								  const SubscriberDeviceDB::RecordName &updateObject,
+								  const Poco::JSON::Object::Ptr &rawObject) const;
+		bool HasPutConfigurationChange(const SubscriberDeviceDB::RecordName &existingObject,
+									  const SubscriberDeviceDB::RecordName &updateObject,
+									  const Poco::JSON::Object::Ptr &rawObject) const;
+		bool ApplyPutRequest(const SubscriberDeviceDB::RecordName &updateObject,
+							 SubscriberDeviceDB::RecordName &existingObject,
+							 const Poco::JSON::Object::Ptr &rawObject);
+		void ApplyPostCreateSync(const SubscriberDeviceDB::RecordName &newObject);
+		void ApplyPostUpdateSync(const SubscriberDeviceDB::RecordName &beforeUpdate,
+								 const SubscriberDeviceDB::RecordName &afterUpdate);
+		bool StopMonitoringForDeleteIfNeeded(const ProvObjects::SubscriberDevice &existingObject,
+											 bool &monitoringStopped);
+		void RestoreMonitoringAfterDeleteFailure(
+			const ProvObjects::SubscriberDevice &existingObject);
+		void CleanupInventoryAssociations(const ProvObjects::InventoryTag &inventoryRecord);
+		void DeleteInventoryForSubscriberDevice(
+			const ProvObjects::SubscriberDevice &existingObject);
+		bool DeleteSubscriberDevice(const ProvObjects::SubscriberDevice &existingObject);
+		bool CreateSubscriberDeviceRecord(const SubscriberDeviceDB::RecordName &newObject);
+		void ReturnSubscriberDeviceObject(const ProvObjects::SubscriberDevice &device);
+		void ReturnSubscriberDeviceRecord(const std::string &uuid);
+
 		SubscriberDeviceDB &DB_ = StorageService()->SubscriberDeviceDB();
 		void DoGet() final;
 		void DoPost() final;
