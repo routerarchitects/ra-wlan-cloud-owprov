@@ -1188,6 +1188,10 @@ components:
           format: uuid
         deviceType:
           type: string
+        deviceGroup:
+          type: string
+          description: Device group role. `olg` marks the first subscriber device and `ap` marks additional subscriber devices.
+          example: olg
         subscriberId:
           type: string
           format: uuid
@@ -1213,8 +1217,13 @@ components:
         suspended:
           type: boolean
           default: false
+        configurationId:
+          type: string
+          format: uuid
         configuration:
           type: array
+          deprecated: true
+          description: Legacy inline configuration payload. If provided, owprov will store it in configurations and link via configurationId.
           items:
             $ref: '#/components/schemas/DeviceConfigurationElement'
         serviceClass:

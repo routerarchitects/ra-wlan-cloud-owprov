@@ -760,6 +760,7 @@ namespace OpenWifi::ProvObjects {
         ObjectInfo info;
         std::string serialNumber;
         std::string deviceType;
+        std::string deviceGroup{"ap"};
         Types::UUID_t operatorId;
         Types::UUID_t subscriberId;
         SubLocation location;
@@ -772,6 +773,7 @@ namespace OpenWifi::ProvObjects {
         std::string state;
         std::string locale;
         std::string billingCode;
+        Types::UUID_t configurationId;
         DeviceConfigurationElementVec configuration;
         bool suspended = false;
         std::string realMacAddress;

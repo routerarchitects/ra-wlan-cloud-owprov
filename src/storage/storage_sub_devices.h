@@ -23,7 +23,7 @@ namespace OpenWifi {
 						std::string, std::string, std::string, std::string, std::string,
 						std::string, std::string, std::string, std::string, std::string,
 						std::string, std::string, std::string, std::string, std::string, bool,
-						std::string>
+						std::string, std::string>
 		SubDeviceDBRecordType;
 
 	class SubscriberDeviceDB

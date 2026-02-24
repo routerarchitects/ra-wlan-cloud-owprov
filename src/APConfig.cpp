@@ -231,8 +231,11 @@ namespace OpenWifi {
 					ProvObjects::SubscriberDevice D;
 					if (StorageService()->SubscriberDeviceDB().GetRecord("serialNumber",
 																		 SerialNumber_, D)) {
-						if (!D.configuration.empty()) {
-							AddConfiguration(D.configuration);
+						// Subscriber path resolves a configuration UUID. Ensure device-type matching
+						// uses the subscriber device type before loading configuration blocks.
+						DeviceType_ = D.deviceType;
+						if (!D.configurationId.empty()) {
+							AddConfiguration(D.configurationId);
 						}
 					}
 				}
