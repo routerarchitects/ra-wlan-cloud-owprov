@@ -9,6 +9,7 @@
 #include "StorageService.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "fmt/format.h"
+#include "framework/orm.h"
 #include "framework/utils.h"
 
 namespace OpenWifi {
@@ -513,6 +514,46 @@ namespace OpenWifi {
 				modified = true;
 			}
 
+			// Default operator is always attached to root ("Top Entity").
+			if (O.defaultOperator) {
+				if (NewOp.entityId != EntityDB::RootUUID()) {
+					NewOp.entityId = EntityDB::RootUUID();
+					modified = true;
+				}
+
+				if (modified) {
+					poco_warning(Logger(), fmt::format("  fixing operator: {}", O.info.name));
+					OperatorDB().UpdateRecord("id", O.info.id, NewOp);
+				}
+				return true;
+			}
+
+			ProvObjects::Entity LinkedEntity;
+			bool haveLinkedEntity = false;
+
+			if (!O.entityId.empty()) {
+				haveLinkedEntity = EntityDB().GetRecord("id", O.entityId, LinkedEntity);
+			}
+
+			if (!haveLinkedEntity) {
+				const auto where = fmt::format(" operatorId='{}' ", ORM::Escape(O.info.id));
+				haveLinkedEntity = EntityDB().GetRecord(LinkedEntity, where);
+			}
+
+			if (haveLinkedEntity) {
+				if (NewOp.entityId != LinkedEntity.info.id) {
+					NewOp.entityId = LinkedEntity.info.id;
+					modified = true;
+				}
+
+				if (LinkedEntity.info.id != EntityDB::RootUUID() &&
+					LinkedEntity.operatorId != O.info.id) {
+					ProvObjects::Entity UpdatedEntity{LinkedEntity};
+					UpdatedEntity.operatorId = O.info.id;
+					EntityDB().UpdateRecord("id", LinkedEntity.info.id, UpdatedEntity);
+				}
+			}
+
 			if (modified) {
 				poco_warning(Logger(), fmt::format("  fixing operator: {}", O.info.name));
 				OperatorDB().UpdateRecord("id", O.info.id, NewOp);
@@ -569,6 +610,7 @@ namespace OpenWifi {
 			DefOp.defaultOperator = true;
 			DefOp.info.created = DefOp.info.modified = Utils::Now();
 			DefOp.deviceRules.rrm = "inherit";
+			DefOp.entityId = EntityDB::RootUUID();
 			OperatorDB_->CreateRecord(DefOp);
 
 			ProvObjects::ServiceClass DefSer;

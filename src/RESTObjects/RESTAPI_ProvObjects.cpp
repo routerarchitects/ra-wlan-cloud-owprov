@@ -88,6 +88,7 @@ namespace OpenWifi::ProvObjects {
 	void Entity::to_json(Poco::JSON::Object &Obj) const {
 		info.to_json(Obj);
 		field_to_json(Obj, "parent", parent);
+		field_to_json(Obj, "operatorId", operatorId);
 		field_to_json(Obj, "venues", venues);
 		field_to_json(Obj, "children", children);
 		field_to_json(Obj, "contacts", contacts);
@@ -108,6 +109,7 @@ namespace OpenWifi::ProvObjects {
 		try {
 			info.from_json(Obj);
 			field_from_json(Obj, "parent", parent);
+			field_from_json(Obj, "operatorId", operatorId);
 			field_from_json(Obj, "venues", venues);
 			field_from_json(Obj, "children", children);
 			field_from_json(Obj, "contacts", contacts);

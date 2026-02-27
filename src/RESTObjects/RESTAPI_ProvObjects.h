@@ -104,6 +104,7 @@ namespace OpenWifi::ProvObjects {
     struct Entity {
         ObjectInfo info;
         Types::UUID_t parent;
+        Types::UUID_t operatorId;
         Types::UUIDvec_t children;
         Types::UUIDvec_t venues;
         Types::UUIDvec_t contacts;    // all contacts associated in this entity

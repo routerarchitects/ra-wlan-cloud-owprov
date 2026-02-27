@@ -52,7 +52,44 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
 
-		DB_.DeleteRecord("id", uuid);
+		ProvObjects::Entity LinkedEntity;
+		bool HaveLinkedEntity = false;
+
+		if (!Existing.entityId.empty()) {
+			HaveLinkedEntity =
+				StorageService()->EntityDB().GetRecord("id", Existing.entityId, LinkedEntity);
+		}
+
+		if (!HaveLinkedEntity) {
+			const auto where = fmt::format(" operatorId='{}' ", ORM::Escape(Existing.info.id));
+			HaveLinkedEntity = StorageService()->EntityDB().GetRecord(LinkedEntity, where);
+		}
+
+		if (HaveLinkedEntity) {
+			if (LinkedEntity.info.id == EntityDB::RootUUID()) {
+				return BadRequest(RESTAPI::Errors::StillInUse);
+			}
+
+			if (!LinkedEntity.operatorId.empty() && LinkedEntity.operatorId != Existing.info.id) {
+				return BadRequest(RESTAPI::Errors::StillInUse);
+			}
+
+			if (!LinkedEntity.children.empty() || !LinkedEntity.devices.empty() ||
+				!LinkedEntity.venues.empty() || !LinkedEntity.locations.empty() ||
+				!LinkedEntity.contacts.empty() || !LinkedEntity.configurations.empty()) {
+				return BadRequest(RESTAPI::Errors::StillInUse);
+			}
+
+			MoveUsage(StorageService()->PolicyDB(), StorageService()->EntityDB(),
+					  LinkedEntity.managementPolicy, "", LinkedEntity.info.id);
+			StorageService()->EntityDB().DeleteRecord("id", LinkedEntity.info.id);
+			StorageService()->EntityDB().DeleteChild("id", LinkedEntity.parent,
+													 LinkedEntity.info.id);
+		}
+
+		if (!DB_.DeleteRecord("id", uuid)) {
+			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+		}
 		StorageService()->ServiceClassDB().DeleteRecords(fmt::format(" operatorId='{}'", uuid));
 		return OK();
 	}
@@ -89,18 +126,26 @@ namespace OpenWifi {
 		}
 
 		if (RawObject->has("entityId")) {
-			if (NewObject.entityId.empty() ||
-				!StorageService()->EntityDB().Exists("id", NewObject.entityId)) {
-				return BadRequest(RESTAPI::Errors::EntityMustExist);
-			}
-
-			auto EscapedEntityId = ORM::Escape(NewObject.entityId);
-			if (DB_.Count(" entityId='" + EscapedEntityId + "' ") > 0) {
-				return BadRequest(RESTAPI::Errors::EntityAlreadyHasOperator);
-			}
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
-		ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info);
+		if (!ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info)) {
+			return BadRequest(RESTAPI::Errors::NameMustBeSet);
+		}
+
+		ProvObjects::Entity NewEntity;
+		ProvObjects::CreateObjectInfo(UserInfo_.userinfo, NewEntity.info);
+		NewEntity.info.name = "Operator-entity:" + NewObject.info.name;
+		NewEntity.info.description = NewObject.info.description;
+		NewEntity.parent = EntityDB::RootUUID();
+		NewEntity.operatorId = NewObject.info.id;
+		NewObject.entityId = NewEntity.info.id;
+
+		if (!StorageService()->EntityDB().CreateRecord(NewEntity)) {
+			return InternalError(RESTAPI::Errors::RecordNotCreated);
+		}
+		StorageService()->EntityDB().AddChild("id", NewEntity.parent, NewEntity.info.id);
+
 		if (DB_.CreateRecord(NewObject)) {
 
 			// Create the default service...
@@ -122,6 +167,8 @@ namespace OpenWifi {
 			return ReturnObject(Answer);
 		}
 
+		StorageService()->EntityDB().DeleteChild("id", NewEntity.parent, NewEntity.info.id);
+		StorageService()->EntityDB().DeleteRecord("id", NewEntity.info.id);
 		return InternalError(RESTAPI::Errors::RecordNotCreated);
 	}
 
@@ -170,17 +217,7 @@ namespace OpenWifi {
 			Existing.deviceRules = UpdatedObj.deviceRules;
 
 		if (RawObject->has("entityId")) {
-			if (UpdatedObj.entityId.empty() ||
-				!StorageService()->EntityDB().Exists("id", UpdatedObj.entityId)) {
-				return BadRequest(RESTAPI::Errors::EntityMustExist);
-			}
-			auto EscapedEntityId = ORM::Escape(UpdatedObj.entityId);
-			auto EscapedId = ORM::Escape(Existing.info.id);
-			if (DB_.Count(" entityId='" + EscapedEntityId + "' and id!='" + EscapedId + "' ") >
-				0) {
-				return BadRequest(RESTAPI::Errors::EntityAlreadyHasOperator);
-			}
-			Existing.entityId = UpdatedObj.entityId;
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
 		return ReturnUpdatedObject(DB_, Existing, *this);

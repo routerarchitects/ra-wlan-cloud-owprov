@@ -42,6 +42,10 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::CannotDeleteRoot);
 		}
 
+		if (!Existing.operatorId.empty()) {
+			return BadRequest(RESTAPI::Errors::StillInUse);
+		}
+
 		if (!Existing.children.empty() || !Existing.devices.empty() || !Existing.venues.empty() ||
 			!Existing.locations.empty() || !Existing.contacts.empty() ||
 			!Existing.configurations.empty()) {
@@ -104,6 +108,7 @@ namespace OpenWifi {
 		NewEntity.locations.clear();
 		NewEntity.deviceConfiguration.clear();
 		NewEntity.managementRoles.clear();
+		NewEntity.operatorId.clear();
 
 		if (DB_.CreateRecord(NewEntity)) {
 			MoveUsage(StorageService()->PolicyDB(), DB_, "", NewEntity.managementPolicy,
