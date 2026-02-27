@@ -91,6 +91,7 @@ namespace {
 		ProvObjects::CreateObjectInfo(*actor, ctx.venueRecord.info);
 		ctx.venueRecord.info.name = ctx.venueName;
 		ctx.venueRecord.entity = ctx.operatorRecord.entityId;
+		ctx.venueRecord.subscriber = ctx.signupRecord.userId;
 
 		if (!venueDB.CreateRecord(ctx.venueRecord)) {
 			poco_error(logger, fmt::format("[SUBSCRIBER_PROVISIONING]: Failed to create venue "

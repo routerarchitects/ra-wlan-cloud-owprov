@@ -140,6 +140,7 @@ namespace OpenWifi {
 			ProvObjects::CreateObjectInfo(UserInfo_.userinfo, SubscriberVenue.info);
 			SubscriberVenue.info.name = UserName;
 			SubscriberVenue.entity = SignupOperator.entityId;
+			SubscriberVenue.subscriber = se.userId;
 			if (!StorageService()->VenueDB().CreateRecord(SubscriberVenue)) {
 				return InternalError(RESTAPI::Errors::RecordNotCreated);
 			}
@@ -286,33 +287,25 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
 
-		if (!signupRecord.registrationId.empty() && !signupRecord.email.empty()) {
-			ProvObjects::Operator signupOperator;
-			if (StorageService()->OperatorDB().GetRecord("registrationId", signupRecord.registrationId,
-														 signupOperator) &&
-				!signupOperator.entityId.empty()) {
-				const auto where =
-					fmt::format("entity='{}' and upper(name)='{}'",
-								ORM::Escape(signupOperator.entityId),
-								ORM::Escape(Poco::toUpper(signupRecord.email)));
-
-				ProvObjects::Venue subscriberVenue;
-				if (StorageService()->VenueDB().GetRecord(subscriberVenue, where)) {
-					if (!subscriberVenue.devices.empty()) {
-						poco_warning(Logger(), fmt::format(
-												 "[SUBSCRIBER_DELETE]: Venue [{}] still has {} "
-												 "devices for subscriber [{}].",
-												 subscriberVenue.info.id,
-												 subscriberVenue.devices.size(), subscriberId));
-						return BadRequest(RESTAPI::Errors::StillInUse);
-					}
-					if (!subscriberVenue.entity.empty()) {
-						StorageService()->EntityDB().DeleteVenue("id", subscriberVenue.entity,
-																 subscriberVenue.info.id);
-					}
-					if (!StorageService()->VenueDB().DeleteRecord("id", subscriberVenue.info.id)) {
-						return BadRequest(RESTAPI::Errors::NoRecordsDeleted);
-					}
+		VenueDB::RecordVec subscriberVenues;
+		if (StorageService()->VenueDB().GetRecords(
+				0, 100, subscriberVenues,
+				fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId)))) {
+			for (const auto &subscriberVenue : subscriberVenues) {
+				if (!subscriberVenue.devices.empty()) {
+					poco_warning(Logger(), fmt::format(
+											 "[SUBSCRIBER_DELETE]: Venue [{}] still has {} devices "
+											 "for subscriber [{}].",
+											 subscriberVenue.info.id,
+											 subscriberVenue.devices.size(), subscriberId));
+					return BadRequest(RESTAPI::Errors::StillInUse);
+				}
+				if (!subscriberVenue.entity.empty()) {
+					StorageService()->EntityDB().DeleteVenue("id", subscriberVenue.entity,
+															 subscriberVenue.info.id);
+				}
+				if (!StorageService()->VenueDB().DeleteRecord("id", subscriberVenue.info.id)) {
+					return BadRequest(RESTAPI::Errors::NoRecordsDeleted);
 				}
 			}
 		}

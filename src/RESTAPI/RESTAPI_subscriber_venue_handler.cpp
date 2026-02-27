@@ -121,6 +121,7 @@ namespace OpenWifi {
 		ProvObjects::CreateObjectInfo(UserInfo_.userinfo, ctx.venueRecord.info);
 		ctx.venueRecord.info.name = ctx.venueName;
 		ctx.venueRecord.entity = ctx.operatorRecord.entityId;
+		ctx.venueRecord.subscriber = ctx.signupRecord.userId;
 
 		if (!VenueDB_.CreateRecord(ctx.venueRecord)) {
 			InternalError(RESTAPI::Errors::RecordNotCreated);

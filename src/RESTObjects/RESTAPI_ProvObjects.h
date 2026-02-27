@@ -141,6 +141,7 @@ namespace OpenWifi::ProvObjects {
         ObjectInfo info;
         Types::UUID_t entity;
         Types::UUID_t parent;
+        std::string subscriber;
         Types::UUIDvec_t children;
         Types::UUID_t managementPolicy;
         Types::UUIDvec_t devices;

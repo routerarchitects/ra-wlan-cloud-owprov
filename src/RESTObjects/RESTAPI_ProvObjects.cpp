@@ -147,6 +147,7 @@ namespace OpenWifi::ProvObjects {
 		info.to_json(Obj);
 		field_to_json(Obj, "parent", parent);
 		field_to_json(Obj, "entity", entity);
+		field_to_json(Obj, "subscriber", subscriber);
 		field_to_json(Obj, "children", children);
 		field_to_json(Obj, "devices", devices);
 		field_to_json(Obj, "topology", topology);
@@ -171,6 +172,7 @@ namespace OpenWifi::ProvObjects {
 			info.from_json(Obj);
 			field_from_json(Obj, "parent", parent);
 			field_from_json(Obj, "entity", entity);
+			field_from_json(Obj, "subscriber", subscriber);
 			field_from_json(Obj, "children", children);
 			field_from_json(Obj, "devices", devices);
 			field_from_json(Obj, "topology", topology);

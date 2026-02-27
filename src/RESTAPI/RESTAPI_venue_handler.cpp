@@ -88,6 +88,9 @@ namespace OpenWifi {
 		if (!Existing.children.empty() || !Existing.devices.empty()) {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
+		if (!Existing.subscriber.empty()) {
+			return BadRequest(RESTAPI::Errors::VenueDeleteRequiresSubscriberApi);
+		}
 
 		if (!Existing.contacts.empty()) {
 			for (const auto &contact_uuid : Existing.contacts)
