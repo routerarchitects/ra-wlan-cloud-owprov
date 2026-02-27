@@ -797,6 +797,7 @@ components:
         deviceConfiguration:
           type: string
           format: uuid
+          description: Configuration UUID linked to this inventory device.
         deviceRules:
           $ref: '#/components/schemas/DeviceRules'
         managementPolicy:
@@ -1217,13 +1218,13 @@ components:
         suspended:
           type: boolean
           default: false
-        configurationId:
+        deviceConfiguration:
           type: string
           format: uuid
         configuration:
           type: array
           deprecated: true
-          description: Legacy inline configuration payload. If provided, owprov will store it in configurations and link via configurationId.
+          description: Legacy inline configuration payload. If provided, owprov will store it in configurations and link via deviceConfiguration.
           items:
             $ref: '#/components/schemas/DeviceConfigurationElement'
         serviceClass:

@@ -88,7 +88,7 @@ void ORM::DB<OpenWifi::SubDeviceDBRecordType, OpenWifi::ProvObjects::SubscriberD
 	Out.state = In.get<17>();
 	Out.locale = In.get<18>();
 	Out.billingCode = In.get<19>();
-	Out.configurationId = In.get<20>();
+	Out.deviceConfiguration = In.get<20>();
 	Out.suspended = In.get<21>();
 	Out.realMacAddress = In.get<22>();
 	Out.deviceGroup = In.get<23>();
@@ -122,7 +122,7 @@ void ORM::DB<OpenWifi::SubDeviceDBRecordType, OpenWifi::ProvObjects::SubscriberD
 	Out.set<17>(In.state);
 	Out.set<18>(In.locale);
 	Out.set<19>(In.billingCode);
-	Out.set<20>(In.configurationId);
+	Out.set<20>(In.deviceConfiguration);
 	Out.set<21>(In.suspended);
 	Out.set<22>(In.realMacAddress);
 	Out.set<23>(Poco::toLower(In.deviceGroup.empty() ? std::string("ap") : In.deviceGroup));

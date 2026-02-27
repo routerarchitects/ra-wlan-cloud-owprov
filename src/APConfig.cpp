@@ -234,8 +234,8 @@ namespace OpenWifi {
 						// Subscriber path resolves a configuration UUID. Ensure device-type matching
 						// uses the subscriber device type before loading configuration blocks.
 						DeviceType_ = D.deviceType;
-						if (!D.configurationId.empty()) {
-							AddConfiguration(D.configurationId);
+						if (!D.deviceConfiguration.empty()) {
+							AddConfiguration(D.deviceConfiguration);
 						}
 					}
 				}

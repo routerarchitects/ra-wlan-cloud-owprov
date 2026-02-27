@@ -487,6 +487,21 @@ namespace OpenWifi {
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, FromVenue,
 							 ToVenue, Existing.info.id);
 
+			ProvObjects::SubscriberDevice subscriberDevice;
+			if (StorageService()->SubscriberDeviceDB().GetRecord("serialNumber", SerialNumber,
+																 subscriberDevice) &&
+				subscriberDevice.deviceConfiguration != Existing.deviceConfiguration) {
+				subscriberDevice.deviceConfiguration = Existing.deviceConfiguration;
+				subscriberDevice.info.modified = Utils::Now();
+				if (!StorageService()->SubscriberDeviceDB().UpdateRecord(
+						"id", subscriberDevice.info.id, subscriberDevice)) {
+					poco_warning(Logger(), fmt::format("[INVENTORY_UPDATE]: Failed to sync "
+													   "subscriber-device configuration for "
+													   "serial [{}].",
+													   SerialNumber));
+				}
+			}
+
 			SDK::GW::Device::SetOwnerShip(this, SerialNumber, Existing.entity, Existing.venue,
 										  Existing.subscriber);
 

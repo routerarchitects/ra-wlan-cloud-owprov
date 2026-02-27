@@ -21,37 +21,50 @@
 
 namespace OpenWifi {
 	namespace {
-		void CleanupSubscriberConfigurationRecord(const std::string &configurationId,
+		void CleanupSubscriberConfigurationRecord(const std::string &deviceConfiguration,
 												 const std::string &inventoryId,
 												 Poco::Logger &logger) {
-			if (configurationId.empty()) {
+			if (deviceConfiguration.empty()) {
 				return;
 			}
 
 			auto &configurationDB = StorageService()->ConfigurationDB();
-			ProvObjects::DeviceConfiguration configurationRecord;
-			if (!configurationDB.GetRecord("id", configurationId, configurationRecord)) {
-				return;
-			}
 
 			if (!inventoryId.empty()) {
-				configurationDB.DeleteInUse("id", configurationId,
+				configurationDB.DeleteInUse("id", deviceConfiguration,
 											StorageService()->InventoryDB().Prefix(), inventoryId);
 			}
 
-			if (!configurationDB.GetRecord("id", configurationId, configurationRecord)) {
+			if (!configurationDB.DeleteRecord("id", deviceConfiguration)) {
+				poco_warning(logger,
+							 fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete "
+										 "configuration [{}].",
+										 deviceConfiguration));
+			}
+		}
+
+		void CleanupSubscriberConfigurationBySerial(const std::string &serialNumber,
+													Poco::Logger &logger) {
+			if (serialNumber.empty()) {
 				return;
 			}
 
-			const auto looksLikeSubscriberModalConfiguration =
-				configurationRecord.info.name.rfind("subscriber-device:", 0) == 0;
-			if ((configurationRecord.subscriberOnly || looksLikeSubscriberModalConfiguration) &&
-				configurationRecord.inUse.empty() &&
-				!configurationDB.DeleteRecord("id", configurationId)) {
-				poco_warning(logger,
-							 fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete "
-										 "subscriber configuration [{}].",
-										 configurationId));
+			auto &configurationDB = StorageService()->ConfigurationDB();
+			std::vector<ProvObjects::DeviceConfiguration> configurationRecords;
+			const auto escapedSerial = ORM::Escape(serialNumber);
+			const auto whereClause = fmt::format(
+				" name='device:{}' OR name='subscriber-device:{}' ", escapedSerial, escapedSerial);
+			if (!configurationDB.GetRecords(0, 100, configurationRecords, whereClause)) {
+				return;
+			}
+
+			for (const auto &configurationRecord : configurationRecords) {
+				if (!configurationDB.DeleteRecord("id", configurationRecord.info.id)) {
+					poco_warning(logger,
+								 fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete "
+											 "configuration [{}] resolved by serial [{}].",
+											 configurationRecord.info.id, serialNumber));
+				}
 			}
 		}
 
@@ -59,16 +72,17 @@ namespace OpenWifi {
 												   const std::string &subscriberId,
 												   const std::string &deviceType,
 												   const std::string &managementPolicy,
-												   std::string &configurationId,
+												   std::string &deviceConfiguration,
 												   const SecurityObjects::UserInfo &actor,
-												   Poco::Logger &logger) {
-			if (configurationId.empty()) {
+												   Poco::Logger &logger,
+												   std::string *createdDeviceConfiguration = nullptr) {
+			if (deviceConfiguration.empty()) {
 				return true;
 			}
 
 			auto &configurationDB = StorageService()->ConfigurationDB();
 			ProvObjects::DeviceConfiguration configurationRecord;
-			if (!configurationDB.GetRecord("id", configurationId, configurationRecord)) {
+			if (!configurationDB.GetRecord("id", deviceConfiguration, configurationRecord)) {
 				return false;
 			}
 
@@ -98,7 +112,7 @@ namespace OpenWifi {
 							logger,
 							fmt::format("[SUBSCRIBER_DEVICE_CONFIG]: Failed to normalize "
 										"configuration [{}] in place for serial [{}].",
-										configurationId, serialNumber));
+										deviceConfiguration, serialNumber));
 						return false;
 					}
 					return true;
@@ -121,11 +135,14 @@ namespace OpenWifi {
 						logger,
 						fmt::format("[SUBSCRIBER_DEVICE_CONFIG]: Failed to clone configuration [{}] "
 									"for serial [{}].",
-									configurationId, serialNumber));
+									deviceConfiguration, serialNumber));
 					return false;
 				}
 
-				configurationId = subscriberConfiguration.info.id;
+				deviceConfiguration = subscriberConfiguration.info.id;
+				if (createdDeviceConfiguration != nullptr) {
+					*createdDeviceConfiguration = subscriberConfiguration.info.id;
+				}
 				return true;
 			}
 
@@ -164,7 +181,7 @@ namespace OpenWifi {
 						logger,
 						fmt::format("[SUBSCRIBER_DEVICE_CONFIG]: Failed to normalize configuration "
 									"[{}] for serial [{}].",
-									configurationId, serialNumber));
+									deviceConfiguration, serialNumber));
 					return false;
 				}
 			}
@@ -305,7 +322,7 @@ namespace OpenWifi {
 					   RESTAPI::Errors::InvalidOperatorId, *this) ||
 			!ValidDbId(updateObject.serviceClass, StorageService()->ServiceClassDB(), true,
 					   RESTAPI::Errors::InvalidServiceClassId, *this) ||
-			!ValidDbId(updateObject.configurationId, StorageService()->ConfigurationDB(), true,
+			!ValidDbId(updateObject.deviceConfiguration, StorageService()->ConfigurationDB(), true,
 					   RESTAPI::Errors::ConfigurationMustExist, *this) ||
 			!ValidSubscriberId(updateObject.subscriberId, true, *this) ||
 			(rawObject->has("deviceRules") && !ValidDeviceRules(updateObject.deviceRules, *this)) ||
@@ -326,17 +343,17 @@ namespace OpenWifi {
 
 			if (rawObject->has("configuration")) {
 				ProvObjects::DeviceConfiguration subscriberConfiguration;
-				auto targetConfigurationId = updateObject.configurationId;
+				auto targetDeviceConfiguration = updateObject.deviceConfiguration;
 				const auto targetSubscriberId =
 					rawObject->has("subscriberId") ? updateObject.subscriberId
 												   : existingObject.subscriberId;
-				if (targetConfigurationId.empty()) {
-					targetConfigurationId = existingObject.configurationId;
+				if (targetDeviceConfiguration.empty()) {
+					targetDeviceConfiguration = existingObject.deviceConfiguration;
 				}
 
 				bool updateExistingConfiguration = false;
-				if (!targetConfigurationId.empty() &&
-					StorageService()->ConfigurationDB().GetRecord("id", targetConfigurationId,
+				if (!targetDeviceConfiguration.empty() &&
+					StorageService()->ConfigurationDB().GetRecord("id", targetDeviceConfiguration,
 																  subscriberConfiguration) &&
 					subscriberConfiguration.subscriberOnly &&
 					subscriberConfiguration.subscriber == targetSubscriberId &&
@@ -385,7 +402,7 @@ namespace OpenWifi {
 					return false;
 				}
 			}
-			updateObject.configurationId = subscriberConfiguration.info.id;
+			updateObject.deviceConfiguration = subscriberConfiguration.info.id;
 			updateObject.configuration.clear();
 		}
 		if (!EnsureSubscriberConfigurationOwnership(
@@ -394,7 +411,7 @@ namespace OpenWifi {
 				rawObject->has("deviceType") ? updateObject.deviceType : existingObject.deviceType,
 				rawObject->has("managementPolicy") ? updateObject.managementPolicy
 												   : existingObject.managementPolicy,
-				updateObject.configurationId, UserInfo_.userinfo, Logger())) {
+				updateObject.deviceConfiguration, UserInfo_.userinfo, Logger())) {
 			InternalError(RESTAPI::Errors::RecordNotUpdated);
 			return false;
 		}
@@ -403,8 +420,9 @@ namespace OpenWifi {
 	}
 
 	bool RESTAPI_sub_devices_handler::ParseAndValidatePostRequest(
-		SubscriberDeviceDB::RecordName &newObject) {
+		SubscriberDeviceDB::RecordName &newObject, std::string &createdDeviceConfiguration) {
 		const auto &rawObject = ParsedBody_;
+		createdDeviceConfiguration.clear();
 		if (!newObject.from_json(rawObject)) {
 			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 			return false;
@@ -416,7 +434,7 @@ namespace OpenWifi {
 					   RESTAPI::Errors::InvalidOperatorId, *this) ||
 			!ValidDbId(newObject.serviceClass, StorageService()->ServiceClassDB(), true,
 					   RESTAPI::Errors::InvalidServiceClassId, *this) ||
-			!ValidDbId(newObject.configurationId, StorageService()->ConfigurationDB(), true,
+			!ValidDbId(newObject.deviceConfiguration, StorageService()->ConfigurationDB(), true,
 					   RESTAPI::Errors::ConfigurationMustExist, *this) ||
 			!ValidSubscriberId(newObject.subscriberId, true, *this) ||
 			(rawObject->has("deviceRules") && !ValidDeviceRules(newObject.deviceRules, *this)) ||
@@ -429,7 +447,7 @@ namespace OpenWifi {
 			return false;
 		}
 
-			if (rawObject->has("configuration")) {
+			if (rawObject->has("configuration") && !newObject.configuration.empty()) {
 				ProvObjects::DeviceConfiguration subscriberConfiguration;
 				ProvObjects::CreateObjectInfo(UserInfo_.userinfo, subscriberConfiguration.info);
 				subscriberConfiguration.info.name =
@@ -453,13 +471,14 @@ namespace OpenWifi {
 				InternalError(RESTAPI::Errors::RecordNotCreated);
 				return false;
 			}
-			newObject.configurationId = subscriberConfiguration.info.id;
+			newObject.deviceConfiguration = subscriberConfiguration.info.id;
+			createdDeviceConfiguration = subscriberConfiguration.info.id;
 			newObject.configuration.clear();
 		}
 		if (!EnsureSubscriberConfigurationOwnership(newObject.serialNumber, newObject.subscriberId,
 													newObject.deviceType, newObject.managementPolicy,
-													newObject.configurationId, UserInfo_.userinfo,
-													Logger())) {
+													newObject.deviceConfiguration, UserInfo_.userinfo,
+													Logger(), &createdDeviceConfiguration)) {
 			InternalError(RESTAPI::Errors::RecordNotCreated);
 			return false;
 		}
@@ -640,8 +659,8 @@ namespace OpenWifi {
 				RESTAPI_utils::to_string(updateObject.location)) {
 			return true;
 		}
-		if ((rawObject->has("configurationId") || rawObject->has("configuration")) &&
-			existingObject.configurationId != updateObject.configurationId) {
+		if ((rawObject->has("deviceConfiguration") || rawObject->has("configuration")) &&
+			existingObject.deviceConfiguration != updateObject.deviceConfiguration) {
 			return true;
 		}
 		if (rawObject->has("deviceGroup")) {
@@ -671,10 +690,10 @@ namespace OpenWifi {
 			// Push is still required even when the configuration UUID remains unchanged.
 			return true;
 		}
-		if (!rawObject->has("configurationId")) {
+		if (!rawObject->has("deviceConfiguration")) {
 			return false;
 		}
-		return existingObject.configurationId != updateObject.configurationId;
+		return existingObject.deviceConfiguration != updateObject.deviceConfiguration;
 	}
 
 	bool RESTAPI_sub_devices_handler::ApplyPutRequest(
@@ -703,8 +722,8 @@ namespace OpenWifi {
 		if (rawObject->has("deviceGroup")) {
 			existingObject.deviceGroup = updateObject.deviceGroup;
 		}
-		if (rawObject->has("configurationId") || rawObject->has("configuration")) {
-			existingObject.configurationId = updateObject.configurationId;
+		if (rawObject->has("deviceConfiguration") || rawObject->has("configuration")) {
+			existingObject.deviceConfiguration = updateObject.deviceConfiguration;
 		}
 		return true;
 	}
@@ -783,7 +802,7 @@ namespace OpenWifi {
 		inventoryRecord.subscriber = newObject.subscriberId;
 		inventoryRecord.deviceType = newObject.deviceType;
 		inventoryRecord.managementPolicy = newObject.managementPolicy;
-		inventoryRecord.deviceConfiguration = newObject.configurationId;
+		inventoryRecord.deviceConfiguration = newObject.deviceConfiguration;
 		inventoryRecord.deviceRules = newObject.deviceRules;
 		inventoryRecord.state = newObject.state;
 		inventoryRecord.locale = newObject.locale;
@@ -864,21 +883,22 @@ namespace OpenWifi {
 		ProvObjects::InventoryTag inventoryRecord;
 		if (!StorageService()->InventoryDB().GetRecord("serialNumber", existingObject.serialNumber,
 													   inventoryRecord)) {
-			CleanupSubscriberConfigurationRecord(existingObject.configurationId, "", Logger());
+			CleanupSubscriberConfigurationRecord(existingObject.deviceConfiguration, "", Logger());
+			CleanupSubscriberConfigurationBySerial(existingObject.serialNumber, Logger());
 			return;
 		}
 
 		std::set<std::string> configurationsToCleanup;
-		if (!existingObject.configurationId.empty()) {
-			configurationsToCleanup.insert(existingObject.configurationId);
+		if (!existingObject.deviceConfiguration.empty()) {
+			configurationsToCleanup.insert(existingObject.deviceConfiguration);
 		}
 		if (!inventoryRecord.deviceConfiguration.empty()) {
 			configurationsToCleanup.insert(inventoryRecord.deviceConfiguration);
 		}
 
 		CleanupInventoryAssociations(inventoryRecord);
-		for (const auto &configurationId : configurationsToCleanup) {
-			CleanupSubscriberConfigurationRecord(configurationId, inventoryRecord.info.id, Logger());
+		for (const auto &deviceConfiguration : configurationsToCleanup) {
+			CleanupSubscriberConfigurationRecord(deviceConfiguration, inventoryRecord.info.id, Logger());
 		}
 		if (!StorageService()->InventoryDB().DeleteRecord("id", inventoryRecord.info.id)) {
 			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete "
@@ -888,6 +908,7 @@ namespace OpenWifi {
 			return;
 		}
 		SerialNumberCache()->DeleteSerialNumber(existingObject.serialNumber);
+		CleanupSubscriberConfigurationBySerial(existingObject.serialNumber, Logger());
 	}
 
 	bool RESTAPI_sub_devices_handler::DeleteSubscriberDevice(
@@ -943,10 +964,11 @@ namespace OpenWifi {
 
 	void RESTAPI_sub_devices_handler::DoPost() {
 		SubscriberDeviceDB::RecordName newObject;
-		if (!ParseAndValidatePostRequest(newObject)) {
+		std::string createdDeviceConfiguration;
+		if (!ParseAndValidatePostRequest(newObject, createdDeviceConfiguration)) {
 			return;
 		}
-		const auto shouldPushConfiguration = !newObject.configurationId.empty();
+		const auto shouldPushConfiguration = !newObject.deviceConfiguration.empty();
 
 		if (!ValidateAndNormalizeDeviceGroup(newObject)) {
 			return;
@@ -960,6 +982,7 @@ namespace OpenWifi {
 
 		ProvObjects::CreateObjectInfo(ParsedBody_, UserInfo_.userinfo, newObject.info);
 		if (!CreateSubscriberDeviceRecord(newObject)) {
+			CleanupSubscriberConfigurationRecord(createdDeviceConfiguration, "", Logger());
 			return;
 		}
 
@@ -970,6 +993,7 @@ namespace OpenWifi {
 												   "failure.",
 												   newObject.info.id));
 			}
+			CleanupSubscriberConfigurationRecord(createdDeviceConfiguration, "", Logger());
 			return InternalError(RESTAPI::Errors::RecordNotCreated);
 		}
 
@@ -999,7 +1023,11 @@ namespace OpenWifi {
 			ApplyPostUpdateSync(existingObject, existingObject);
 			if (hasConfigurationChange &&
 				!PushConfigurationIfInInventory(existingObject.serialNumber)) {
-				return BadRequest(RESTAPI::Errors::SubConfigNotRefreshed);
+				poco_warning(Logger(),
+							 fmt::format("[SUBSCRIBER_DEVICE_UPDATE]: Configuration push "
+										 "did not converge for serial [{}]. Returning current "
+										 "record and relying on subsequent sync.",
+										 existingObject.serialNumber));
 			}
 			return ReturnSubscriberDeviceObject(existingObject);
 		}
@@ -1015,7 +1043,11 @@ namespace OpenWifi {
 		ApplyPostUpdateSync(beforeUpdate, existingObject);
 		if (hasConfigurationChange &&
 			!PushConfigurationIfInInventory(existingObject.serialNumber)) {
-			return BadRequest(RESTAPI::Errors::SubConfigNotRefreshed);
+			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_UPDATE]: Configuration push "
+											   "did not converge for serial [{}] after update. "
+											   "Returning updated record and relying on "
+											   "subsequent sync.",
+											   existingObject.serialNumber));
 		}
 
 		return ReturnSubscriberDeviceObject(existingObject);

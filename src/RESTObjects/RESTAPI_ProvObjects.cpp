@@ -1013,7 +1013,7 @@ namespace OpenWifi::ProvObjects {
 		field_to_json(Obj, "state", state);
 		field_to_json(Obj, "locale", locale);
 		field_to_json(Obj, "billingCode", billingCode);
-		field_to_json(Obj, "configurationId", configurationId);
+		field_to_json(Obj, "deviceConfiguration", deviceConfiguration);
 		field_to_json(Obj, "suspended", suspended);
 		field_to_json(Obj, "realMacAddress", realMacAddress);
 	}
@@ -1041,7 +1041,7 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "state", state);
 			field_from_json(Obj, "locale", locale);
 			field_from_json(Obj, "billingCode", billingCode);
-			field_from_json(Obj, "configurationId", configurationId);
+			field_from_json(Obj, "deviceConfiguration", deviceConfiguration);
 			field_from_json(Obj, "configuration", configuration);
 			field_from_json(Obj, "suspended", suspended);
 			field_from_json(Obj, "realMacAddress", realMacAddress);

@@ -32,7 +32,8 @@ namespace OpenWifi {
 		bool ParseAndValidatePutRequest(const std::string &uuid,
 										SubscriberDeviceDB::RecordName &existingObject,
 										SubscriberDeviceDB::RecordName &updateObject);
-		bool ParseAndValidatePostRequest(SubscriberDeviceDB::RecordName &newObject);
+		bool ParseAndValidatePostRequest(SubscriberDeviceDB::RecordName &newObject,
+										 std::string &createdDeviceConfiguration);
 		bool ValidateAndNormalizeDeviceGroupForUpdate(
 			SubscriberDeviceDB::RecordName &existingObject,
 			const SubscriberDeviceDB::RecordName &updateObject,

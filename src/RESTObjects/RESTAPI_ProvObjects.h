@@ -774,7 +774,7 @@ namespace OpenWifi::ProvObjects {
         std::string state;
         std::string locale;
         std::string billingCode;
-        Types::UUID_t configurationId;
+        Types::UUID_t deviceConfiguration;
         DeviceConfigurationElementVec configuration;
         bool suspended = false;
         std::string realMacAddress;

@@ -259,8 +259,8 @@ bool SyncInventoryForSubscriberDevice(const ProvObjects::SubscriberDevice &devic
 		updated = true;
 	}
 
-	if (inventoryRecord.deviceConfiguration != device.configurationId) {
-		inventoryRecord.deviceConfiguration = device.configurationId;
+	if (inventoryRecord.deviceConfiguration != device.deviceConfiguration) {
+		inventoryRecord.deviceConfiguration = device.deviceConfiguration;
 		updated = true;
 	}
 
