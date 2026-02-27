@@ -47,6 +47,8 @@ namespace OpenWifi {
 		bool ApplyPutRequest(const SubscriberDeviceDB::RecordName &updateObject,
 							 SubscriberDeviceDB::RecordName &existingObject,
 							 const Poco::JSON::Object::Ptr &rawObject);
+		bool EnsureInventoryRecordForSubscriberDevice(
+			const SubscriberDeviceDB::RecordName &newObject);
 		void ApplyPostCreateSync(const SubscriberDeviceDB::RecordName &newObject);
 		void ApplyPostUpdateSync(const SubscriberDeviceDB::RecordName &beforeUpdate,
 								 const SubscriberDeviceDB::RecordName &afterUpdate);

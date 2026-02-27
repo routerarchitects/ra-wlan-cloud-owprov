@@ -11,6 +11,22 @@
 #include "framework/ow_constants.h"
 
 namespace OpenWifi {
+	namespace {
+		bool ShouldSkipAutoConfigPushForSubscriberDevice(const std::string &serialNumber) {
+			if (StorageService()->SubscriberDeviceDB().Exists("serialNumber", serialNumber)) {
+				return true;
+			}
+
+			ProvObjects::InventoryTag inventoryRecord;
+			if (StorageService()->InventoryDB().GetRecord("serialNumber", serialNumber,
+														  inventoryRecord) &&
+				!inventoryRecord.subscriber.empty()) {
+				return true;
+			}
+
+			return false;
+		}
+	} // namespace
 
 	int AutoDiscovery::Start() {
 		poco_information(Logger(), "Starting...");
@@ -105,16 +121,24 @@ namespace OpenWifi {
                             poco_debug(Logger(),fmt::format("Unknown message on 'connection' topic: {}",Msg->Payload()));
                         }
 
-                        if (!SerialNumber.empty() && Connected) {
-                            StorageService()->InventoryDB().CreateFromConnection(
-                                    SerialNumber, ConnectedIP, Compatible, Locale, isConnection);
-                            // Now that the entry has been created, we can try to push a config if
-                            // the connection was a capabilities message.
-                            if (isConnection){
-                                ComputeAndPushConfig(SerialNumber, Compatible, Logger());
-                            }
-                        }
-                    }
+	                        if (!SerialNumber.empty() && Connected) {
+	                            StorageService()->InventoryDB().CreateFromConnection(
+	                                    SerialNumber, ConnectedIP, Compatible, Locale, isConnection);
+	                            // Now that the entry has been created, we can try to push a config if
+	                            // the connection was a capabilities message.
+	                            if (isConnection){
+									if (ShouldSkipAutoConfigPushForSubscriberDevice(SerialNumber)) {
+										poco_information(
+											Logger(),
+											fmt::format("{}: Skipping auto-discovery configure push "
+														"for subscriber-provisioned device.",
+														SerialNumber));
+									} else {
+										ComputeAndPushConfig(SerialNumber, Compatible, Logger());
+									}
+	                            }
+	                        }
+	                    }
 				} catch (const Poco::Exception &E) {
                     std::cout << "EX:" << Msg->Payload() << std::endl;
 					Logger().log(E);

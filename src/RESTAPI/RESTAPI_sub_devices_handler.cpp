@@ -769,6 +769,47 @@ namespace OpenWifi {
 		return true;
 	}
 
+	bool RESTAPI_sub_devices_handler::EnsureInventoryRecordForSubscriberDevice(
+		const SubscriberDeviceDB::RecordName &newObject) {
+		auto &inventoryDB = StorageService()->InventoryDB();
+		ProvObjects::InventoryTag inventoryRecord;
+		if (inventoryDB.GetRecord("serialNumber", newObject.serialNumber, inventoryRecord)) {
+			return true;
+		}
+
+		ProvObjects::CreateObjectInfo(UserInfo_.userinfo, inventoryRecord.info);
+		inventoryRecord.info.name = newObject.serialNumber;
+		inventoryRecord.serialNumber = newObject.serialNumber;
+		inventoryRecord.subscriber = newObject.subscriberId;
+		inventoryRecord.deviceType = newObject.deviceType;
+		inventoryRecord.managementPolicy = newObject.managementPolicy;
+		inventoryRecord.deviceConfiguration = newObject.configurationId;
+		inventoryRecord.deviceRules = newObject.deviceRules;
+		inventoryRecord.state = newObject.state;
+		inventoryRecord.locale = newObject.locale;
+		inventoryRecord.realMacAddress = newObject.realMacAddress;
+		inventoryRecord.devClass = "any";
+		inventoryRecord.platform = "AP";
+
+		if (!inventoryDB.CreateRecord(inventoryRecord)) {
+			// The record may have been created by auto-discovery concurrently.
+			if (inventoryDB.GetRecord("serialNumber", newObject.serialNumber, inventoryRecord)) {
+				return true;
+			}
+			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE]: Failed to create "
+											   "inventory record for serial [{}].",
+											   newObject.serialNumber));
+			return false;
+		}
+
+		SerialNumberCache()->AddSerialNumber(newObject.serialNumber, newObject.deviceType);
+		MoveUsage(StorageService()->PolicyDB(), inventoryDB, "", inventoryRecord.managementPolicy,
+				  inventoryRecord.info.id);
+		MoveUsage(StorageService()->ConfigurationDB(), inventoryDB, "",
+				  inventoryRecord.deviceConfiguration, inventoryRecord.info.id);
+		return true;
+	}
+
 	void RESTAPI_sub_devices_handler::ReturnSubscriberDeviceObject(
 		const ProvObjects::SubscriberDevice &device) {
 		Poco::JSON::Object answer;
@@ -922,9 +963,22 @@ namespace OpenWifi {
 			return;
 		}
 
+		if (!EnsureInventoryRecordForSubscriberDevice(newObject)) {
+			if (!DB_.DeleteRecord("id", newObject.info.id)) {
+				poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE]: Failed to rollback "
+												   "subscriber-device [{}] after inventory create "
+												   "failure.",
+												   newObject.info.id));
+			}
+			return InternalError(RESTAPI::Errors::RecordNotCreated);
+		}
+
 		ApplyPostCreateSync(newObject);
 		if (shouldPushConfiguration && !PushConfigurationIfInInventory(newObject.serialNumber)) {
-			return BadRequest(RESTAPI::Errors::SubConfigNotRefreshed);
+			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE]: Configuration push "
+											   "did not converge for serial [{}]. Returning "
+											   "created record and relying on subsequent sync.",
+											   newObject.serialNumber));
 		}
 		return ReturnSubscriberDeviceRecord(newObject.info.id);
 	}
