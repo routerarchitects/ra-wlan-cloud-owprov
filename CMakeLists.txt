@@ -81,8 +81,6 @@ add_executable(owprov
         src/framework/UI_WebSocketClientServer.h
         src/framework/utils.h
         src/framework/utils.cpp
-        src/framework/SubscriberProvisioning.h
-        src/framework/SubscriberProvisioning.cpp
         src/framework/AppServiceRegistry.h
         src/framework/SubSystemServer.cpp
         src/framework/SubSystemServer.h

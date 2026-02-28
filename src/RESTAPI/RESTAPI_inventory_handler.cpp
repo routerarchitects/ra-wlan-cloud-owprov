@@ -21,7 +21,6 @@
 #include "SerialNumberCache.h"
 #include "StorageService.h"
 #include "Tasks/VenueConfigUpdater.h"
-#include "framework/SubscriberProvisioning.h"
 #include "framework/utils.h"
 #include "sdks/SDK_gw.h"
 #include "sdks/SDK_sec.h"
@@ -249,6 +248,16 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
 		}
 
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue venueRecord;
+			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, venueRecord)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			if (!venueRecord.subscriber.empty()) {
+				return BadRequest(RESTAPI::Errors::VenueAddDeviceRequiresSubscriberApi);
+			}
+		}
+
 		if (!NewObject.venue.empty() && !NewObject.entity.empty()) {
 			return BadRequest(RESTAPI::Errors::NotBoth);
 		}
@@ -294,15 +303,6 @@ namespace OpenWifi {
 							 NewObject.entity, NewObject.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, "",
 							 NewObject.venue, NewObject.info.id);
-			SubscriberProvisioning::SyncOptions syncOptions;
-			syncOptions.client = this;
-			if (!SubscriberProvisioning::SyncInventoryForSerialNumber(SerialNumber, Logger(),
-																	  syncOptions)) {
-				poco_warning(Logger(), fmt::format("[INVENTORY_CREATE]: Subscriber sync failed for "
-												   "serial [{}].",
-												   SerialNumber));
-			}
-
 			ProvObjects::InventoryTag NewTag;
 			DB_.GetRecord("id", NewObject.info.id, NewTag);
 			Poco::JSON::Object Answer;

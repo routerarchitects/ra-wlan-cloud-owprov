@@ -453,6 +453,9 @@ namespace OpenWifi::RESTAPI::Errors {
 	static const struct msg VenueDeleteRequiresSubscriberApi {
 		1198, "This venue is linked to a subscriber. It will be deleted when the subscriber is deleted."
 	};
+	static const struct msg VenueAddDeviceRequiresSubscriberApi {
+		1199, "This venue is linked to a subscriber. Add devices only from the Subscriber page."
+	};
 
     static const struct msg SimulationDoesNotExist {
         7000, "Simulation Instance ID does not exist."
