@@ -14,7 +14,7 @@
 #include "sdks/SDK_gw.h"
 #include "sdks/SDK_sec.h"
 #ifdef CGW_INTEGRATION
-#include "sdks/SDK_cgw.h"
+#include "InfraGroupEvents.h"
 #endif
 
 namespace OpenWifi {
@@ -53,7 +53,7 @@ namespace OpenWifi {
 			return NotFound();
 		}
 		/* When device is removed from the subscriber, if subscriberID is present in groupsmap table.
-		*  Call DELETE /DeleteDeviceFromGroup OF CGW-REST
+		*  publish message on kafka CnC of type DeleteDeviceFromGroup
 		*/
 #ifdef CGW_INTEGRATION
 		// Load existing record to obtain subscriberId and MAC/serial
@@ -73,16 +73,7 @@ namespace OpenWifi {
 			poco_error(Logger(), fmt::format("Invalid MAC/Serial format for CGW delete: {}", Existing.serialNumber));
 			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
 		}
-		std::string macHex =  Existing.serialNumber;
-		Poco::toLowerInPlace(macHex);
-		Poco::trimInPlace(macHex);
-		auto macColon = Utils::SerialToMAC(macHex);
-
-			// Call CGW to remove device from group
-			if (!SDK::CGW::DeleteDeviceFromGroup(groupId, macColon)) {
-				poco_error(Logger(), fmt::format("CGW DeleteDeviceFromGroup failed gid={} mac={}", groupId, macColon));
-				return BadRequest(RESTAPI::Errors::InternalError);
-			}
+		PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{Existing.serialNumber});
 
 #endif
 
@@ -112,7 +103,7 @@ namespace OpenWifi {
 
 		ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info);
 		/* When device is added in the subscriber, if subscriberID is present in groupsmap table.
-		*  Call POST /AddDeviceToGroup of CGW-REST
+		*  publish message on kafka CnC of type AddDeviceToGroup
 		*/
 #ifdef CGW_INTEGRATION
 		// Lookup groupId for this subscriber in groupsmap
@@ -126,17 +117,7 @@ namespace OpenWifi {
 			poco_error(Logger(), fmt::format("Invalid MAC/Serial format for CGW mapping: {}", NewObject.serialNumber));
 			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
 		}
-		
-		std::string macHex = NewObject.serialNumber;
-		Poco::trimInPlace(macHex);
-		Poco::toLowerInPlace(macHex);
-		auto macColon = Utils::SerialToMAC(macHex);
-
-		// Call CGW to add device to group
-		if (!SDK::CGW::AddDeviceToGroup(groupId, macColon)) {
-			poco_error(Logger(), fmt::format("CGW AddDeviceToGroup failed gid={} mac={}", groupId, macColon));
-			return BadRequest(RESTAPI::Errors::InternalError);
-		}
+		PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{NewObject.serialNumber});
 #endif
 		return ReturnCreatedObject(DB_, NewObject, *this);
 	}

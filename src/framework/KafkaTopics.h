@@ -30,6 +30,7 @@ namespace OpenWifi::KafkaTopics {
 //This is new topic on KAFKA introduced for subscriber creation/deletion messages  
 #ifdef CGW_INTEGRATION
 	inline const char * SUBSCRIBER_EVENT = "subscriber_event";
+	inline const char * CNC = "CnC";
 #endif
 	namespace ServiceEvents {
 		inline const char * EVENT_JOIN = "join";

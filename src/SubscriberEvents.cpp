@@ -14,7 +14,7 @@
 #include "StorageService.h"
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
-#include "sdks/SDK_cgw.h"
+#include "InfraGroupEvents.h"
 
 namespace OpenWifi {
 
@@ -27,16 +27,7 @@ namespace OpenWifi {
 		}
 
 		poco_information(Logger(), fmt::format("Deleting CGW group {} for subscriber {}", rec.groupid, subscriberId));
-		if (!SDK::CGW::DeleteGroup(rec.groupid)) {
-			poco_error(Logger(), fmt::format("CGW DeleteGroup failed for subscriber {} (group {})", subscriberId, rec.groupid));
-			return;
-		}
-
-		if (!db.DeleteVenue(subscriberId)) {
-			poco_error(Logger(), fmt::format("Failed to delete groupsmap entry for subscriber {} after CGW deletion", subscriberId));
-		} else {
-			poco_information(Logger(), fmt::format("Deleted groupsmap entry for subscriber {} group {}", subscriberId, rec.groupid));
-		}
+		PublishInfraGroupEvent("infrastructure_group_delete", rec.groupid);
 	}
 
 	void SubscriberEvents::HandleSubscriberCreate(const std::string &subscriberId) {
@@ -53,12 +44,7 @@ namespace OpenWifi {
 		}
 
 		poco_information(Logger(), fmt::format("Created groupsmap entry for subscriber {} with group {}", subscriberId, groupId));
-		if (SDK::CGW::CreateGroup(groupId)) return;
-
-		poco_error(Logger(), fmt::format("CGW CreateGroup failed for subscriber {} (group {}), rolling back groupsmap entry", subscriberId, groupId));
-		if (!db.DeleteVenue(subscriberId)) {
-			poco_error(Logger(), fmt::format("Rollback failed: could not delete groupsmap entry for subscriber {}", subscriberId));
-		}
+		PublishInfraGroupEvent("infrastructure_group_create", groupId);
 	}
 
 	static inline Poco::JSON::Object::Ptr ExtractPayloadOrSelf(const Poco::JSON::Object::Ptr &Obj) {

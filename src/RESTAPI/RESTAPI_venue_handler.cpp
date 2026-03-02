@@ -24,7 +24,7 @@
 
 #include "Kafka_ProvUpdater.h"
 #ifdef CGW_INTEGRATION
-#include "sdks/SDK_cgw.h"
+#include "InfraGroupEvents.h"
 #endif
 
 namespace OpenWifi {
@@ -98,7 +98,7 @@ namespace OpenWifi {
 		}
 
 		/* When venue is deleted, if venueID is present in groupsmap table.
-		*  Call DELETE /DeleteGroup of CGW-REST on Success delete from groupsmap and venue.
+		*  publish message on kafka CnC of type DeleteGroup
 		*/
 #ifdef CGW_INTEGRATION
                 uint64_t groupId = 0;
@@ -106,10 +106,7 @@ namespace OpenWifi {
 						poco_error(Logger(), fmt::format("DoDelete groupsmap lookup failure {}", UUID));
                         return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
                 }
-                if (!SDK::CGW::DeleteGroup(groupId)) {
-                        poco_error(Logger(), fmt::format("DoDelete CGW deleteGroup failure {}", groupId));
-                        return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
-                }
+				PublishInfraGroupEvent("infrastructure_group_delete", groupId);
 #endif
 		if (!Existing.contacts.empty()) {
 			for (const auto &contact_uuid : Existing.contacts)
@@ -234,7 +231,7 @@ namespace OpenWifi {
 		}
 
 		/* When venue is created,Insert in the groupsmap table.
-		*  Call POST /CreateGroup of CGW-REST if fail then Delete entry from groupsmap.
+		*  publish message on kafka CnC of type CreateGroup
 		*/
 #ifdef CGW_INTEGRATION
                 uint64_t groupId = 0;
@@ -242,11 +239,7 @@ namespace OpenWifi {
                         poco_error(Logger(), fmt::format("DoPost groupsmap failure {}", NewObject.info.id));
                         return InternalError(RESTAPI::Errors::RecordNotCreated);
                 }
-                if (!SDK::CGW::CreateGroup(groupId)) {
-                        StorageService()->GroupsMapDB().DeleteVenue(NewObject.info.id);
-                        poco_error(Logger(), fmt::format("DoPost CGW createGroup failure{}", NewObject.info.id));
-                        return InternalError(RESTAPI::Errors::RecordNotCreated);
-                }
+				PublishInfraGroupEvent("infrastructure_group_create", groupId);
 #endif
 		if (DB_.CreateRecord(NewObject)) {
 			MoveUsage(StorageService()->ContactDB(), DB_, {}, NewObject.contacts,

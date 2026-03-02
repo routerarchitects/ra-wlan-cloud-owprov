@@ -191,7 +191,6 @@ add_executable(owprov
         src/sdks/SDK_gw.cpp src/sdks/SDK_gw.h
         src/sdks/SDK_prov.cpp src/sdks/SDK_prov.h
         src/sdks/SDK_sec.cpp src/sdks/SDK_sec.h
-        src/sdks/SDK_cgw.cpp src/sdks/SDK_cgw.h
         src/SerialNumberCache.h src/SerialNumberCache.cpp
         src/APConfig.cpp src/APConfig.h
         src/AutoDiscovery.cpp src/AutoDiscovery.h

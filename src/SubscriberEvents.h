@@ -42,12 +42,12 @@ namespace OpenWifi {
         }
         
         /**
-         * @brief If subscriberId Exists in groupsMap,call DELETE DeleteGroup of CGW-REST,then delete entry from groupsMap
+         * @brief If subscriberId Exists in groupsMap, publish message on kafka CnC
          */
         void HandleSubscriberDelete(const std::string &subscriberId);
         
         /**
-         * @brief If subscriberId not in groupsMap, add groupsMap entry, call CGW-REST CreateGroup, and rollback the entry on failure
+         * @brief If subscriberId not in groupsMap, add groupsMap entry, publish message on kafka CnC
          */
         void HandleSubscriberCreate(const std::string &subscriberId);
 

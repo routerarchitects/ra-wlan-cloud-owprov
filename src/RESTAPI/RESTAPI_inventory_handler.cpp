@@ -26,7 +26,7 @@
 #include "sdks/SDK_sec.h"
 
 #ifdef CGW_INTEGRATION
-#include "sdks/SDK_cgw.h"
+#include "InfraGroupEvents.h"
 #endif
 namespace OpenWifi {
 
@@ -146,7 +146,7 @@ namespace OpenWifi {
 		}
 
 		/* When device is removed from the venue, if venueId is present in groupsmap table.
-		*  Call DELETE /DeleteDeviceFromGroup of CGW-REST
+		*  publish message on kafka CnC of type DeleteDeviceFromGroup 
 		*/
 #ifdef CGW_INTEGRATION
 		if (!Existing.venue.empty()) {
@@ -161,15 +161,7 @@ namespace OpenWifi {
 				poco_error(Logger(), fmt::format("{}: Invalid MAC/Serial for CGW mapping: {}", SerialNumber));
 				return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
 			}
-			std::string macHex = SerialNumber;
-			Poco::trimInPlace(macHex);
-			Poco::toLowerInPlace(macHex);
-			auto macColon = Utils::SerialToMAC(macHex);
-			// Call CGW API to remove device from infra for this group
-			if (!SDK::CGW::DeleteDeviceFromGroup(groupId, macColon)) {
-				poco_error(Logger(), fmt::format("{}: CGW DeleteDeviceFromGroup failed gid={} mac={}", SerialNumber, groupId, macColon));
-				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
-			}
+			PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{SerialNumber});
 		}
 		else{
 			poco_error(Logger(), fmt::format("Venue empty for serial number {}", SerialNumber));
@@ -302,7 +294,7 @@ namespace OpenWifi {
 		}
 
 		/* When device is added in the venue, if venueID is present in groupsmap table.
-		*  Call POST /AddDeviceToGroup of CGW-REST
+		*  publish message on kafka CnC of type AddDeviceToGroup
 		*/
 #ifdef CGW_INTEGRATION
 		if (!NewObject.venue.empty()) {
@@ -316,14 +308,7 @@ namespace OpenWifi {
 				poco_error(Logger(), fmt::format("Invalid MAC/Serial for CGW mapping: {}", SerialNumber));
 				return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
 			}
-			std::string macHex = SerialNumber;
-			Poco::trimInPlace(macHex);
-			Poco::toLowerInPlace(macHex);
-			auto macColon = Utils::SerialToMAC(macHex);
-			if (!SDK::CGW::AddDeviceToGroup(groupId, macColon)) {
-				poco_error(Logger(), fmt::format("{}: CGW AddDeviceToGroup failed gid={}", SerialNumber, groupId));
-				return BadRequest(RESTAPI::Errors::InternalError);
-			}
+			PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{SerialNumber});
 		}
 #endif
 		if (DB_.CreateRecord(NewObject)) {
