@@ -762,7 +762,7 @@ namespace OpenWifi::ProvObjects {
         ObjectInfo info;
         std::string serialNumber;
         std::string deviceType;
-        std::string deviceGroup{"ap"};
+        std::string deviceGroup;
         Types::UUID_t operatorId;
         Types::UUID_t subscriberId;
         SubLocation location;

@@ -8,14 +8,12 @@
 
 #include "storage_inventory.h"
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
-#include "Poco/String.h"
 #include "SerialNumberCache.h"
 #include "StorageService.h"
 #include "framework/MicroServiceFuncs.h"
 #include "framework/OpenWifiTypes.h"
 #include "framework/RESTAPI_utils.h"
 #include "framework/utils.h"
-#include "fmt/format.h"
 #include "nlohmann/json.hpp"
 #include "sdks/SDK_gw.h"
 
@@ -145,7 +143,6 @@ namespace OpenWifi {
 							"%s: could not set GW entity/venue property.", NewDevice.serialNumber));
 					}
 				}
-
 				Logger().information(Poco::format("Adding %s to inventory.", SerialNumber));
 				return true;
 			} else {
@@ -394,6 +391,6 @@ void ORM::DB<OpenWifi::InventoryDBRecordType, OpenWifi::ProvObjects::InventoryTa
 	Out.set<22>(In.realMacAddress);
 	Out.set<23>(In.doNotAllowOverrides);
     Out.set<24>(In.imported);
-	Out.set<25>(In.connected);
-	Out.set<26>(In.platform);
+    Out.set<25>(In.connected);
+    Out.set<26>(In.platform);
 }

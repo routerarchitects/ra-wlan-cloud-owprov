@@ -1026,11 +1026,6 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "serialNumber", serialNumber);
 			field_from_json(Obj, "deviceType", deviceType);
 			field_from_json(Obj, "deviceGroup", deviceGroup);
-			if (deviceGroup.empty()) {
-				deviceGroup = "ap";
-			} else {
-				Poco::toLowerInPlace(deviceGroup);
-			}
 			field_from_json(Obj, "operatorId", operatorId);
 			field_from_json(Obj, "subscriberId", subscriberId);
 			field_from_json(Obj, "location", location);

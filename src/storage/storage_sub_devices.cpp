@@ -54,7 +54,7 @@ namespace OpenWifi {
 	bool SubscriberDeviceDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
 		to = Version();
 		std::vector<std::string> Script{
-			"alter table " + TableName_ + " add column deviceGroup text default 'ap'",
+			"alter table " + TableName_ + " add column deviceGroup text",
 			"alter table " + TableName_ + " drop column if exists gateway"};
 		RunScript(Script);
 		return true;
@@ -92,9 +92,7 @@ void ORM::DB<OpenWifi::SubDeviceDBRecordType, OpenWifi::ProvObjects::SubscriberD
 	Out.suspended = In.get<21>();
 	Out.realMacAddress = In.get<22>();
 	Out.deviceGroup = In.get<23>();
-	if (Out.deviceGroup.empty()) {
-		Out.deviceGroup = "ap";
-	} else {
+	if (!Out.deviceGroup.empty()) {
 		Poco::toLowerInPlace(Out.deviceGroup);
 	}
 }
@@ -125,5 +123,5 @@ void ORM::DB<OpenWifi::SubDeviceDBRecordType, OpenWifi::ProvObjects::SubscriberD
 	Out.set<20>(In.deviceConfiguration);
 	Out.set<21>(In.suspended);
 	Out.set<22>(In.realMacAddress);
-	Out.set<23>(Poco::toLower(In.deviceGroup.empty() ? std::string("ap") : In.deviceGroup));
+	Out.set<23>(Poco::toLower(In.deviceGroup));
 }
