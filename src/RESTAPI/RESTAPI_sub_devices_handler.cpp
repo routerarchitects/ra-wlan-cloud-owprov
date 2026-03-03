@@ -598,6 +598,8 @@ namespace OpenWifi {
 				  inventoryRecord.info.id);
 		MoveUsage(StorageService()->ConfigurationDB(), inventoryDB, "",
 				  inventoryRecord.deviceConfiguration, inventoryRecord.info.id);
+		ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, "",
+						 inventoryRecord.venue, inventoryRecord.info.id);
 		poco_information(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE][CreateInventoryRecord]: "
 											   "completed serial=[{}], inventoryId=[{}].",
 											   newObject.serialNumber, inventoryRecord.info.id));
