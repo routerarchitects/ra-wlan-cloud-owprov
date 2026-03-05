@@ -801,6 +801,9 @@ namespace OpenWifi {
 
 	void RESTAPI_sub_devices_handler::DoDelete() {
 		auto deviceIdOrSerial = GetBinding("uuid", "");
+		poco_debug(Logger(), fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Received delete request for "
+								 "[{}].",
+								 deviceIdOrSerial));
 
 		ProvObjects::SubscriberDevice existingObject;
 		if (!ValidateDeleteRequest(deviceIdOrSerial, existingObject)) {
@@ -809,11 +812,18 @@ namespace OpenWifi {
 		if (!StopMonitoring(existingObject)) {
 			return;
 		}
+
 		if (!DB_.DeleteRecord("id", existingObject.info.id)) {
 			BadRequest(RESTAPI::Errors::NoRecordsDeleted);
 			return;
 		}
 		DeleteInventoryForSubscriberDevice(existingObject);
+
+		if (!SDK::GW::Device::Delete(this, existingObject.serialNumber)) {
+			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete serial "
+											 "[{}] from owgw.",
+											 existingObject.serialNumber));
+		}
 		return OK();
 	}
 
