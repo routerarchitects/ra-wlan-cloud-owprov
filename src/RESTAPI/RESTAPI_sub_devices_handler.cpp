@@ -877,6 +877,14 @@ namespace OpenWifi {
 											   "created record and relying on subsequent sync.",
 											   newObject.serialNumber));
 		}
+
+		if (!SDK::GW::Device::SetSubscriber(this, newObject.serialNumber, newObject.subscriberId)) {
+			poco_warning(Logger(),
+						 fmt::format("[SUBSCRIBER_DEVICE_CREATE]: Failed to set subscriber [{}] "
+									 "on gateway for serial [{}].",
+									 newObject.subscriberId, newObject.serialNumber));
+		}
+
 		return ReturnSubscriberDeviceObject(newObject);
 	}
 
