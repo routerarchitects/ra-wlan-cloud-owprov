@@ -22,9 +22,10 @@ namespace OpenWifi {
 
 	/*
 		1) Record notExists + resend=true/false -> Create new UUID and call Security
-		2) Record exists(waiting-for-email-verification) + resend=true -> Reuse existing UUID and call Security
-		3) Record exists(waiting-for-email-verification) + resend=false -> Return existing waiting-for-email response
-		4) Record exists(emailVerified) + resend=true/false -> UserAlreadyExists
+		2) Record exists(any status) + operator changed -> UserAlreadyExists
+		3) Record exists(waiting-for-email-verification) + resend=true -> Reuse existing UUID and call Security
+		4) Record exists(waiting-for-email-verification) + resend=false -> Return existing waiting-for-email response
+		5) Record exists(emailVerified/completed/other non-waiting status) + resend=true/false -> UserAlreadyExists
 	*/
 	void RESTAPI_subscriber_handler::DoPost() {
 		auto norm = [](std::string s) {
@@ -63,6 +64,18 @@ namespace OpenWifi {
 		const bool waitingForEmailVerification =
 			foundByEmail &&
 			(existing.statusCode == ProvObjects::SignupStatusCodes::SignupWaitingForEmail);
+		const bool operatorChanged =
+			foundByEmail && (existing.operatorId != SignupOperator.info.id);
+
+		// Operator mismatch is always rejected for an existing email, regardless of status.
+		if (operatorChanged) {
+			poco_information(Logger(), fmt::format(
+										 "SIGNUP: rejecting signup for '{}' due to operator change "
+										 "existingOperator='{}' requestedOperator='{}' status='{}' statusCode={}",
+										 UserName, existing.operatorId, SignupOperator.info.id,
+										 existing.status, existing.statusCode));
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+		}
 
 		if (foundByEmail && !waitingForEmailVerification) {
 			poco_information(Logger(), fmt::format(
@@ -133,6 +146,15 @@ namespace OpenWifi {
 		if (!reuseExisting) {
 			ProvObjects::SignupEntry byUserId{};
 			if (StorageService()->SignupDB().GetRecord("userid", UI.id, byUserId)) {
+				if (byUserId.operatorId != SignupOperator.info.id) {
+					poco_warning(Logger(), fmt::format(
+										   "SIGNUP: rejecting signup for userId='{}' due to operator "
+										   "change existingOperator='{}' requestedOperator='{}' "
+										   "status='{}' statusCode={}",
+										   UI.id, byUserId.operatorId, SignupOperator.info.id,
+										   byUserId.status, byUserId.statusCode));
+					return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+				}
 				if (byUserId.statusCode == ProvObjects::SignupStatusCodes::SignupWaitingForEmail) {
 					poco_warning(Logger(), fmt::format(
 										   "SIGNUP: found existing pending signup by userId='{}' "
