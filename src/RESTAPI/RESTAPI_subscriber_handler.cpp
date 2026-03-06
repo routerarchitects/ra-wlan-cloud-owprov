@@ -23,7 +23,7 @@ namespace OpenWifi {
 	/*
 		1) Record notExists + resend=true/false -> Create new UUID and call Security
 		2) Record exists(waiting-for-email-verification) + resend=true -> Reuse existing UUID and call Security
-		3) Record exists(waiting-for-email-verification) + resend=false -> UserAlreadyExists
+		3) Record exists(waiting-for-email-verification) + resend=false -> Return existing waiting-for-email response
 		4) Record exists(emailVerified) + resend=true/false -> UserAlreadyExists
 	*/
 	void RESTAPI_subscriber_handler::DoPost() {
@@ -57,16 +57,35 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		// Lookup existing signup entries by email
-		ProvObjects::SignupEntry byEmail{};
-		const bool foundByEmail = StorageService()->SignupDB().GetRecord("email", UserName, byEmail);
-
+		// Lookup existing signup entry by email and enforce state-machine semantics.
 		ProvObjects::SignupEntry existing{};
-		if (foundByEmail) {
-			existing = byEmail;
+		const bool foundByEmail = StorageService()->SignupDB().GetRecord("email", UserName, existing);
+		const bool waitingForEmailVerification =
+			foundByEmail &&
+			(existing.statusCode == ProvObjects::SignupStatusCodes::SignupWaitingForEmail);
+
+		if (foundByEmail && !waitingForEmailVerification) {
+			poco_information(Logger(), fmt::format(
+										 "SIGNUP: rejecting duplicate signup for '{}' reg='{}' "
+										 "resend={} status='{}' statusCode={}",
+										 UserName, registrationId, resend, existing.status,
+										 existing.statusCode));
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
 		}
 
-		const bool reuseExisting = resend && foundByEmail;
+		// Idempotent behavior while waiting for email verification:
+		// repeated POST without resend returns existing signup as-is.
+		if (waitingForEmailVerification && !resend) {
+			poco_information(Logger(), fmt::format(
+										 "SIGNUP: idempotent pending signup for '{}' reg='{}' "
+										 "returning existing signup '{}'",
+										 UserName, registrationId, existing.info.id));
+			Poco::JSON::Object ExistingAnswer;
+			existing.to_json(ExistingAnswer);
+			return ReturnObject(ExistingAnswer);
+		}
+
+		const bool reuseExisting = resend && waitingForEmailVerification;
 
 		// Reuse existing signup UUID for resend; otherwise generate a new one.
 		const auto SignupUUID = reuseExisting ? existing.info.id : MicroServiceCreateUUID();
@@ -108,6 +127,28 @@ namespace OpenWifi {
 
 		SecurityObjects::UserInfo UI;
 		UI.from_json(Answer);
+
+		// Defensive guard for legacy/non-normalized records: never create a second
+		// signup row for the same subscriber userId.
+		if (!reuseExisting) {
+			ProvObjects::SignupEntry byUserId{};
+			if (StorageService()->SignupDB().GetRecord("userid", UI.id, byUserId)) {
+				if (byUserId.statusCode == ProvObjects::SignupStatusCodes::SignupWaitingForEmail) {
+					poco_warning(Logger(), fmt::format(
+										   "SIGNUP: found existing pending signup by userId='{}' "
+										   "signup='{}', returning existing row",
+										   UI.id, byUserId.info.id));
+					Poco::JSON::Object ExistingByUserIdAnswer;
+					byUserId.to_json(ExistingByUserIdAnswer);
+					return ReturnObject(ExistingByUserIdAnswer);
+				}
+				poco_warning(Logger(), fmt::format(
+									   "SIGNUP: preventing duplicate signup row for userId='{}' "
+									   "existingSignup='{}' incomingSignup='{}'",
+									   UI.id, byUserId.info.id, SignupUUID));
+				return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+			}
+		}
 
 		// Build the SignupEntry to return, then persist it (update vs create)
 		ProvObjects::SignupEntry se = reuseExisting ? existing : ProvObjects::SignupEntry{};
