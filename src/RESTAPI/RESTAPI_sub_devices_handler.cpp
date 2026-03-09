@@ -572,15 +572,6 @@ namespace OpenWifi {
 		inventoryRecord.venue = resolvedVenueId;
 
 		if (!inventoryDB.CreateRecord(inventoryRecord)) {
-			// The record may have been created by auto-discovery concurrently.
-			if (inventoryDB.GetRecord("serialNumber", newObject.serialNumber, inventoryRecord)) {
-				poco_information(Logger(),
-								 fmt::format("[SUBSCRIBER_DEVICE_CREATE][CreateInventoryRecord]: "
-											 "create raced; inventory now exists for serial=[{}], "
-											 "id=[{}].",
-											 newObject.serialNumber, inventoryRecord.info.id));
-				return true;
-			}
 			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE]: Failed to create "
 											   "inventory record for serial [{}].",
 											   newObject.serialNumber));
