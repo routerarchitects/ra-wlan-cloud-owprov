@@ -5,6 +5,7 @@
 #include "storage_sub_devices.h"
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
 #include "StorageService.h"
+#include "Poco/String.h"
 #include "framework/OpenWifiTypes.h"
 #include "framework/RESTAPI_utils.h"
 
@@ -34,7 +35,8 @@ namespace OpenWifi {
 		ORM::Field{"billingCode", ORM::FieldType::FT_TEXT},
 		ORM::Field{"configuration", ORM::FieldType::FT_TEXT},
 		ORM::Field{"suspended", ORM::FieldType::FT_BOOLEAN},
-		ORM::Field{"realMacAddress", ORM::FieldType::FT_TEXT}};
+		ORM::Field{"realMacAddress", ORM::FieldType::FT_TEXT},
+		ORM::Field{"deviceGroup", ORM::FieldType::FT_TEXT}};
 
 	static ORM::IndexVec SubscriberDeviceDB_Indexes{
 		{std::string("subscriber_device_name_index4"),
@@ -51,7 +53,9 @@ namespace OpenWifi {
 
 	bool SubscriberDeviceDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
 		to = Version();
-		std::vector<std::string> Script{};
+		std::vector<std::string> Script{
+			"alter table " + TableName_ + " add column deviceGroup text",
+			"alter table " + TableName_ + " drop column if exists gateway"};
 		RunScript(Script);
 		return true;
 	}
@@ -84,11 +88,13 @@ void ORM::DB<OpenWifi::SubDeviceDBRecordType, OpenWifi::ProvObjects::SubscriberD
 	Out.state = In.get<17>();
 	Out.locale = In.get<18>();
 	Out.billingCode = In.get<19>();
-	Out.configuration =
-		OpenWifi::RESTAPI_utils::to_object_array<OpenWifi::ProvObjects::DeviceConfigurationElement>(
-			In.get<20>());
+	Out.deviceConfiguration = In.get<20>();
 	Out.suspended = In.get<21>();
 	Out.realMacAddress = In.get<22>();
+	Out.deviceGroup = In.get<23>();
+	if (!Out.deviceGroup.empty()) {
+		Poco::toLowerInPlace(Out.deviceGroup);
+	}
 }
 
 template <>
@@ -114,7 +120,8 @@ void ORM::DB<OpenWifi::SubDeviceDBRecordType, OpenWifi::ProvObjects::SubscriberD
 	Out.set<17>(In.state);
 	Out.set<18>(In.locale);
 	Out.set<19>(In.billingCode);
-	Out.set<20>(OpenWifi::RESTAPI_utils::to_string(In.configuration));
+	Out.set<20>(In.deviceConfiguration);
 	Out.set<21>(In.suspended);
 	Out.set<22>(In.realMacAddress);
+	Out.set<23>(Poco::toLower(In.deviceGroup));
 }

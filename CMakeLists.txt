@@ -168,7 +168,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_managementRole_list_handler.cpp src/RESTAPI/RESTAPI_managementRole_list_handler.h
         src/RESTAPI/RESTAPI_configurations_list_handler.cpp src/RESTAPI/RESTAPI_configurations_list_handler.h
         src/RESTAPI/RESTAPI_iptocountry_handler.cpp src/RESTAPI/RESTAPI_iptocountry_handler.h
-        src/RESTAPI/RESTAPI_signup_handler.h src/RESTAPI/RESTAPI_signup_handler.cpp
+        src/RESTAPI/RESTAPI_subscriber_handler.h src/RESTAPI/RESTAPI_subscriber_handler.cpp
         src/RESTAPI/RESTAPI_asset_server.cpp src/RESTAPI/RESTAPI_asset_server.h
         src/RESTAPI/RESTAPI_db_helpers.h
         src/RESTAPI/RESTAPI_map_handler.cpp src/RESTAPI/RESTAPI_map_handler.h
@@ -197,7 +197,6 @@ add_executable(owprov
         src/Kafka_ProvUpdater.cpp src/Kafka_ProvUpdater.h
         src/RESTAPI/RESTAPI_sub_devices_list_handler.cpp src/RESTAPI/RESTAPI_sub_devices_list_handler.h
         src/RESTAPI/RESTAPI_sub_devices_handler.cpp src/RESTAPI/RESTAPI_sub_devices_handler.h
-        src/RESTAPI/RESTAPI_subscriber_venue_handler.cpp src/RESTAPI/RESTAPI_subscriber_venue_handler.h
         src/RESTAPI/RESTAPI_service_class_list_handler.cpp src/RESTAPI/RESTAPI_service_class_list_handler.h
         src/RESTAPI/RESTAPI_service_class_handler.cpp src/RESTAPI/RESTAPI_service_class_handler.h
         src/RESTAPI/RESTAPI_operators_list_handler.cpp src/RESTAPI/RESTAPI_operators_list_handler.h

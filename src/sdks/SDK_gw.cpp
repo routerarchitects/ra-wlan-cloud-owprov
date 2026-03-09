@@ -211,6 +211,17 @@ namespace OpenWifi::SDK::GW {
 			return false;
 		}
 
+		bool Delete(RESTAPIHandler *client, const std::string &SerialNumber) {
+			OpenWifi::OpenAPIRequestDelete R(OpenWifi::uSERVICE_GATEWAY,
+											 "/api/v1/device/" + SerialNumber, {}, 10000);
+			const auto ResponseStatus =
+				R.Do(client ? client->UserInfo_.webtoken.access_token_ : "");
+			return ResponseStatus == Poco::Net::HTTPResponse::HTTP_OK ||
+				   ResponseStatus == Poco::Net::HTTPResponse::HTTP_NO_CONTENT ||
+				   ResponseStatus == Poco::Net::HTTPResponse::HTTP_ACCEPTED ||
+				   ResponseStatus == Poco::Net::HTTPResponse::HTTP_NOT_FOUND;
+		}
+
 		bool Configure(RESTAPIHandler *client, const std::string &SerialNumber,
 					   Poco::JSON::Object::Ptr &Configuration, Poco::JSON::Object::Ptr &Response) {
 

@@ -88,6 +88,7 @@ namespace OpenWifi::ProvObjects {
 	void Entity::to_json(Poco::JSON::Object &Obj) const {
 		info.to_json(Obj);
 		field_to_json(Obj, "parent", parent);
+		field_to_json(Obj, "operatorId", operatorId);
 		field_to_json(Obj, "venues", venues);
 		field_to_json(Obj, "children", children);
 		field_to_json(Obj, "contacts", contacts);
@@ -108,6 +109,7 @@ namespace OpenWifi::ProvObjects {
 		try {
 			info.from_json(Obj);
 			field_from_json(Obj, "parent", parent);
+			field_from_json(Obj, "operatorId", operatorId);
 			field_from_json(Obj, "venues", venues);
 			field_from_json(Obj, "children", children);
 			field_from_json(Obj, "contacts", contacts);
@@ -147,6 +149,7 @@ namespace OpenWifi::ProvObjects {
 		info.to_json(Obj);
 		field_to_json(Obj, "parent", parent);
 		field_to_json(Obj, "entity", entity);
+		field_to_json(Obj, "subscriber", subscriber);
 		field_to_json(Obj, "children", children);
 		field_to_json(Obj, "devices", devices);
 		field_to_json(Obj, "topology", topology);
@@ -171,6 +174,7 @@ namespace OpenWifi::ProvObjects {
 			info.from_json(Obj);
 			field_from_json(Obj, "parent", parent);
 			field_from_json(Obj, "entity", entity);
+			field_from_json(Obj, "subscriber", subscriber);
 			field_from_json(Obj, "children", children);
 			field_from_json(Obj, "devices", devices);
 			field_from_json(Obj, "topology", topology);
@@ -998,6 +1002,7 @@ namespace OpenWifi::ProvObjects {
 		info.to_json(Obj);
 		field_to_json(Obj, "serialNumber", serialNumber);
 		field_to_json(Obj, "deviceType", deviceType);
+		field_to_json(Obj, "deviceGroup", deviceGroup);
 		field_to_json(Obj, "operatorId", operatorId);
 		field_to_json(Obj, "subscriberId", subscriberId);
 		field_to_json(Obj, "location", location);
@@ -1010,7 +1015,7 @@ namespace OpenWifi::ProvObjects {
 		field_to_json(Obj, "state", state);
 		field_to_json(Obj, "locale", locale);
 		field_to_json(Obj, "billingCode", billingCode);
-		field_to_json(Obj, "configuration", configuration);
+		field_to_json(Obj, "deviceConfiguration", deviceConfiguration);
 		field_to_json(Obj, "suspended", suspended);
 		field_to_json(Obj, "realMacAddress", realMacAddress);
 	}
@@ -1020,6 +1025,7 @@ namespace OpenWifi::ProvObjects {
 			info.from_json(Obj);
 			field_from_json(Obj, "serialNumber", serialNumber);
 			field_from_json(Obj, "deviceType", deviceType);
+			field_from_json(Obj, "deviceGroup", deviceGroup);
 			field_from_json(Obj, "operatorId", operatorId);
 			field_from_json(Obj, "subscriberId", subscriberId);
 			field_from_json(Obj, "location", location);
@@ -1032,6 +1038,7 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "state", state);
 			field_from_json(Obj, "locale", locale);
 			field_from_json(Obj, "billingCode", billingCode);
+			field_from_json(Obj, "deviceConfiguration", deviceConfiguration);
 			field_from_json(Obj, "configuration", configuration);
 			field_from_json(Obj, "suspended", suspended);
 			field_from_json(Obj, "realMacAddress", realMacAddress);

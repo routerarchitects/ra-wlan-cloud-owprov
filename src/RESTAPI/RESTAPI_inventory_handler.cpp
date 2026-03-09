@@ -142,6 +142,17 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		const auto subscriberAssociationExists =
+			!Existing.subscriber.empty() ||
+			StorageService()->SubscriberDeviceDB().Exists("serialNumber", Existing.serialNumber);
+		if (subscriberAssociationExists) {
+			poco_warning(Logger(), fmt::format("[INVENTORY_DELETE]: Rejecting delete for serial "
+											   "[{}] because it is subscriber-associated. "
+											   "Use subscriber device delete API.",
+											   Existing.serialNumber));
+			return BadRequest(RESTAPI::Errors::SubscriberDeviceDeleteRequiresSubscriberApi);
+		}
+
 		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
 				  Existing.info.id);
 		RemoveMembership(StorageService()->VenueDB(), &ProvObjects::Venue::configurations,
@@ -237,6 +248,16 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
 		}
 
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue venueRecord;
+			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, venueRecord)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			if (!venueRecord.subscriber.empty()) {
+				return BadRequest(RESTAPI::Errors::VenueAddDeviceRequiresSubscriberApi);
+			}
+		}
+
 		if (!NewObject.venue.empty() && !NewObject.entity.empty()) {
 			return BadRequest(RESTAPI::Errors::NotBoth);
 		}
@@ -282,7 +303,6 @@ namespace OpenWifi {
 							 NewObject.entity, NewObject.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, "",
 							 NewObject.venue, NewObject.info.id);
-
 			ProvObjects::InventoryTag NewTag;
 			DB_.GetRecord("id", NewObject.info.id, NewTag);
 			Poco::JSON::Object Answer;
@@ -466,6 +486,21 @@ namespace OpenWifi {
 							 FromEntity, ToEntity, Existing.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, FromVenue,
 							 ToVenue, Existing.info.id);
+
+			ProvObjects::SubscriberDevice subscriberDevice;
+			if (StorageService()->SubscriberDeviceDB().GetRecord("serialNumber", SerialNumber,
+																 subscriberDevice) &&
+				subscriberDevice.deviceConfiguration != Existing.deviceConfiguration) {
+				subscriberDevice.deviceConfiguration = Existing.deviceConfiguration;
+				subscriberDevice.info.modified = Utils::Now();
+				if (!StorageService()->SubscriberDeviceDB().UpdateRecord(
+						"id", subscriberDevice.info.id, subscriberDevice)) {
+					poco_warning(Logger(), fmt::format("[INVENTORY_UPDATE]: Failed to sync "
+													   "subscriber-device configuration for "
+													   "serial [{}].",
+													   SerialNumber));
+				}
+			}
 
 			SDK::GW::Device::SetOwnerShip(this, SerialNumber, Existing.entity, Existing.venue,
 										  Existing.subscriber);

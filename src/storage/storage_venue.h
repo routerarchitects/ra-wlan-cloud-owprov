@@ -16,7 +16,7 @@ namespace OpenWifi {
 						std::string, std::string, std::string, std::string, std::string,
 						std::string, std::string, std::string, std::string, std::string,
 						std::string, std::string, std::string, std::string, std::string,
-						std::string, std::string, std::string, std::string>
+						std::string, std::string, std::string, std::string, std::string>
 		VenueDBRecordType;
 
 	class VenueDB : public ORM::DB<VenueDBRecordType, ProvObjects::Venue> {

@@ -39,7 +39,8 @@ namespace OpenWifi {
 										 ORM::Field{"managementPolicies", ORM::FieldType::FT_TEXT},
 										 ORM::Field{"managementRoles", ORM::FieldType::FT_TEXT},
 										 ORM::Field{"maps", ORM::FieldType::FT_TEXT},
-										 ORM::Field{"configurations", ORM::FieldType::FT_TEXT}};
+										 ORM::Field{"configurations", ORM::FieldType::FT_TEXT},
+										 ORM::Field{"operatorId", ORM::FieldType::FT_TEXT}};
 
 	static ORM::IndexVec EntityDB_Indexes{
 		{std::string("entity_name_index"),
@@ -56,7 +57,8 @@ namespace OpenWifi {
 			"alter table " + TableName_ + " add column maps text",
 			"alter table " + TableName_ + " add column configurations text",
 			"alter table " + TableName_ + " add column managementRoles text",
-			"alter table " + TableName_ + " add column deviceRules text"};
+			"alter table " + TableName_ + " add column deviceRules text",
+			"alter table " + TableName_ + " add column operatorId text"};
 
 		for (const auto &i : Script) {
 			try {
@@ -235,6 +237,7 @@ void ORM::DB<OpenWifi::EntityDBRecordType, OpenWifi::ProvObjects::Entity>::Conve
 	Out.managementRoles = OpenWifi::RESTAPI_utils::to_object_array(In.get<19>());
 	Out.maps = OpenWifi::RESTAPI_utils::to_object_array(In.get<20>());
 	Out.configurations = OpenWifi::RESTAPI_utils::to_object_array(In.get<21>());
+	Out.operatorId = In.get<22>();
 }
 
 template <>
@@ -262,4 +265,5 @@ void ORM::DB<OpenWifi::EntityDBRecordType, OpenWifi::ProvObjects::Entity>::Conve
 	Out.set<19>(OpenWifi::RESTAPI_utils::to_string(In.managementRoles));
 	Out.set<20>(OpenWifi::RESTAPI_utils::to_string(In.maps));
 	Out.set<21>(OpenWifi::RESTAPI_utils::to_string(In.configurations));
+	Out.set<22>(In.operatorId);
 }

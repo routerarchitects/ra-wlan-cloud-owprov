@@ -155,6 +155,11 @@ components:
           description: If empty, then this is the root entity, otherwise this points to a parent entity
           type: string
           format: uuid
+        operatorId:
+          description: Operator owner of this entity (set automatically for operator-scoped entities)
+          type: string
+          format: uuid
+          readOnly: true
         children:
           type: array
           items:
@@ -797,6 +802,7 @@ components:
         deviceConfiguration:
           type: string
           format: uuid
+          description: Configuration UUID linked to this inventory device.
         deviceRules:
           $ref: '#/components/schemas/DeviceRules'
         managementPolicy:
@@ -1165,6 +1171,11 @@ components:
           type: string
           minLength: 4
           maxLength: 16
+        entityId:
+          description: Generated entity assigned to this operator
+          type: string
+          format: uuid
+          readOnly: true
 
     OperatorList:
       type: object
@@ -1188,6 +1199,10 @@ components:
           format: uuid
         deviceType:
           type: string
+        deviceGroup:
+          type: string
+          description: Device group role. `olg` marks the first subscriber device and `ap` marks additional subscriber devices.
+          example: olg
         subscriberId:
           type: string
           format: uuid
@@ -1213,8 +1228,13 @@ components:
         suspended:
           type: boolean
           default: false
+        deviceConfiguration:
+          type: string
+          format: uuid
         configuration:
           type: array
+          deprecated: true
+          description: Legacy inline configuration payload. If provided, owprov will store it in configurations and link via deviceConfiguration.
           items:
             $ref: '#/components/schemas/DeviceConfigurationElement'
         serviceClass:

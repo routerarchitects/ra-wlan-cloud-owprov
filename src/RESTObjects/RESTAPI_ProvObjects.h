@@ -104,6 +104,7 @@ namespace OpenWifi::ProvObjects {
     struct Entity {
         ObjectInfo info;
         Types::UUID_t parent;
+        Types::UUID_t operatorId;
         Types::UUIDvec_t children;
         Types::UUIDvec_t venues;
         Types::UUIDvec_t contacts;    // all contacts associated in this entity
@@ -141,6 +142,7 @@ namespace OpenWifi::ProvObjects {
         ObjectInfo info;
         Types::UUID_t entity;
         Types::UUID_t parent;
+        std::string subscriber;
         Types::UUIDvec_t children;
         Types::UUID_t managementPolicy;
         Types::UUIDvec_t devices;
@@ -760,6 +762,7 @@ namespace OpenWifi::ProvObjects {
         ObjectInfo info;
         std::string serialNumber;
         std::string deviceType;
+        std::string deviceGroup;
         Types::UUID_t operatorId;
         Types::UUID_t subscriberId;
         SubLocation location;
@@ -772,6 +775,7 @@ namespace OpenWifi::ProvObjects {
         std::string state;
         std::string locale;
         std::string billingCode;
+        Types::UUID_t deviceConfiguration;
         DeviceConfigurationElementVec configuration;
         bool suspended = false;
         std::string realMacAddress;

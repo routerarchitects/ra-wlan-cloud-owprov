@@ -24,6 +24,7 @@ namespace OpenWifi::SDK::GW {
 					   Poco::JSON::Object::Ptr &Configuration, Poco::JSON::Object::Ptr &Response);
 		bool Upgrade(RESTAPIHandler *client, const std::string &Mac, uint64_t When,
 					 const std::string &ImageName, std::string &status);
+		bool Delete(RESTAPIHandler *client, const std::string &SerialNumber);
 
 		bool SetVenue(RESTAPIHandler *client, const std::string &SerialNumber,
 					  const std::string &uuid);
