@@ -24,7 +24,9 @@
 #include "framework/utils.h"
 #include "sdks/SDK_gw.h"
 #include "sdks/SDK_sec.h"
-
+#ifdef CGW_INTEGRATION
+#include "InfraGroupEvents.h"
+#endif
 namespace OpenWifi {
 
 	void RESTAPI_inventory_handler::DoGet() {
@@ -187,6 +189,16 @@ namespace OpenWifi {
 						 "", Existing.info.id);
 		DB_.DeleteRecord("id", Existing.info.id);
 		SerialNumberCache()->DeleteSerialNumber(SerialNumber);
+#ifdef CGW_INTEGRATION
+						
+			uint64_t groupId = -1;
+			if (!StorageService()->GroupsMapDB().GetGroup(Existing.venue, groupId)) {
+				poco_error(Logger(), fmt::format("{}: No CGW group mapping for venue {}", SerialNumber, Existing.venue));
+			}
+			
+			PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{SerialNumber});
+			poco_debug(Logger(), fmt::format("Message published for infra del VenueId {}: SerialNumber ({})", Existing.venue,SerialNumber));
+#endif
 		return OK();
 	}
 
@@ -303,6 +315,16 @@ namespace OpenWifi {
 							 NewObject.entity, NewObject.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::devices, "",
 							 NewObject.venue, NewObject.info.id);
+#ifdef CGW_INTEGRATION
+						
+			uint64_t groupId = -1;
+			if (!StorageService()->GroupsMapDB().GetGroup(NewObject.venue, groupId)) {
+				poco_error(Logger(), fmt::format("{}: No CGW group mapping for venue {}", SerialNumber, NewObject.venue));
+			}
+			
+			PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{SerialNumber});
+			poco_debug(Logger(), fmt::format("Message published for infra add VenueId {}: SerialNumber ({})", NewObject.venue,SerialNumber));
+#endif
 			ProvObjects::InventoryTag NewTag;
 			DB_.GetRecord("id", NewObject.info.id, NewTag);
 			Poco::JSON::Object Answer;
