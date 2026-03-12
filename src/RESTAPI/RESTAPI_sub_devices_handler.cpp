@@ -429,14 +429,17 @@ namespace OpenWifi {
 			return true;
 		}
 
-		const auto subscriberDeviceCount =
-			DB_.Count(DB_.OP("subscriberId", ORM::EQ, existingObject.subscriberId));
-		if (subscriberDeviceCount > 1) {
+		const auto targetSubscriberId =
+			updateObject.subscriberId.empty() ? existingObject.subscriberId : updateObject.subscriberId;
+		const auto otherOlgCount = DB_.Count(fmt::format(
+			" subscriberId='{}' and lower(deviceGroup)='olg' and id!='{}' ",
+			ORM::Escape(targetSubscriberId), ORM::Escape(existingObject.info.id)));
+		if (otherOlgCount > 0) {
 			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_UPDATE]: Rejecting serial [{}]. "
-											   "Only first device can be olg. subscriber [{}], "
-											   "device count [{}].",
-											   existingObject.serialNumber, existingObject.subscriberId,
-											   subscriberDeviceCount));
+											   "Only one OLG device is allowed per subscriber. "
+											   "subscriber [{}], other OLG count [{}].",
+											   existingObject.serialNumber, targetSubscriberId,
+											   otherOlgCount));
 			BadRequest(RESTAPI::Errors::OnlyFirstSubscriberDeviceCanBeOLG);
 			return false;
 		}
