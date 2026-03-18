@@ -1,8 +1,8 @@
-openapi: 3.0.1
+openapi: 1.0.0
 info:
   title: OpenWiFi Provisioning Model
   description: Definitions and APIs to manages an OpenWiFi network.
-  version: 2.5.0
+  version: 1.0.0
   license:
     name: BSD3
     url: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
@@ -998,41 +998,41 @@ components:
 
 
     SignupEntry:
-      type: object
-      properties:
-        allOf:
-          $ref: '#/components/schemas/ObjectInfo'
-        email:
-          type: string
-          format: email
-        userId:
-          type: string
-          format: uuid
-        operatorId:
-          type: string
-          format: uuid
-        macAddress:
-          type: string
-        serialNumber:
-          type: string
-        created:
-          type: integer
-          format: int64
-        completed:
-          type: integer
-          format: int64
-        error:
-          type: integer
-          format: int64
-        status:
-          type: string
-        statusCode:
-          type: integer
-          format: int64
-        registrationId:
-          type: string
-          minLength: 4
-          maxLength: 16
+      allOf:
+        - $ref: '#/components/schemas/ObjectInfo'
+        - type: object
+          properties:
+            email:
+              type: string
+              format: email
+            userId:
+              type: string
+              format: uuid
+            operatorId:
+              type: string
+              format: uuid
+            macAddress:
+              type: string
+            serialNumber:
+              type: string
+            created:
+              type: integer
+              format: int64
+            completed:
+              type: integer
+              format: int64
+            error:
+              type: integer
+              format: int64
+            status:
+              type: string
+            statusCode:
+              type: integer
+              format: int64
+            registrationId:
+              type: string
+              minLength: 4
+              maxLength: 16
 
     Variable:
       type: object
@@ -1509,6 +1509,175 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TagValuePair'
+
+    GLBLRAccountInfo:
+      type: object
+      properties:
+        allOf:
+          $ref: '#/components/schemas/ObjectInfo'
+        privateKey:
+          type: string
+        country:
+          type: string
+        province:
+          type: string
+        city:
+          type: string
+        organization:
+          type: string
+        commonName:
+          type: string
+        CSR:
+          type: string
+        CSRPrivateKey:
+          type: string
+        CSRPublicKey:
+          type: string
+        GlobalReachAcctId:
+          type: string
+
+    GLBLRCertificateInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        accountId:
+          type: string
+          format: uuid
+        csr:
+          type: string
+        certificate:
+          type: string
+        certificateChain:
+          type: string
+        certificateId:
+          type: string
+        expiresAt:
+          type: integer
+          format: int64
+        created:
+          type: integer
+          format: int64
+
+    GooglOrionAccountInfo:
+      type: object
+      properties:
+        allOf:
+          $ref: '#/components/schemas/ObjectInfo'
+        privateKey:
+          type: string
+        certificate:
+          type: string
+        cacerts:
+          type: array
+          items:
+            type: string
+
+    RADIUSServer:
+      type: object
+      properties:
+        Hostname:
+          type: string
+        IP:
+          type: string
+        Port:
+          type: integer
+          format: int64
+        Secret:
+          type: string
+
+    RADIUSEndPointRadiusType:
+      type: object
+      properties:
+        Authentication:
+          type: array
+          items:
+            $ref: '#/components/schemas/RADIUSServer'
+        Accounting:
+          type: array
+          items:
+            $ref: '#/components/schemas/RADIUSServer'
+        CoA:
+          type: array
+          items:
+            $ref: '#/components/schemas/RADIUSServer'
+        AccountingInterval:
+          type: integer
+          format: int64
+
+    RADIUSEndPointRadsecType:
+      type: object
+      properties:
+        Hostname:
+          type: string
+        IP:
+          type: string
+        Port:
+          type: integer
+          format: int64
+        Secret:
+          type: string
+        OpenRoamingType:
+          type: string
+        UseOpenRoamingAccount:
+          type: string
+        Weight:
+          type: integer
+          format: int64
+        Certificate:
+          type: string
+        PrivateKey:
+          type: string
+        CaCerts:
+          type: array
+          items:
+            type: string
+        AllowSelfSigned:
+          type: boolean
+
+    RADIUSEndPoint:
+      type: object
+      properties:
+        allOf:
+          $ref: '#/components/schemas/ObjectInfo'
+        Type:
+          type: string
+        PoolStrategy:
+          type: string
+        UseGWProxy:
+          type: boolean
+        Index:
+          type: string
+        UsedBy:
+          type: array
+          items:
+            type: string
+        RadiusServers:
+          type: array
+          items:
+            $ref: '#/components/schemas/RADIUSEndPointRadiusType'
+        RadsecServers:
+          type: array
+          items:
+            $ref: '#/components/schemas/RADIUSEndPointRadsecType'
+        NasIdentifier:
+          type: string
+        AccountingInterval:
+          type: integer
+          format: int64
+
+    RADIUSEndpointUpdateStatus:
+      type: object
+      properties:
+        lastUpdate:
+          type: integer
+          format: int64
+        lastConfigurationChange:
+          type: integer
+          format: int64
 
 paths:
   /entity:
@@ -4091,6 +4260,147 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
+  /subscriber:
+    post:
+      tags:
+        - Subscribers
+      summary: Create or resend subscriber signup
+      operationId: createSubscriber
+      parameters:
+        - in: query
+          name: email
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: registrationId
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: resend
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Signup created or resent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignupEntry'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags:
+        - Subscribers
+      summary: Retrieve subscriber signup
+      operationId: getSubscriber
+      parameters:
+        - in: query
+          name: email
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: signupUUID
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: macAddress
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: listOnly
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Signup information
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SignupEntry'
+                  - type: object
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Subscribers
+      summary: Update subscriber signup progress
+      operationId: updateSubscriber
+      parameters:
+        - in: query
+          name: signupUUID
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: userId
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: operation
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: mac
+          schema:
+            type: string
+          required: false
+      responses:
+        200:
+          description: Signup updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignupEntry'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /subscriber/{id}:
+    delete:
+      tags:
+        - Subscribers
+      summary: Delete a subscriber
+      operationId: deleteSubscriber
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: subscriberId
+          schema:
+            type: string
+          required: false
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
   /operatorLocation:
     get:
       tags:
@@ -4444,6 +4754,616 @@ paths:
       responses:
         200:
           $ref: '#/components/schemas/Dashboard'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /RADIUSEndPoints:
+    get:
+      tags:
+        - RADIUS
+      summary: Retrieve RADIUS endpoints
+      operationId: getRadiusEndpoints
+      parameters:
+        - in: query
+          name: offset
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: countOnly
+          schema:
+            type: boolean
+          required: false
+        - in: query
+          name: currentStatus
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: RADIUS endpoints or status
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/RADIUSEndpointUpdateStatus'
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/RADIUSEndPoint'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags:
+        - RADIUS
+      summary: Trigger RADIUS endpoint update
+      operationId: updateRadiusEndpoints
+      parameters:
+        - in: query
+          name: updateEndpoints
+          schema:
+            type: boolean
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+
+  /RADIUSEndPoint/{id}:
+    get:
+      tags:
+        - RADIUS
+      summary: Retrieve a RADIUS endpoint
+      operationId: getRadiusEndpoint
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          description: RADIUS endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RADIUSEndPoint'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - RADIUS
+      summary: Create a RADIUS endpoint
+      operationId: createRadiusEndpoint
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RADIUSEndPoint'
+      responses:
+        200:
+          description: Created endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RADIUSEndPoint'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags:
+        - RADIUS
+      summary: Modify a RADIUS endpoint
+      operationId: updateRadiusEndpoint
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RADIUSEndPoint'
+      responses:
+        200:
+          description: Updated endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RADIUSEndPoint'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - RADIUS
+      summary: Delete a RADIUS endpoint
+      operationId: deleteRadiusEndpoint
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /openroaming/globalreach/accounts:
+    get:
+      tags:
+        - OpenRoaming
+      summary: Retrieve GlobalReach accounts
+      operationId: getGlobalReachAccounts
+      parameters:
+        - in: query
+          name: offset
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: countOnly
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Account list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GLBLRAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /openroaming/globalreach/account/{id}:
+    get:
+      tags:
+        - OpenRoaming
+      summary: Retrieve GlobalReach account
+      operationId: getGlobalReachAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLBLRAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - OpenRoaming
+      summary: Create GlobalReach account
+      operationId: createGlobalReachAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GLBLRAccountInfo'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLBLRAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - OpenRoaming
+      summary: Modify GlobalReach account
+      operationId: updateGlobalReachAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GLBLRAccountInfo'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLBLRAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - OpenRoaming
+      summary: Delete GlobalReach account
+      operationId: deleteGlobalReachAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /openroaming/globalreach/certificates/{account}:
+    get:
+      tags:
+        - OpenRoaming
+      summary: Retrieve GlobalReach certificates
+      operationId: getGlobalReachCertificates
+      parameters:
+        - in: path
+          name: account
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: offset
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: countOnly
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Certificate list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GLBLRCertificateInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /openroaming/globalreach/certificate/{account}/{id}:
+    get:
+      tags:
+        - OpenRoaming
+      summary: Retrieve GlobalReach certificate
+      operationId: getGlobalReachCertificate
+      parameters:
+        - in: path
+          name: account
+          schema:
+            type: string
+          required: true
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLBLRCertificateInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - OpenRoaming
+      summary: Create GlobalReach certificate
+      operationId: createGlobalReachCertificate
+      parameters:
+        - in: path
+          name: account
+          schema:
+            type: string
+          required: true
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GLBLRCertificateInfo'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLBLRCertificateInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - OpenRoaming
+      summary: Update GlobalReach certificate
+      operationId: updateGlobalReachCertificate
+      parameters:
+        - in: path
+          name: account
+          schema:
+            type: string
+          required: true
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: updateCertificate
+          schema:
+            type: boolean
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GLBLRCertificateInfo'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLBLRCertificateInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - OpenRoaming
+      summary: Delete GlobalReach certificate
+      operationId: deleteGlobalReachCertificate
+      parameters:
+        - in: path
+          name: account
+          schema:
+            type: string
+          required: true
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /openroaming/orion/accounts:
+    get:
+      tags:
+        - OpenRoaming
+      summary: Retrieve Orion accounts
+      operationId: getOrionAccounts
+      parameters:
+        - in: query
+          name: offset
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          required: false
+        - in: query
+          name: countOnly
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Account list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GooglOrionAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /openroaming/orion/account/{id}:
+    get:
+      tags:
+        - OpenRoaming
+      summary: Retrieve Orion account
+      operationId: getOrionAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GooglOrionAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - OpenRoaming
+      summary: Create Orion account
+      operationId: createOrionAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GooglOrionAccountInfo'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GooglOrionAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - OpenRoaming
+      summary: Modify Orion account
+      operationId: updateOrionAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GooglOrionAccountInfo'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GooglOrionAccountInfo'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - OpenRoaming
+      summary: Delete Orion account
+      operationId: deleteOrionAccount
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
         403:
           $ref: '#/components/responses/Unauthorized'
         404:
