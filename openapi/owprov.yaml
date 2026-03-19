@@ -27,13 +27,40 @@ components:
 
   responses:
     NotFound:
-      $ref: 'https://github.com/Telecominfraproject/wlan-cloud-ucentralsec/blob/main/openpapi/owsec.yaml#/components/responses/NotFound'
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errorCode:
+                type: integer
+              errorDetails:
+                type: string
     Unauthorized:
-      $ref: 'https://github.com/Telecominfraproject/wlan-cloud-ucentralsec/blob/main/openpapi/owsec.yaml#/components/responses/Unauthorized'
+      description: Unauthorized request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errorCode:
+                type: integer
+              errorDetails:
+                type: string
     Success:
-      $ref: 'https://github.com/Telecominfraproject/wlan-cloud-ucentralsec/blob/main/openpapi/owsec.yaml#/components/responses/Success'
+      description: Successful operation.
     BadRequest:
-      $ref: 'https://github.com/Telecominfraproject/wlan-cloud-ucentralsec/blob/main/openpapi/owsec.yaml#/components/responses/BadRequest'
+      description: Invalid or missing parameters.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errorCode:
+                type: integer
+              errorDetails:
+                type: string
 
   schemas:
 
@@ -1679,7 +1706,7 @@ paths:
       summary: Retrieve a list of entities.
       parameters:
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -1857,7 +1884,7 @@ paths:
       summary: Retrieve a list of contacts.
       parameters:
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -2032,7 +2059,7 @@ paths:
       summary: Retrieve a list of locations.
       parameters:
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -2206,7 +2233,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -2548,7 +2575,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -2776,7 +2803,7 @@ paths:
       summary: Retrieve the list of maps
       parameters:
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -2933,7 +2960,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3097,7 +3124,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3145,7 +3172,7 @@ paths:
       summary: Retrieve a list of configurations.
       parameters:
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3393,7 +3420,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3531,7 +3558,7 @@ paths:
       summary: Retrieve the list of currently configured operators
       parameters:
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3684,7 +3711,7 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3844,7 +3871,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -3899,7 +3926,11 @@ paths:
           required: true
       responses:
         200:
-          $ref: '#/components/schemas/SubscriberDevice'
+          description: Subscriber device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriberDevice'
         400:
           $ref: '#/components/responses/BadRequest'
         403:
@@ -3938,8 +3969,7 @@ paths:
           schema:
             type: string
             format: uuid
-            example:
-              should be set to 0 when creating a new operator
+            example: "00000000-0000-0000-0000-000000000000"
           required: true
       requestBody:
         content:
@@ -3948,7 +3978,11 @@ paths:
               $ref: '#/components/schemas/SubscriberDevice'
       responses:
         200:
-          $ref: '#/components/schemas/SubscriberDevice'
+          description: Subscriber device created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriberDevice'
         400:
           $ref: '#/components/responses/BadRequest'
         403:
@@ -3974,7 +4008,11 @@ paths:
               $ref: '#/components/schemas/SubscriberDevice'
       responses:
         200:
-          $ref: '#/components/schemas/SubscriberDevice'
+          description: Subscriber device updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriberDevice'
         400:
           $ref: '#/components/responses/BadRequest'
         403:
@@ -4116,162 +4154,6 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
-  /subscriber/{id}:
-    get:
-      tags:
-        - Subscribers
-      summary: Retrieve subscriber signup (path alias)
-      operationId: getSubscriberByIdPathAlias
-      parameters:
-        - in: path
-          name: id
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: email
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: signupUUID
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: macAddress
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: listOnly
-          schema:
-            type: boolean
-          required: false
-      responses:
-        200:
-          description: Signup information
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: '#/components/schemas/SignupEntry'
-                  - type: object
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    post:
-      tags:
-        - Subscribers
-      summary: Create or resend subscriber signup (path alias)
-      operationId: createSubscriberByIdPathAlias
-      parameters:
-        - in: path
-          name: id
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: email
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: registrationId
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: resend
-          schema:
-            type: boolean
-          required: false
-      responses:
-        200:
-          description: Signup created or resent
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SignupEntry'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    put:
-      tags:
-        - Subscribers
-      summary: Update subscriber signup progress (path alias)
-      operationId: updateSubscriberByIdPathAlias
-      parameters:
-        - in: path
-          name: id
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: signupUUID
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: userId
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: operation
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: mac
-          schema:
-            type: string
-          required: false
-      responses:
-        200:
-          description: Signup updated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SignupEntry'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    delete:
-      tags:
-        - Subscribers
-      summary: Delete a subscriber
-      operationId: deleteSubscriber
-      parameters:
-        - in: path
-          name: id
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: subscriberId
-          schema:
-            type: string
-          required: false
-      responses:
-        200:
-          $ref: '#/components/responses/Success'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-
   /ws:
     get:
       tags:
@@ -4323,7 +4205,7 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
@@ -4475,7 +4357,7 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: How many items to skip from the start (default: 0).
+          description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
             type: integer
