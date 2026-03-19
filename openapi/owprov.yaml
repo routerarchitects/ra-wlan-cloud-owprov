@@ -1,4 +1,4 @@
-openapi: 1.0.0
+openapi: 3.0.1
 info:
   title: OpenWiFi Provisioning Model
   description: Definitions and APIs to manages an OpenWiFi network.
@@ -1428,15 +1428,6 @@ components:
         - $ref: '#/components/schemas/StringList'
         - $ref: '#/components/schemas/TagValuePairList'
 
-    Dashboard:
-      type: object
-      properties:
-        snapshot:
-          type: integer
-          format: int64
-        tenants:
-          $ref: '#/components/schemas/TagIntPairList'
-
     SystemCommandSetLogLevel:
       type: object
       properties:
@@ -1511,30 +1502,30 @@ components:
             $ref: '#/components/schemas/TagValuePair'
 
     GLBLRAccountInfo:
-      type: object
-      properties:
-        allOf:
-          $ref: '#/components/schemas/ObjectInfo'
-        privateKey:
-          type: string
-        country:
-          type: string
-        province:
-          type: string
-        city:
-          type: string
-        organization:
-          type: string
-        commonName:
-          type: string
-        CSR:
-          type: string
-        CSRPrivateKey:
-          type: string
-        CSRPublicKey:
-          type: string
-        GlobalReachAcctId:
-          type: string
+      allOf:
+        - $ref: '#/components/schemas/ObjectInfo'
+        - type: object
+          properties:
+            privateKey:
+              type: string
+            country:
+              type: string
+            province:
+              type: string
+            city:
+              type: string
+            organization:
+              type: string
+            commonName:
+              type: string
+            CSR:
+              type: string
+            CSRPrivateKey:
+              type: string
+            CSRPublicKey:
+              type: string
+            GlobalReachAcctId:
+              type: string
 
     GLBLRCertificateInfo:
       type: object
@@ -1563,18 +1554,18 @@ components:
           format: int64
 
     GooglOrionAccountInfo:
-      type: object
-      properties:
-        allOf:
-          $ref: '#/components/schemas/ObjectInfo'
-        privateKey:
-          type: string
-        certificate:
-          type: string
-        cacerts:
-          type: array
-          items:
-            type: string
+      allOf:
+        - $ref: '#/components/schemas/ObjectInfo'
+        - type: object
+          properties:
+            privateKey:
+              type: string
+            certificate:
+              type: string
+            cacerts:
+              type: array
+              items:
+                type: string
 
     RADIUSServer:
       type: object
@@ -1639,35 +1630,35 @@ components:
           type: boolean
 
     RADIUSEndPoint:
-      type: object
-      properties:
-        allOf:
-          $ref: '#/components/schemas/ObjectInfo'
-        Type:
-          type: string
-        PoolStrategy:
-          type: string
-        UseGWProxy:
-          type: boolean
-        Index:
-          type: string
-        UsedBy:
-          type: array
-          items:
-            type: string
-        RadiusServers:
-          type: array
-          items:
-            $ref: '#/components/schemas/RADIUSEndPointRadiusType'
-        RadsecServers:
-          type: array
-          items:
-            $ref: '#/components/schemas/RADIUSEndPointRadsecType'
-        NasIdentifier:
-          type: string
-        AccountingInterval:
-          type: integer
-          format: int64
+      allOf:
+        - $ref: '#/components/schemas/ObjectInfo'
+        - type: object
+          properties:
+            Type:
+              type: string
+            PoolStrategy:
+              type: string
+            UseGWProxy:
+              type: boolean
+            Index:
+              type: string
+            UsedBy:
+              type: array
+              items:
+                type: string
+            RadiusServers:
+              type: array
+              items:
+                $ref: '#/components/schemas/RADIUSEndPointRadiusType'
+            RadsecServers:
+              type: array
+              items:
+                $ref: '#/components/schemas/RADIUSEndPointRadsecType'
+            NasIdentifier:
+              type: string
+            AccountingInterval:
+              type: integer
+              format: int64
 
     RADIUSEndpointUpdateStatus:
       type: object
@@ -1688,7 +1679,7 @@ paths:
       summary: Retrieve a list of entities.
       parameters:
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -1700,13 +1691,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of devices comma separated
+          description: Supply a comma-separated list of device IDs
           name: select
           schema:
             type: string
@@ -1728,6 +1713,33 @@ paths:
                 oneOf:
                   - $ref: '#/components/schemas/EntityList'
                   - $ref: '#/components/schemas/CountAnswer'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - Entities
+      operationId: importEntityTree
+      summary: Import full entity tree
+      parameters:
+        - in: query
+          name: setTree
+          schema:
+            type: boolean
+          required: true
+      requestBody:
+        description: Full entity tree payload
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
         400:
           $ref: '#/components/responses/BadRequest'
         403:
@@ -1845,7 +1857,7 @@ paths:
       summary: Retrieve a list of contacts.
       parameters:
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -1857,13 +1869,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of contacts comma separated
+          description: Supply a comma-separated list of contact IDs
           name: select
           schema:
             type: string
@@ -1872,12 +1878,6 @@ paths:
         - in: query
           description: return the number of contacts
           name: countOnly
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          description: return only the UUIDs of contacts
-          name: uuidOnly
           schema:
             type: boolean
           required: false
@@ -2032,7 +2032,7 @@ paths:
       summary: Retrieve a list of locations.
       parameters:
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -2044,13 +2044,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of Locations comma separated
+          description: Supply a comma-separated list of location IDs
           name: select
           schema:
             type: string
@@ -2059,12 +2053,6 @@ paths:
         - in: query
           description: return the number of Locations
           name: countOnly
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          description: return only the UUIDs of Locations
-          name: uuidOnly
           schema:
             type: boolean
           required: false
@@ -2218,12 +2206,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          name: unassigned
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -2235,13 +2218,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of devices comma separated
+          description: Supply a comma-separated list of device IDs
           name: select
           schema:
             type: string
@@ -2293,14 +2270,6 @@ paths:
             type: string
             format: uuid
           required: false
-        - in: query
-          description: return the resolved configuration for a specific device
-          name:   resolveConfig
-          schema:
-            type: boolean
-            default: false
-          required: false
-
       responses:
         200:
           description: Return a list of elements
@@ -2353,14 +2322,15 @@ paths:
             type: boolean
           required: false
         - in: query
-          name: subscriberEntity
-          schema:
-            type: string
-            format: uuid
-          required: false
-        - in: query
           description: return RRM settings for a specific device
           name: rrmSettings
+          schema:
+            type: boolean
+            default: false
+          required: false
+        - in: query
+          description: return the resolved configuration for a specific device
+          name: resolveConfig
           schema:
             type: boolean
             default: false
@@ -2421,16 +2391,11 @@ paths:
             format: uuid
           required: true
         - in: query
-          name: unassign
-          schema:
-            type: boolean
-          required: false
-        - in: query
           name: removeSubscriber
           schema:
             type: string
             format: uuid
-          required: true
+          required: false
 
       requestBody:
         description: Information used to modify the new entity
@@ -2583,17 +2548,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          name: unassigned
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          name: deviceType
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -2605,13 +2560,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of Venues comma separated
+          description: Supply a comma-separated list of venue IDs
           name: select
           schema:
             type: string
@@ -2622,20 +2571,6 @@ paths:
           name: countOnly
           schema:
             type: boolean
-          required: false
-        - in: query
-          description: return the devices under a venue
-          name: getDevices
-          schema:
-            type: boolean
-            default: false
-          required: false
-        - in: query
-          description: return the devices under a venue and its children. Must select getDevices=true as well.
-          name: getChildren
-          schema:
-            type: boolean
-            default: false
           required: false
         - in: query
           description: list venues that use a specific RRM vendor
@@ -2675,6 +2610,20 @@ paths:
             type: string
             format: uuid
           required: true
+        - in: query
+          description: return the devices under this venue
+          name: getDevices
+          schema:
+            type: boolean
+            default: false
+          required: false
+        - in: query
+          description: return the devices under this venue and its children. Must set getDevices=true as well.
+          name: getChildren
+          schema:
+            type: boolean
+            default: false
+          required: false
 
       responses:
         200:
@@ -2827,7 +2776,7 @@ paths:
       summary: Retrieve the list of maps
       parameters:
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -2837,12 +2786,6 @@ paths:
           name: limit
           schema:
             type: integer
-          required: false
-        - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
           required: false
         - in: query
           description: Return only maps I created
@@ -2990,12 +2933,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          name: unassigned
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -3007,13 +2945,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of policies comma separated
+          description: Supply a comma-separated list of policy IDs
           name: select
           schema:
             type: string
@@ -3165,7 +3097,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -3177,13 +3109,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of devices comma separated
+          description: Supply a comma-separated list of device IDs
           name: select
           schema:
             type: string
@@ -3211,117 +3137,6 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
-  /managementRole/{uuid}:
-    get:
-      tags:
-        - Management Roles
-      operationId: getManagementRole
-      summary: Retrieve a specific management role.
-      parameters:
-        - in: path
-          name: uuid
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - in: query
-          name: expandInUse
-          schema:
-            type: boolean
-          required: false
-      responses:
-        200:
-          description: Success
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: '#/components/schemas/ManagementRole'
-                  - $ref: '#/components/schemas/ExpandedUseEntryMapList'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    post:
-      tags:
-        - Management Roles
-      operationId: createManagementRole
-      summary: Create a specific management role.
-      parameters:
-        - in: path
-          name: uuid
-          required: true
-          schema:
-            type: string
-            format: uuid
-            example: during creation, must be set to 1. The real uuid will be returned in the created object
-      requestBody:
-        description: Information used to create management role
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ManagementRole'
-
-      responses:
-        200:
-          $ref: '#/components/schemas/ManagementRole'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    put:
-      tags:
-        - Management Roles
-      operationId: modifyManagementRole
-      summary: Modify a specific management role.
-      parameters:
-        - in: path
-          name: uuid
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        description: Information used to modify management role
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ManagementRole'
-      responses:
-        200:
-          $ref: '#/components/schemas/ManagementRole'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    delete:
-      tags:
-        - Management Roles
-      operationId: deleteManagementRole
-      summary: Delete a specific management role.
-      parameters:
-        - in: path
-          name: uuid
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        204:
-          $ref: '#/components/responses/Success'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-
   /configuration:
     get:
       tags:
@@ -3330,7 +3145,7 @@ paths:
       summary: Retrieve a list of configurations.
       parameters:
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -3342,13 +3157,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of devices comma separated
+          description: Supply a comma-separated list of device IDs
           name: select
           schema:
             type: string
@@ -3404,6 +3213,11 @@ paths:
           required: true
         - in: query
           name: expandInUse
+          schema:
+            type: boolean
+          required: false
+        - in: query
+          name: computedAffected
           schema:
             type: boolean
           required: false
@@ -3559,177 +3373,6 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
-  /signup:
-    get:
-      tags:
-        - Subscriber Registration
-      summary: This call allows someone to get the status of a signup.
-      operationId: getSignup
-      parameters:
-        - in: query
-          name: email
-          schema:
-            type: string
-            format: email
-          required: false
-        - in: query
-          name: macAddress
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: signupUUID
-          schema:
-            type: string
-            format: uuid
-          required: false
-        - in: query
-          name: dashboard
-          schema:
-            type: boolean
-            default: false
-          required: false
-        - in: query
-          name: deviceID
-          schema:
-            type: string
-          required: false
-      responses:
-        200:
-          description: Successfull completion
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: '#/components/schemas/SignupEntry'
-                  - $ref: '#/components/schemas/Dashboard'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    delete:
-      tags:
-        - Subscriber Registration
-      summary: This call allows someone to delete a specific signUp or all signups according to serialNumber of email address
-      operationId: deleteSignup
-      parameters:
-        - in: query
-          name: email
-          schema:
-            type: string
-            format: email
-          required: false
-        - in: query
-          name: macAddress
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: signupUUID
-          schema:
-            type: string
-            format: uuid
-          required: false
-        - in: query
-          name: deviceID
-          schema:
-            type: string
-          required: false
-      responses:
-        204:
-          $ref: '#/components/responses/Success'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    post:
-      tags:
-        - Subscriber Registration
-      summary: This call allows a new subscriber to register themselves and their devices.
-      operationId: postSignup
-      parameters:
-        - in: query
-          name: email
-          schema:
-            type: string
-            format: email
-          required: true
-        - in: query
-          name: macAddress
-          schema:
-            type: string
-          required: true
-        - in: query
-          name: deviceID
-          schema:
-            type: string
-          required: false
-        - in: query
-          name: registrationId
-          schema:
-            type: string
-          required: true
-      responses:
-        200:
-          $ref: '#/components/schemas/SignupEntry'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-    put:
-      tags:
-        - Subscriber Registration
-      summary: modify the signup command in play
-      operationId: modifySignup
-      parameters:
-        - in: query
-          name: signupUUID
-          schema:
-            type: string
-            format: uuid
-          required: true
-        - in: query
-          name: operation
-          schema:
-            type: string
-            enum:
-              - cancel
-              - emailVerified
-              - deviceVerified
-          required: true
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                reason:
-                  type: string
-                time:
-                  type: integer
-                  format: int64
-                errorCode:
-                  type: integer
-                  format: int32
-                status:
-                  type: string
-        required: false
-      responses:
-        200:
-          $ref: '#/components/schemas/SignupEntry'
-        400:
-          $ref: '#/components/responses/BadRequest'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-
   /variable:
     get:
       tags:
@@ -3750,7 +3393,7 @@ paths:
             format: uuid
           required: false
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -3762,13 +3405,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of devices comma separated
+          description: Supply a comma-separated list of device IDs
           name: select
           schema:
             type: string
@@ -3790,6 +3427,102 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
+  /variable/{uuid}:
+    get:
+      tags:
+        - Variable Configuration Blocks
+      summary: Retrieve a specific variable block
+      operationId: getVariable
+      parameters:
+        - in: path
+          name: uuid
+          schema:
+            type: string
+            format: uuid
+          required: true
+      responses:
+        200:
+          $ref: '#/components/schemas/VariableBlock'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - Variable Configuration Blocks
+      summary: Create a specific variable block
+      operationId: createVariable
+      parameters:
+        - in: path
+          name: uuid
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VariableBlock'
+      responses:
+        200:
+          $ref: '#/components/schemas/VariableBlock'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Variable Configuration Blocks
+      summary: Update a specific variable block
+      operationId: updateVariable
+      parameters:
+        - in: path
+          name: uuid
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VariableBlock'
+      responses:
+        200:
+          $ref: '#/components/schemas/VariableBlock'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - Variable Configuration Blocks
+      summary: Delete a specific variable block
+      operationId: deleteVariable
+      parameters:
+        - in: path
+          name: uuid
+          schema:
+            type: string
+            format: uuid
+          required: true
+      responses:
+        204:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
   /operator:
     get:
       operationId: getOperators
@@ -3798,7 +3531,7 @@ paths:
       summary: Retrieve the list of currently configured operators
       parameters:
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -3810,13 +3543,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of operators comma separated
+          description: Supply a comma-separated list of operator IDs
           name: select
           schema:
             type: string
@@ -3957,7 +3684,7 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -3969,13 +3696,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of operators comma separated
+          description: Supply a comma-separated list of operator IDs
           name: select
           schema:
             type: string
@@ -4116,7 +3837,14 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: Filter by subscriber id
+          name: subscriberId
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -4128,13 +3856,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of operators comma separated
+          description: Supply a comma-separated list of operator IDs
           name: select
           schema:
             type: string
@@ -4373,8 +4095,157 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         404:
           $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - Subscribers
+      summary: Delete a subscriber by subscriberId
+      operationId: deleteSubscriberByQuery
+      parameters:
+        - in: query
+          name: subscriberId
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
 
   /subscriber/{id}:
+    get:
+      tags:
+        - Subscribers
+      summary: Retrieve subscriber signup (path alias)
+      operationId: getSubscriberByIdPathAlias
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: email
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: signupUUID
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: macAddress
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: listOnly
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Signup information
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SignupEntry'
+                  - type: object
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - Subscribers
+      summary: Create or resend subscriber signup (path alias)
+      operationId: createSubscriberByIdPathAlias
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: email
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: registrationId
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: resend
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Signup created or resent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignupEntry'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Subscribers
+      summary: Update subscriber signup progress (path alias)
+      operationId: updateSubscriberByIdPathAlias
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: signupUUID
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: userId
+          schema:
+            type: string
+          required: false
+        - in: query
+          name: operation
+          schema:
+            type: string
+          required: true
+        - in: query
+          name: mac
+          schema:
+            type: string
+          required: false
+      responses:
+        200:
+          description: Signup updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignupEntry'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
     delete:
       tags:
         - Subscribers
@@ -4401,6 +4272,43 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
+  /ws:
+    get:
+      tags:
+        - Utility
+      summary: Upgrade HTTP connection to WebSocket
+      operationId: getWebSocketUpgrade
+      responses:
+        101:
+          description: WebSocket protocol upgrade successful
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+
+  /wwwassets/{id}:
+    get:
+      tags:
+        - Utility
+      summary: Retrieve a static web asset
+      operationId: getWebAsset
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+      responses:
+        200:
+          description: Asset content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        404:
+          $ref: '#/components/responses/NotFound'
+
   /operatorLocation:
     get:
       tags:
@@ -4415,7 +4323,7 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -4427,13 +4335,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of Locations comma separated
+          description: Supply a comma-separated list of location IDs
           name: select
           schema:
             type: string
@@ -4442,12 +4344,6 @@ paths:
         - in: query
           description: return the number of Locations
           name: countOnly
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          description: return only the UUIDs of Locations
-          name: uuidOnly
           schema:
             type: boolean
           required: false
@@ -4555,11 +4451,6 @@ paths:
             type: string
             format: uuid
           required: true
-        - in: query
-          name: force
-          schema:
-            type: boolean
-          required: true
       responses:
         204:
           $ref: '#/components/responses/Success'
@@ -4584,7 +4475,7 @@ paths:
             format: uuid
           required: true
         - in: query
-          description: Pagination start (starts at 1. If not specified, 1 is assumed)
+          description: How many items to skip from the start (default: 0).
           name: offset
           schema:
             type: integer
@@ -4596,13 +4487,7 @@ paths:
             type: integer
           required: false
         - in: query
-          description: Filter the results
-          name: filter
-          schema:
-            type: string
-          required: false
-        - in: query
-          description: Supply a list of operator contacts comma separated
+          description: Supply a comma-separated list of operator contact IDs
           name: select
           schema:
             type: string
@@ -4611,12 +4496,6 @@ paths:
         - in: query
           description: return the number of operator contacts
           name: countOnly
-          schema:
-            type: boolean
-          required: false
-        - in: query
-          description: return only the UUIDs of operator contacts
-          name: uuidOnly
           schema:
             type: boolean
           required: false
@@ -4724,11 +4603,6 @@ paths:
             type: string
             format: uuid
           required: true
-        - in: query
-          name: force
-          schema:
-            type: boolean
-          required: true
       responses:
         204:
           $ref: '#/components/responses/Success'
@@ -4745,20 +4619,6 @@ paths:
   ## These are endpoints that all services in the OpenWiFi stack must provide
   ##
   #########################################################################################
-  /dashboard:
-    get:
-      tags:
-        - Dashboards
-      summary: Get the last version of the dashboard.
-      operationId: getDeviceDashboard
-      responses:
-        200:
-          $ref: '#/components/schemas/Dashboard'
-        403:
-          $ref: '#/components/responses/Unauthorized'
-        404:
-          $ref: '#/components/responses/NotFound'
-
   /RADIUSEndPoints:
     get:
       tags:
