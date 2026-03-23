@@ -439,6 +439,30 @@ namespace ORM {
 			return false;
 		}
 
+		bool CreateRecord(const RecordType &R, uint64_t &out_id) {
+#ifdef CGW_INTEGRATION
+			if (TableName_ == "groupsmap" && Type_ == OpenWifi::DBType::pgsql) {
+				try {
+					Poco::Data::Session Session = Pool_.get();
+					RecordTuple RT;
+					Convert(R, RT);
+					std::string venueId = RT.template get<0>();
+					Poco::Data::Statement Insert(Session);
+					std::string St = "insert into " + TableName_ +
+									 " (venueid) values (?) returning groupid";
+					Insert << ConvertParams(St),
+						Poco::Data::Keywords::use(venueId),
+						Poco::Data::Keywords::into(out_id), Poco::Data::Keywords::now;
+					return true;
+				} catch (const Poco::Exception &E) {
+					Logger_.log(E);
+					return false;
+				}
+			}
+#endif
+			return false;
+		}
+
 		template <typename T>
 		bool GetRecord(field_name_t FieldName, const T &Value, RecordType &R) {
 			try {

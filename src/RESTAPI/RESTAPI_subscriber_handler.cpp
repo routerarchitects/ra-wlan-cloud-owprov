@@ -17,7 +17,9 @@
 #include "framework/orm.h"
 #include "framework/utils.h"
 #include "sdks/SDK_sec.h"
-
+#ifdef CGW_INTEGRATION
+#include "InfraGroupEvents.h"
+#endif
 namespace OpenWifi {
 
 	/*
@@ -208,7 +210,15 @@ namespace OpenWifi {
 				return InternalError(RESTAPI::Errors::RecordNotCreated);
 			}
 			StorageService()->EntityDB().AddVenue("id", SubscriberVenue.entity,
-												  SubscriberVenue.info.id);
+												  SubscriberVenue.info.id);				
+#ifdef CGW_INTEGRATION
+                uint64_t groupId = -1;
+                if (!StorageService()->GroupsMapDB().AddVenue(SubscriberVenue.info.id, groupId)) {
+                        poco_error(Logger(), fmt::format("Groupsmap Venue Creation DB failure {},groupID {}", SubscriberVenue.info.id,groupId));
+                }
+				PublishInfraGroupEvent("infrastructure_group_create", groupId);
+				poco_debug(Logger(), fmt::format("Message published for infrastructure_group_create VenueId {}: groupID ({})", SubscriberVenue.info.id,groupId));
+#endif
 		}
 
 		Poco::JSON::Object SEAnswer;
@@ -349,7 +359,7 @@ namespace OpenWifi {
 									 subscriberId));
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
-
+		//TODO : Need to make this idempotent or implement 2P-commit , also change this vector iteration.
 		VenueDB::RecordVec subscriberVenues;
 		if (StorageService()->VenueDB().GetRecords(
 				0, 100, subscriberVenues,
@@ -380,6 +390,18 @@ namespace OpenWifi {
 		if (!StorageService()->SignupDB().DeleteRecord("id", signupRecord.info.id)) {
 			return BadRequest(RESTAPI::Errors::NoRecordsDeleted);
 		}
+
+#ifdef CGW_INTEGRATION
+        uint64_t groupId = -1;
+        if (!StorageService()->GroupsMapDB().GetGroup(subscriberVenues[0].info.id, groupId)) {
+				poco_error(Logger(), fmt::format("Delete Venue groupsmap lookup failure {}, groupId {}", subscriberVenues[0].info.id, groupId));
+        }
+		PublishInfraGroupEvent("infrastructure_group_delete", groupId);
+        if (!StorageService()->GroupsMapDB().DeleteVenue(subscriberVenues[0].info.id)) {
+        		poco_error(Logger(), fmt::format("Delete Venue groupsmap delete failure {}, groupId {}", subscriberVenues[0].info.id, groupId));
+        }
+		poco_debug(Logger(), fmt::format("Message published for infrastructure_group_delete VenueId {}: groupID ({})", subscriberVenues[0].info.id,groupId));
+#endif
 		return OK();
 	}
 

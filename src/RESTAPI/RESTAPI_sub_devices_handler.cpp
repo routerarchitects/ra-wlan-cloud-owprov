@@ -20,7 +20,9 @@
 #include "sdks/SDK_sec.h"
 #include <algorithm>
 #include <set>
-
+#ifdef CGW_INTEGRATION
+#include "InfraGroupEvents.h"
+#endif
 namespace OpenWifi {
 	void RESTAPI_sub_devices_handler::CleanupSubscriberConfigurationRecord(
 		const std::string &deviceConfiguration, const std::string &inventoryId) {
@@ -489,7 +491,7 @@ namespace OpenWifi {
 	}
 
 	bool RESTAPI_sub_devices_handler::CreateInventoryRecord(
-		const SubscriberDeviceDB::RecordName &newObject) {
+		const SubscriberDeviceDB::RecordName &newObject, std::string *venueID) {
 		poco_information(Logger(),
 						 fmt::format("[SUBSCRIBER_DEVICE_CREATE][CreateInventoryRecord]: start "
 									 "serial=[{}], subscriber=[{}], deviceConfiguration=[{}].",
@@ -556,6 +558,9 @@ namespace OpenWifi {
 										 inventoryRecord.info.id, inventoryRecord.venue,
 										 inventoryRecord.deviceConfiguration,
 										 inventoryRecord.subscriber));
+			if (venueID) {
+				*venueID = resolvedVenueId;
+			}
 			return true;
 		}
 
@@ -597,6 +602,9 @@ namespace OpenWifi {
 		poco_information(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE][CreateInventoryRecord]: "
 											   "completed serial=[{}], inventoryId=[{}].",
 											   newObject.serialNumber, inventoryRecord.info.id));
+		if (venueID) {
+			*venueID = resolvedVenueId;
+		}
 		return true;
 	}
 
@@ -622,7 +630,7 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_sub_devices_handler::DeleteInventoryForSubscriberDevice(
-		const ProvObjects::SubscriberDevice &existingObject) {
+		const ProvObjects::SubscriberDevice &existingObject, std::string *venueId) {
 		ProvObjects::InventoryTag inventoryRecord;
 		if (!StorageService()->InventoryDB().GetRecord("serialNumber", existingObject.serialNumber,
 													   inventoryRecord)) {
@@ -650,6 +658,9 @@ namespace OpenWifi {
 			return;
 		}
 		SerialNumberCache()->DeleteSerialNumber(existingObject.serialNumber);
+		if (venueId) {
+			*venueId = inventoryRecord.venue;
+		}
 	}
 
 	bool
@@ -811,13 +822,22 @@ namespace OpenWifi {
 			BadRequest(RESTAPI::Errors::NoRecordsDeleted);
 			return;
 		}
-		DeleteInventoryForSubscriberDevice(existingObject);
+		std::string venueID;
+		DeleteInventoryForSubscriberDevice(existingObject, &venueID);
 
 		if (!SDK::GW::Device::Delete(this, existingObject.serialNumber)) {
 			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete serial "
 											 "[{}] from owgw.",
 											 existingObject.serialNumber));
 		}
+#ifdef CGW_INTEGRATION
+		uint64_t groupId = -1;
+		if (!StorageService()->GroupsMapDB().GetGroup(venueID, groupId) ) {
+			poco_error(Logger(), fmt::format("Subscriber {} has no CGW groupsmap entry", venueID));
+		}
+		PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{existingObject.serialNumber});
+		poco_debug(Logger(), fmt::format("Message published for infra del VenueId {}: SerialNumber ({})", venueID,existingObject.serialNumber));
+#endif
 		return OK();
 	}
 
@@ -845,8 +865,8 @@ namespace OpenWifi {
 		if (!CreateSubscriberDeviceRecord(newObject)) {
 			return;
 		}
-
-		if (!CreateInventoryRecord(newObject)) {
+		std::string venueID;
+		if (!CreateInventoryRecord(newObject, &venueID)) {
 			if (!DB_.DeleteRecord("id", newObject.info.id)) {
 				poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_CREATE]: Failed to rollback "
 												   "subscriber-device [{}] after inventory create "
@@ -879,6 +899,14 @@ namespace OpenWifi {
 									 newObject.subscriberId, newObject.serialNumber));
 		}
 
+#ifdef CGW_INTEGRATION
+		uint64_t groupId = -1;
+		if (!StorageService()->GroupsMapDB().GetGroup(venueID, groupId)) {
+			poco_error(Logger(), fmt::format("Subscriber {} has no CGW groupsmap entry", venueID));
+		}
+		PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{newObject.serialNumber});
+		poco_debug(Logger(), fmt::format("Message published for infra add VenueId {}: SerialNumber ({})", venueID,newObject.serialNumber));
+#endif
 		return ReturnSubscriberDeviceObject(newObject);
 	}
 
