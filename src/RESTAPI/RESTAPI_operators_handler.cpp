@@ -120,9 +120,12 @@ namespace OpenWifi {
 		}
 
 		Poco::toLowerInPlace(NewObject.registrationId);
-		if (NewObject.registrationId.empty() ||
-			DB_.Exists("registrationId", NewObject.registrationId)) {
+		if (NewObject.registrationId.empty()) {
 			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
+		}
+
+		if (DB_.Exists("registrationId", NewObject.registrationId)) {
+			return BadRequest(RESTAPI::Errors::RegistrationIdAlreadyExists);
 		}
 
 		if (RawObject->has("entityId")) {
