@@ -5,7 +5,6 @@
 #include "AutoDiscovery.h"
 #include "Poco/JSON/Parser.h"
 #include "StorageService.h"
-#include "Tasks/VenueConfigUpdater.h"
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
 #include "framework/ow_constants.h"
@@ -108,11 +107,6 @@ namespace OpenWifi {
                         if (!SerialNumber.empty() && Connected) {
                             StorageService()->InventoryDB().CreateFromConnection(
                                     SerialNumber, ConnectedIP, Compatible, Locale, isConnection);
-                            // Now that the entry has been created, we can try to push a config if
-                            // the connection was a capabilities message.
-                            if (isConnection){
-                                ComputeAndPushConfig(SerialNumber, Compatible, Logger());
-                            }
                         }
                     }
 				} catch (const Poco::Exception &E) {

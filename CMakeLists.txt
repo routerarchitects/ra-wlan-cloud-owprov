@@ -4,7 +4,7 @@
    Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
  ]]
 cmake_minimum_required(VERSION 3.13)
-project(owprov VERSION 4.1.0)
+project(owprov VERSION 1.0.0)
 
 set(CMAKE_CXX_STANDARD 17)
 option(CGW_INTEGRATION "Enable CGW Integration" ON)
