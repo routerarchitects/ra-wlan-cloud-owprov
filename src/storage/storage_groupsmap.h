@@ -5,22 +5,21 @@
  */
 #pragma once
 #ifdef CGW_INTEGRATION
+#include <cstdint>
+
 #include "framework/orm.h"
 
 namespace OpenWifi {
     struct GroupsMapRecord {
         std::string venueid;
-        uint64_t groupid = 0;
+        std::uint32_t groupid = 0;
     };
 
-    typedef Poco::Tuple<std::string, uint64_t> GroupsMapDBRecordType;
+    typedef Poco::Tuple<std::string, std::uint32_t> GroupsMapDBRecordType;
 
     class GroupsMapDB : public ORM::DB<GroupsMapDBRecordType, GroupsMapRecord> {
       public:
         GroupsMapDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L);
-        /**
-         * @brief Create the groupsmap table with an auto-incrementing group id.
-         */
         bool Create();
         /**
          * @brief Create a new mapping entry for the provided venue id.
@@ -32,7 +31,7 @@ namespace OpenWifi {
          * @param groupId populated with the newly allocated group id when the call succeeds.
          * @return true on successful persistence, false otherwise.
          */
-        bool AddVenue(const std::string &venueId, uint64_t &groupId);
+        bool AddVenue(const std::string &venueId, std::uint32_t &groupId);
         /**
          * @brief Lookup the CGW group id associated with the given venue.
          *
@@ -40,7 +39,7 @@ namespace OpenWifi {
          * @param groupId mapped Id for CGW.
          * @return true if a mapping exists, false if none is found or an error occurs.
          */
-        bool GetGroup(const std::string &venueId, uint64_t &groupId);
+        bool GetGroup(const std::string &venueId, std::uint32_t &groupId);
         /**
          * @brief Remove the mapping entry for the specified venue.
          *

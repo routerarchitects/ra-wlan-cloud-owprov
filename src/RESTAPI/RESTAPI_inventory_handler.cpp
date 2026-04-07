@@ -191,13 +191,13 @@ namespace OpenWifi {
 		SerialNumberCache()->DeleteSerialNumber(SerialNumber);
 #ifdef CGW_INTEGRATION
 						
-			uint64_t groupId = -1;
+			std::uint32_t groupId = 0;
 			if (!StorageService()->GroupsMapDB().GetGroup(Existing.venue, groupId)) {
 				poco_error(Logger(), fmt::format("{}: No CGW group mapping for venue {}", SerialNumber, Existing.venue));
+			} else {
+				PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{SerialNumber});
+				poco_debug(Logger(), fmt::format("Message published for infra del VenueId {}: groupID ({}), SerialNumber ({})", Existing.venue, groupId, SerialNumber));
 			}
-			
-			PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{SerialNumber});
-			poco_debug(Logger(), fmt::format("Message published for infra del VenueId {}: SerialNumber ({})", Existing.venue,SerialNumber));
 #endif
 		return OK();
 	}
@@ -317,13 +317,13 @@ namespace OpenWifi {
 							 NewObject.venue, NewObject.info.id);
 #ifdef CGW_INTEGRATION
 						
-			uint64_t groupId = -1;
+			std::uint32_t groupId = 0;
 			if (!StorageService()->GroupsMapDB().GetGroup(NewObject.venue, groupId)) {
 				poco_error(Logger(), fmt::format("{}: No CGW group mapping for venue {}", SerialNumber, NewObject.venue));
+			} else {
+				PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{SerialNumber});
+				poco_debug(Logger(), fmt::format("Message published for infra add VenueId {}: groupID ({}), SerialNumber ({})", NewObject.venue, groupId, SerialNumber));
 			}
-			
-			PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{SerialNumber});
-			poco_debug(Logger(), fmt::format("Message published for infra add VenueId {}: SerialNumber ({})", NewObject.venue,SerialNumber));
 #endif
 			ProvObjects::InventoryTag NewTag;
 			DB_.GetRecord("id", NewObject.info.id, NewTag);

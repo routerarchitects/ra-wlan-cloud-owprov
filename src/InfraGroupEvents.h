@@ -22,7 +22,7 @@ namespace OpenWifi {
 
 	inline void PrepareInfraGroupEventJson(Poco::JSON::Object &Payload,
 										   const std::string &EventType,
-										   std::uint64_t GroupId,
+										   std::uint32_t GroupId,
 										   const Types::StringVec &Infras = {}) {
 		Payload.set("type", EventType);
 		Payload.set("infra_group_id", std::to_string(GroupId));
@@ -38,7 +38,7 @@ namespace OpenWifi {
 	}
 
 	inline void PublishInfraGroupEvent(const std::string &EventType,
-									   std::uint64_t GroupId,
+									   std::uint32_t GroupId,
 									   const Types::StringVec &Infras = {}) {
 		Poco::JSON::Object Payload;
 		PrepareInfraGroupEventJson(Payload, EventType, GroupId, Infras);

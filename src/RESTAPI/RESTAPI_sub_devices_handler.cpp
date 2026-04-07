@@ -831,12 +831,13 @@ namespace OpenWifi {
 											 existingObject.serialNumber));
 		}
 #ifdef CGW_INTEGRATION
-		uint64_t groupId = -1;
+		std::uint32_t groupId = 0;
 		if (!StorageService()->GroupsMapDB().GetGroup(venueID, groupId) ) {
 			poco_error(Logger(), fmt::format("Subscriber {} has no CGW groupsmap entry", venueID));
+		} else {
+			PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{existingObject.serialNumber});
+			poco_debug(Logger(), fmt::format("Message published for infra del VenueId {}: groupID ({}), SerialNumber ({})", venueID, groupId, existingObject.serialNumber));
 		}
-		PublishInfraGroupEvent("infrastructure_group_infras_del", groupId,{existingObject.serialNumber});
-		poco_debug(Logger(), fmt::format("Message published for infra del VenueId {}: SerialNumber ({})", venueID,existingObject.serialNumber));
 #endif
 		return OK();
 	}
@@ -900,12 +901,13 @@ namespace OpenWifi {
 		}
 
 #ifdef CGW_INTEGRATION
-		uint64_t groupId = -1;
+		std::uint32_t groupId = 0;
 		if (!StorageService()->GroupsMapDB().GetGroup(venueID, groupId)) {
 			poco_error(Logger(), fmt::format("Subscriber {} has no CGW groupsmap entry", venueID));
+		} else {
+			PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{newObject.serialNumber});
+			poco_debug(Logger(), fmt::format("Message published for infra add VenueId {}: groupID ({}), SerialNumber ({})", venueID, groupId, newObject.serialNumber));
 		}
-		PublishInfraGroupEvent("infrastructure_group_infras_add", groupId,{newObject.serialNumber});
-		poco_debug(Logger(), fmt::format("Message published for infra add VenueId {}: SerialNumber ({})", venueID,newObject.serialNumber));
 #endif
 		return ReturnSubscriberDeviceObject(newObject);
 	}

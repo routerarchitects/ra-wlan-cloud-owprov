@@ -212,12 +212,13 @@ namespace OpenWifi {
 			StorageService()->EntityDB().AddVenue("id", SubscriberVenue.entity,
 												  SubscriberVenue.info.id);				
 #ifdef CGW_INTEGRATION
-                uint64_t groupId = -1;
-                if (!StorageService()->GroupsMapDB().AddVenue(SubscriberVenue.info.id, groupId)) {
-                        poco_error(Logger(), fmt::format("Groupsmap Venue Creation DB failure {},groupID {}", SubscriberVenue.info.id,groupId));
-                }
-				PublishInfraGroupEvent("infrastructure_group_create", groupId);
-				poco_debug(Logger(), fmt::format("Message published for infrastructure_group_create VenueId {}: groupID ({})", SubscriberVenue.info.id,groupId));
+				std::uint32_t groupId = 0;
+				if (!StorageService()->GroupsMapDB().AddVenue(SubscriberVenue.info.id, groupId)) {
+					poco_error(Logger(), fmt::format("Groupsmap Venue Creation DB failure {},groupID {}", SubscriberVenue.info.id,groupId));
+				} else {
+					PublishInfraGroupEvent("infrastructure_group_create", groupId);
+					poco_debug(Logger(), fmt::format("Message published for infrastructure_group_create VenueId {}: groupID ({})", SubscriberVenue.info.id,groupId));
+				}
 #endif
 		}
 
@@ -392,15 +393,19 @@ namespace OpenWifi {
 		}
 
 #ifdef CGW_INTEGRATION
-        uint64_t groupId = -1;
-        if (!StorageService()->GroupsMapDB().GetGroup(subscriberVenues[0].info.id, groupId)) {
-				poco_error(Logger(), fmt::format("Delete Venue groupsmap lookup failure {}, groupId {}", subscriberVenues[0].info.id, groupId));
-        }
-		PublishInfraGroupEvent("infrastructure_group_delete", groupId);
-        if (!StorageService()->GroupsMapDB().DeleteVenue(subscriberVenues[0].info.id)) {
-        		poco_error(Logger(), fmt::format("Delete Venue groupsmap delete failure {}, groupId {}", subscriberVenues[0].info.id, groupId));
-        }
-		poco_debug(Logger(), fmt::format("Message published for infrastructure_group_delete VenueId {}: groupID ({})", subscriberVenues[0].info.id,groupId));
+		if (!subscriberVenues.empty()) {
+			const auto &subscriberVenueId = subscriberVenues[0].info.id;
+			std::uint32_t groupId = 0;
+			if (!StorageService()->GroupsMapDB().GetGroup(subscriberVenueId, groupId)) {
+				poco_error(Logger(), fmt::format("Delete Venue groupsmap lookup failure {}, groupId {}", subscriberVenueId, groupId));
+			} else {
+				PublishInfraGroupEvent("infrastructure_group_delete", groupId);
+				if (!StorageService()->GroupsMapDB().DeleteVenue(subscriberVenueId)) {
+					poco_error(Logger(), fmt::format("Delete Venue groupsmap delete failure {}, groupId {}", subscriberVenueId, groupId));
+				}
+				poco_debug(Logger(), fmt::format("Message published for infrastructure_group_delete VenueId {}: groupID ({})", subscriberVenueId,groupId));
+			}
+		}
 #endif
 		return OK();
 	}
