@@ -218,16 +218,21 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InternalError);
 		}
 
-#ifdef CGW_INTEGRATION
-		std::uint32_t groupId = 0;
-		if (!StorageService()->GroupsMapDB().AddVenue(NewObject.info.id, groupId)) {
-			poco_error(Logger(), fmt::format("Groupsmap Venue creation failure {}, groupId {}", NewObject.info.id,groupId));
-			return InternalError(RESTAPI::Errors::RecordNotCreated);
-		}
-		PublishInfraGroupEvent("infrastructure_group_create", groupId);
-		poco_debug(Logger(), fmt::format("Message published for infrastructure_group_create VenueId {}: groupID ({})", NewObject.info.id,groupId));
-#endif
 		if (DB_.CreateRecord(NewObject)) {
+#ifdef CGW_INTEGRATION
+			std::uint32_t groupId = 0;
+			if (!StorageService()->GroupsMapDB().AddVenue(NewObject.info.id, groupId)) {
+				poco_error(Logger(), fmt::format("Groupsmap Venue creation failure {}, groupId {}",
+												 NewObject.info.id, groupId));
+				// Do not fail the entire request if the groupsmap entry creation fails
+			} else {
+				PublishInfraGroupEvent("infrastructure_group_create", groupId);
+				poco_debug(Logger(),
+						   fmt::format("Message published for infrastructure_group_create VenueId "
+									   "{}: groupID ({})",
+									   NewObject.info.id, groupId));
+			}
+#endif
 			MoveUsage(StorageService()->ContactDB(), DB_, {}, NewObject.contacts,
 					  NewObject.info.id);
 			MoveUsage(StorageService()->LocationDB(), DB_, "", NewObject.location,
