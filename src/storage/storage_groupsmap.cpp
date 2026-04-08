@@ -27,16 +27,17 @@ namespace OpenWifi {
 				return false;
 			}
 
-				std::string statement = "create table if not exists " + TableName_ +
-										" ( venueid TEXT, groupid SERIAL PRIMARY KEY )";
-				Session << statement, Poco::Data::Keywords::now;
-				Session << "create unique index if not exists groupsmap_venue_uidx on " + TableName_ +
-							   " ( venueid ASC )",
-					Poco::Data::Keywords::now;
+			std::string statement = "create table if not exists " + TableName_ +
+									" ( venueid TEXT, groupid SERIAL PRIMARY KEY )";
+			Session << statement, Poco::Data::Keywords::now;
+			Session << "create unique index if not exists groupsmap_venue_uidx on " + TableName_ +
+						   " ( venueid ASC )",
+				Poco::Data::Keywords::now;
 		} catch (const std::exception &E) {
 			poco_error(Logger(), fmt::format("Exception in GroupsMapDB::Create {}", E.what()));
+			return false;
 		}
-		return Upgrade();
+		return Upgrade(); // Returns its result (so final success/failure comes from Upgrade).
 	}
 
 	bool GroupsMapDB::AddVenue(const std::string &venueId, std::uint32_t &groupId) {
@@ -48,23 +49,16 @@ namespace OpenWifi {
 
 			Poco::Data::Session Session = Pool_.get();
 			Poco::Data::Statement Insert(Session);
-			std::uint64_t generatedGroupId = 0;
 			std::string venueIdParam = venueId;
+			groupId = 0;
 			std::string statement = "insert into " + TableName_ +
 									" (venueid) values (?) "
 									"on conflict (venueid) do update set venueid=excluded.venueid "
 									"returning groupid";
 
 			Insert << ConvertParams(statement), Poco::Data::Keywords::use(venueIdParam),
-				Poco::Data::Keywords::into(generatedGroupId), Poco::Data::Keywords::now;
+				Poco::Data::Keywords::into(groupId), Poco::Data::Keywords::now;
 
-			if (generatedGroupId > std::numeric_limits<std::uint32_t>::max()) {
-				poco_error(Logger(), fmt::format("groupsmap groupid {} exceeds uint32 for venue {}",
-												 generatedGroupId, venueId));
-				return false;
-			}
-
-			groupId = static_cast<std::uint32_t>(generatedGroupId);
 			poco_debug(Logger(),
 					   fmt::format("Upserted venue {} with group id {}", venueId, groupId));
 			return true;
@@ -73,6 +67,7 @@ namespace OpenWifi {
 		}
 		return false;
 	}
+
 
 	bool GroupsMapDB::GetGroup(const std::string &venueId, std::uint32_t &groupId) {
 		GroupsMapRecord rec;
