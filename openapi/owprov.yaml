@@ -3164,6 +3164,128 @@ paths:
         404:
           $ref: '#/components/responses/NotFound'
 
+  /managementRole/{id}:
+    get:
+      tags:
+        - Management Roles
+      operationId: getManagementRole
+      summary: Retrieve a specific management role.
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+        - in: query
+          name: expandInUse
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Successful retrieval of a management role
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ManagementRole'
+                  - $ref: '#/components/schemas/ExpandedUseEntryMapList'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - Management Roles
+      operationId: createManagementRole
+      summary: Create a specific management role.
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        description: Information used to create the new management role
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManagementRole'
+      responses:
+        200:
+          description: Successful creation of a management role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementRole'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Management Roles
+      operationId: modifyManagementRole
+      summary: Modify a specific management role.
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        description: Information used to modify the management role.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManagementRole'
+      responses:
+        200:
+          description: Successful modification of a management role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementRole'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - Management Roles
+      operationId: deleteManagementRole
+      summary: Delete a specific management role.
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+        - in: query
+          name: force
+          schema:
+            type: boolean
+          required: false
+      responses:
+        204:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
   /configuration:
     get:
       tags:
