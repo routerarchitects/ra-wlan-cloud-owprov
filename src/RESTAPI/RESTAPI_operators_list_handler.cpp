@@ -5,22 +5,10 @@
 #include "RESTAPI_operators_list_handler.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
+#include "RESTAPI/RESTAPI_list_helpers.h"
 
 namespace OpenWifi {
 	void RESTAPI_operators_list_handler::DoGet() {
-		if (QB_.CountOnly) {
-			std::vector<ProvObjects::Operator> Entries;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Entries);
-			std::size_t Count = 0;
-			for (const auto &Entry : Entries) {
-				if (RBAC::HasAccess(*this, "operator", "LIST",
-									RBAC::TargetScope{Entry.entityId, ""})) {
-					++Count;
-				}
-			}
-			return ReturnCountOnly(Count);
-		}
-
 		if (!QB_.Select.empty()) {
 			if (RBAC::IsRootUser(*this)) {
 				return ReturnRecordList<decltype(DB_), ProvObjects::Operator>("operators", DB_,
@@ -36,22 +24,33 @@ namespace OpenWifi {
 					Filtered.push_back(Existing);
 				}
 			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(Filtered.size());
+			}
 			return MakeJSONObjectArray("operators", Filtered, *this);
 		}
 
 		std::vector<ProvObjects::Operator> Entries;
-		DB_.GetRecords(QB_.Offset, QB_.Limit, Entries);
-		if (RBAC::IsRootUser(*this)) {
-			return MakeJSONObjectArray("operators", Entries, *this);
+		auto total = DB_.Count();
+		if (total > 0) {
+			DB_.GetRecords(0, total, Entries);
 		}
 
-		std::vector<ProvObjects::Operator> Filtered;
-		for (const auto &Entry : Entries) {
-			if (RBAC::HasAccess(*this, "operator", "LIST",
-								RBAC::TargetScope{Entry.entityId, ""})) {
-				Filtered.push_back(Entry);
-			}
+		if (!RBAC::IsRootUser(*this)) {
+			// RBAC filtering must happen before CountOnly and pagination, so fetch the full candidate set first.
+			Entries = RESTAPI::FilterRecords(
+				Entries,
+				[&](const auto &Entry) {
+					return RBAC::HasAccess(*this, "operator", "LIST",
+										   RBAC::TargetScope{Entry.entityId, ""});
+				});
 		}
-		return MakeJSONObjectArray("operators", Filtered, *this);
+
+		if (QB_.CountOnly) {
+			return ReturnCountOnly(Entries.size());
+		}
+
+		auto page = RESTAPI::ApplyPagination(Entries, QB_.Offset, QB_.Limit);
+		return MakeJSONObjectArray("operators", page, *this);
 	}
 } // namespace OpenWifi

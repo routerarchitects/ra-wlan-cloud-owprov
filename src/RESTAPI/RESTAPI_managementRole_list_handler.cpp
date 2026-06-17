@@ -5,6 +5,7 @@
 #include "RESTAPI_managementRole_list_handler.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
+#include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
 #include <algorithm>
 
@@ -28,27 +29,35 @@ namespace OpenWifi {
 		auto userId = GetParameter("userId");
 		auto entityId = GetParameter("entityId");
 
-		if (RBAC::IsRootUser(*this)) {
-			ProvObjects::ManagementRoleVec allRoles;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, allRoles);
-			ProvObjects::ManagementRoleVec filtered;
-			for (const auto &role : allRoles) {
-				if (RoleMatchesUser(role, userId) && RoleMatchesEntity(role, entityId)) {
-					filtered.push_back(role);
-				}
-			}
-			return MakeJSONObjectArray("roles", filtered, *this);
+		ProvObjects::ManagementRoleVec roles;
+		auto total = DB_.Count();
+		if (total > 0) {
+			DB_.GetRecords(0, total, roles);
 		}
 
-		ProvObjects::ManagementRoleVec allRoles;
-		DB_.GetRecords(QB_.Offset, QB_.Limit, allRoles);
-		ProvObjects::ManagementRoleVec filtered;
-		for (const auto &role : allRoles) {
-			if (RoleMatchesUser(role, userId) && RoleMatchesEntity(role, entityId) &&
-				RBAC::IsScopeAllowed(*this, RBAC::TargetScope{role.entity, role.venue})) {
-				filtered.push_back(role);
-			}
+		roles = RESTAPI::FilterRecords(
+			roles,
+			[&](const auto &role) {
+				return RoleMatchesUser(role, userId) &&
+					   RoleMatchesEntity(role, entityId);
+			});
+
+		if (!RBAC::IsRootUser(*this)) {
+			// RBAC filtering must happen before CountOnly and pagination, so fetch the full candidate set first.
+			roles = RESTAPI::FilterRecords(
+				roles,
+				[&](const auto &role) {
+					return RBAC::IsScopeAllowed(
+						*this,
+						RBAC::TargetScope{role.entity, role.venue});
+				});
 		}
-		return MakeJSONObjectArray("roles", filtered, *this);
+
+		if (QB_.CountOnly) {
+			return ReturnCountOnly(roles.size());
+		}
+
+		auto page = RESTAPI::ApplyPagination(roles, QB_.Offset, QB_.Limit);
+		return MakeJSONObjectArray("roles", page, *this);
 	}
 } // namespace OpenWifi
