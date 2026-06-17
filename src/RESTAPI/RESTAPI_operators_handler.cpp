@@ -9,10 +9,92 @@
 
 #include "RESTAPI_operators_handler.h"
 #include "RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "framework/orm.h"
+#include "framework/MicroServiceFuncs.h"
 #include "framework/utils.h"
 
 namespace OpenWifi {
+	namespace {
+		std::string ResolveParentEntityForOperator(const SecurityObjects::UserInfo &creator) {
+			if (creator.userRole == SecurityObjects::ROOT) {
+				return EntityDB::RootUUID();
+			}
+
+			std::string parentEntity;
+			if (RBAC::ResolveEntityScopeForAccess(creator.id, "operator", "CREATE",
+												  parentEntity)) {
+				return parentEntity;
+			}
+
+			return {};
+		}
+
+		bool SeedChildOperatorAccess(const SecurityObjects::UserInfo &creator,
+									 const ProvObjects::Operator &createdOperator,
+									 const ProvObjects::Entity &createdEntity) {
+			if (creator.id.empty() || creator.userRole == SecurityObjects::ROOT) {
+				return true;
+			}
+
+			const auto creatorUserId = creator.id;
+
+			ProvObjects::ManagementPolicy policy;
+			ProvObjects::CreateObjectInfo(creator, policy.info);
+			policy.info.name = "Auto access policy for " + createdOperator.info.name;
+			policy.entity = createdEntity.info.id;
+			policy.venue.clear();
+			policy.inUse.clear();
+
+			ProvObjects::ManagementPolicyEntry policyEntry;
+			policyEntry.users = {creatorUserId};
+			policyEntry.resources = {"entity", "operator", "venue", "inventory",
+									 "managementPolicy", "managementRole"};
+			policyEntry.access = {"FULL"};
+			policy.entries = {policyEntry};
+
+			if (!StorageService()->PolicyDB().CreateRecord(policy)) {
+				return false;
+			}
+
+			if (!StorageService()->EntityDB().ManipulateVectorMember(
+					&ProvObjects::Entity::managementPolicies, "id", createdEntity.info.id,
+					policy.info.id, true)) {
+				StorageService()->PolicyDB().DeleteRecord("id", policy.info.id);
+				return false;
+			}
+
+			ProvObjects::ManagementRole role;
+			ProvObjects::CreateObjectInfo(creator, role.info);
+			role.info.name = "Auto access role for " + createdOperator.info.name;
+			role.managementPolicy = policy.info.id;
+			role.users = {creatorUserId};
+			role.entity = createdEntity.info.id;
+			role.venue.clear();
+			role.inUse.clear();
+
+			if (!StorageService()->RolesDB().CreateRecord(role)) {
+				StorageService()->EntityDB().ManipulateVectorMember(
+					&ProvObjects::Entity::managementPolicies, "id", createdEntity.info.id,
+					policy.info.id, false);
+				StorageService()->PolicyDB().DeleteRecord("id", policy.info.id);
+				return false;
+			}
+
+			if (!StorageService()->EntityDB().ManipulateVectorMember(
+					&ProvObjects::Entity::managementRoles, "id", createdEntity.info.id,
+					role.info.id, true)) {
+				StorageService()->RolesDB().DeleteRecord("id", role.info.id);
+				StorageService()->EntityDB().ManipulateVectorMember(
+					&ProvObjects::Entity::managementPolicies, "id", createdEntity.info.id,
+					policy.info.id, false);
+				StorageService()->PolicyDB().DeleteRecord("id", policy.info.id);
+				return false;
+			}
+
+			return true;
+		}
+	} // namespace
 
 	void RESTAPI_operators_handler::DoGet() {
 		auto uuid = GetBinding("uuid", "");
@@ -23,6 +105,10 @@ namespace OpenWifi {
 		OperatorDB::RecordName Existing;
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "READ",
+								 RBAC::TargetScope{Existing.entityId, ""})) {
+			return;
 		}
 
 		Poco::JSON::Object Answer;
@@ -43,6 +129,10 @@ namespace OpenWifi {
 
 		if (Existing.defaultOperator) {
 			return BadRequest(RESTAPI::Errors::CannotDeleteDefaultOperator);
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "DELETE",
+								 RBAC::TargetScope{Existing.entityId, ""})) {
+			return;
 		}
 
 		//  Let's see if there are any subscribers in this operator
@@ -129,6 +219,15 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
+		const auto parentEntity = ResolveParentEntityForOperator(UserInfo_.userinfo);
+		if (parentEntity.empty()) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "CREATE",
+								 RBAC::TargetScope{parentEntity, ""})) {
+			return;
+		}
+
 		if (!ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
@@ -137,7 +236,7 @@ namespace OpenWifi {
 		ProvObjects::CreateObjectInfo(UserInfo_.userinfo, NewEntity.info);
 		NewEntity.info.name = "Operator-entity:" + NewObject.info.name;
 		NewEntity.info.description = NewObject.info.description;
-		NewEntity.parent = EntityDB::RootUUID();
+		NewEntity.parent = parentEntity;
 		NewEntity.operatorId = NewObject.info.id;
 		NewObject.entityId = NewEntity.info.id;
 
@@ -147,6 +246,12 @@ namespace OpenWifi {
 		StorageService()->EntityDB().AddChild("id", NewEntity.parent, NewEntity.info.id);
 
 		if (DB_.CreateRecord(NewObject)) {
+			if (!SeedChildOperatorAccess(UserInfo_.userinfo, NewObject, NewEntity)) {
+				StorageService()->EntityDB().DeleteChild("id", NewEntity.parent, NewEntity.info.id);
+				StorageService()->EntityDB().DeleteRecord("id", NewEntity.info.id);
+				DB_.DeleteRecord("id", NewObject.info.id);
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
 
 			// Create the default service...
 			ProvObjects::ServiceClass DefSer;
@@ -181,6 +286,10 @@ namespace OpenWifi {
 		ProvObjects::Operator Existing;
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "MODIFY",
+								 RBAC::TargetScope{Existing.entityId, ""})) {
+			return;
 		}
 
 		const auto &RawObject = ParsedBody_;

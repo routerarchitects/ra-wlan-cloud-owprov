@@ -4,10 +4,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <utility>
 
 #include "Poco/StringTokenizer.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "StorageService.h"
 #include "framework/ConfigurationValidator.h"
 #include "libs/croncpp.h"
@@ -309,30 +311,94 @@ namespace OpenWifi {
 			}
 		}
 
-		if (!R.QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);
-		}
-		if (!Entity.empty()) {
+		if constexpr (std::is_same_v<RecType, ProvObjects::Venue>) {
+			auto filterVisible = [&](RecVec &entries) {
+				if (RBAC::IsRootUser(R)) {
+					return;
+				}
+				RecVec filtered;
+				for (const auto &entry : entries) {
+					if (RBAC::IsVenueVisible(R, entry.info.id)) {
+						filtered.push_back(entry);
+					}
+				}
+				entries.swap(filtered);
+			};
+
+			auto fetchAll = [&](const std::string &where) {
+				RecVec entries;
+				auto total = DBInstance.Count(where);
+				if (total > 0) {
+					DBInstance.GetRecords(0, total, entries, where);
+				}
+				return entries;
+			};
+
+			auto paginate = [&](const RecVec &entries) {
+				if (R.QB_.Offset >= entries.size()) {
+					return RecVec{};
+				}
+				auto start = static_cast<std::size_t>(R.QB_.Offset);
+				auto end = R.QB_.Limit == 0
+							  ? start
+							  : std::min<std::size_t>(entries.size(),
+													  start + static_cast<std::size_t>(R.QB_.Limit));
+				return RecVec(entries.begin() + start, entries.begin() + end);
+			};
+
+			if (!R.QB_.Select.empty()) {
+				RecVec entries;
+				for (const auto &id : R.SelectedRecords()) {
+					RecType entry;
+					if (DBInstance.GetRecord("id", id, entry)) {
+						entries.push_back(entry);
+					}
+				}
+				filterVisible(entries);
+				if (R.QB_.CountOnly)
+					return R.ReturnCountOnly(entries.size());
+				return MakeJSONObjectArray(BlockName, entries, R);
+			}
+
 			RecVec Entries;
-			DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " entity=' " + Entity + "'");
-			if (R.QB_.CountOnly)
+			if (!Entity.empty()) {
+				Entries = fetchAll(" entity='" + Entity + "' ");
+			} else if (!Venue.empty()) {
+				Entries = fetchAll(" venue='" + Venue + "' ");
+			} else {
+				Entries = fetchAll("");
+			}
+			filterVisible(Entries);
+			if (R.QB_.CountOnly) {
 				return R.ReturnCountOnly(Entries.size());
-			return MakeJSONObjectArray(BlockName, Entries, R);
-		}
-		if (!Venue.empty()) {
-			RecVec Entries;
-			DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " venue=' " + Venue + "'");
-			if (R.QB_.CountOnly)
-				return R.ReturnCountOnly(Entries.size());
-			return MakeJSONObjectArray(BlockName, Entries, R);
-		} else if (R.QB_.CountOnly) {
-			Poco::JSON::Object Answer;
-			auto C = DBInstance.Count();
-			return R.ReturnCountOnly(C);
+			}
+			return MakeJSONObjectArray(BlockName, paginate(Entries), R);
 		} else {
-			RecVec Entries;
-			DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries);
-			return MakeJSONObjectArray(BlockName, Entries, R);
+			if (!R.QB_.Select.empty()) {
+				return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);
+			}
+			if (!Entity.empty()) {
+				RecVec Entries;
+				DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " entity=' " + Entity + "'");
+				if (R.QB_.CountOnly)
+					return R.ReturnCountOnly(Entries.size());
+				return MakeJSONObjectArray(BlockName, Entries, R);
+			}
+			if (!Venue.empty()) {
+				RecVec Entries;
+				DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " venue=' " + Venue + "'");
+				if (R.QB_.CountOnly)
+					return R.ReturnCountOnly(Entries.size());
+				return MakeJSONObjectArray(BlockName, Entries, R);
+			} else if (R.QB_.CountOnly) {
+				Poco::JSON::Object Answer;
+				auto C = DBInstance.Count();
+				return R.ReturnCountOnly(C);
+			} else {
+				RecVec Entries;
+				DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries);
+				return MakeJSONObjectArray(BlockName, Entries, R);
+			}
 		}
 	}
 

@@ -9,6 +9,7 @@
 #include "RESTAPI_venue_handler.h"
 
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
 #include "Tasks/VenueConfigUpdater.h"
@@ -58,6 +59,11 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		if (!RBAC::RequireAccess(*this, "venue", "READ",
+								 RBAC::TargetScope{Existing.entity, UUID})) {
+			return;
+		}
+
 		if (GetBoolParameter("getDevices")) {
 			ProvObjects::VenueDeviceList VDL;
 			VDL.id = Existing.info.id;
@@ -83,6 +89,11 @@ namespace OpenWifi {
 		ProvObjects::Venue Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+
+		if (!RBAC::RequireAccess(*this, "venue", "DELETE",
+								 RBAC::TargetScope{Existing.entity, UUID})) {
+			return;
 		}
 
 		if (!Existing.children.empty() || !Existing.devices.empty()) {
@@ -158,6 +169,22 @@ namespace OpenWifi {
 		if (!NewObject.entity.empty() &&
 			!StorageService()->EntityDB().Exists("id", NewObject.entity)) {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		}
+
+		if (!NewObject.parent.empty()) {
+			ProvObjects::Venue ParentVenue;
+			if (!StorageService()->VenueDB().GetRecord("id", NewObject.parent, ParentVenue)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			if (!RBAC::RequireAccess(*this, "venue", "CREATE",
+									 RBAC::TargetScope{ParentVenue.entity, NewObject.parent})) {
+				return;
+			}
+		} else {
+			if (!RBAC::RequireAccess(*this, "venue", "CREATE",
+									 RBAC::TargetScope{NewObject.entity, ""})) {
+				return;
+			}
 		}
 
         if(StorageService()->VenueDB().DoesVenueNameAlreadyExist(NewObject.info.name,NewObject.entity, NewObject.parent)) {
@@ -274,6 +301,11 @@ namespace OpenWifi {
 		ProvObjects::Venue Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+
+		if (!RBAC::RequireAccess(*this, "venue", "MODIFY",
+								 RBAC::TargetScope{Existing.entity, UUID})) {
+			return;
 		}
 
 		auto testUpdateOnly = GetBoolParameter("testUpdateOnly");
@@ -438,6 +470,11 @@ namespace OpenWifi {
 			if (MoveToEntity.empty() || !StorageService()->EntityDB().Exists("id", MoveToEntity)) {
 				return BadRequest(RESTAPI::Errors::EntityMustExist);
 			}
+			if (MoveToEntity != Existing.entity &&
+				!RBAC::RequireAccess(*this, "venue", "MODIFY",
+									 RBAC::TargetScope{MoveToEntity, UUID})) {
+				return;
+			}
 			MoveFromEntity = Existing.entity;
 			Existing.entity = MoveToEntity;
 		}
@@ -446,6 +483,11 @@ namespace OpenWifi {
 		if (AssignIfPresent(RawObject, "venue", MoveToVenue)) {
 			if (MoveToVenue.empty() || !StorageService()->VenueDB().Exists("id", MoveToVenue)) {
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			if (MoveToVenue != Existing.parent &&
+				!RBAC::RequireAccess(*this, "venue", "MODIFY",
+									 RBAC::TargetScope{Existing.entity, MoveToVenue})) {
+				return;
 			}
 			MoveFromVenue = Existing.parent;
 			Existing.parent = MoveToVenue;

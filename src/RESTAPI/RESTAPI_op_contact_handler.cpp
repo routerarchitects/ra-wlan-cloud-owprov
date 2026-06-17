@@ -4,6 +4,7 @@
 
 #include "RESTAPI_op_contact_handler.h"
 #include "RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "sdks/SDK_sec.h"
 
 namespace OpenWifi {
@@ -16,6 +17,14 @@ namespace OpenWifi {
 		OpContactDB::RecordName Existing;
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
+		}
+		ProvObjects::Operator Operator;
+		if (!StorageService()->OperatorDB().GetRecord("id", Existing.operatorId, Operator)) {
+			return NotFound();
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "READ",
+								 RBAC::TargetScope{Operator.entityId, ""})) {
+			return;
 		}
 		Poco::JSON::Object Answer;
 		Existing.to_json(Answer);
@@ -31,6 +40,14 @@ namespace OpenWifi {
 		OpContactDB::RecordName Existing;
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
+		}
+		ProvObjects::Operator Operator;
+		if (!StorageService()->OperatorDB().GetRecord("id", Existing.operatorId, Operator)) {
+			return NotFound();
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "DELETE",
+								 RBAC::TargetScope{Operator.entityId, ""})) {
+			return;
 		}
 
 		// see if anyone is still using this thing
@@ -59,6 +76,14 @@ namespace OpenWifi {
 			!ValidContactType(NewObject.type, *this)) {
 			return;
 		}
+		ProvObjects::Operator Operator;
+		if (!StorageService()->OperatorDB().GetRecord("id", NewObject.operatorId, Operator)) {
+			return BadRequest(RESTAPI::Errors::InvalidOperatorId);
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "CREATE",
+								 RBAC::TargetScope{Operator.entityId, ""})) {
+			return;
+		}
 
 		ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info);
 		return ReturnCreatedObject(DB_, NewObject, *this);
@@ -82,6 +107,14 @@ namespace OpenWifi {
 					   RESTAPI::Errors::UnknownManagementPolicyUUID, *this) ||
 			!ValidDbId(UpdateObj.subscriberDeviceId, StorageService()->SubscriberDeviceDB(), true,
 					   RESTAPI::Errors::InvalidSubscriberDeviceId, *this)) {
+			return;
+		}
+		ProvObjects::Operator Operator;
+		if (!StorageService()->OperatorDB().GetRecord("id", Existing.operatorId, Operator)) {
+			return NotFound();
+		}
+		if (!RBAC::RequireAccess(*this, "operator", "MODIFY",
+								 RBAC::TargetScope{Operator.entityId, ""})) {
 			return;
 		}
 
