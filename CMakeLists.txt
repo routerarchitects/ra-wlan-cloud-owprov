@@ -172,6 +172,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_asset_server.cpp src/RESTAPI/RESTAPI_asset_server.h
         src/RESTAPI/RESTAPI_db_helpers.h
         src/RESTAPI/RESTAPI_rbac_helpers.cpp src/RESTAPI/RESTAPI_rbac_helpers.h
+        src/RESTAPI/RESTAPI_list_helpers.h
         src/RESTAPI/RESTAPI_map_handler.cpp src/RESTAPI/RESTAPI_map_handler.h
         src/RESTAPI/RESTAPI_map_list_handler.cpp src/RESTAPI/RESTAPI_map_list_handler.h
         src/RESTAPI/RESTAPI_variables_handler.cpp src/RESTAPI/RESTAPI_variables_handler.h

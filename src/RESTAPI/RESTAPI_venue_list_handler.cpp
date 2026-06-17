@@ -5,6 +5,7 @@
 #include "RESTAPI_venue_list_handler.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
+#include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
 #include <algorithm>
 
@@ -28,13 +29,11 @@ namespace OpenWifi {
 				}
 			}
 			if (!RBAC::IsRootUser(*this)) {
-				VenueDB::RecordVec Visible;
-				for (const auto &venue : Venues) {
-					if (RBAC::IsVenueVisible(*this, venue.info.id)) {
-						Visible.push_back(venue);
-					}
-				}
-				Venues.swap(Visible);
+				Venues = RESTAPI::FilterRecords(
+					Venues,
+					[&](const auto &venue) {
+						return RBAC::IsVenueVisible(*this, venue.info.id);
+					});
 			}
 			if (QB_.CountOnly) {
 				return ReturnCountOnly(Venues.size());
@@ -50,29 +49,18 @@ namespace OpenWifi {
 		}
 
 		if (!RBAC::IsRootUser(*this)) {
-			VenueDB::RecordVec Visible;
-			for (const auto &venue : Venues) {
-				if (RBAC::IsVenueVisible(*this, venue.info.id)) {
-					Visible.push_back(venue);
-				}
-			}
-			Venues.swap(Visible);
+			Venues = RESTAPI::FilterRecords(
+				Venues,
+				[&](const auto &venue) {
+					return RBAC::IsVenueVisible(*this, venue.info.id);
+				});
 		}
 
 		if (QB_.CountOnly) {
 			return ReturnCountOnly(Venues.size());
 		}
 
-		if (QB_.Offset < Venues.size()) {
-			auto start = static_cast<std::size_t>(QB_.Offset);
-			auto end = QB_.Limit == 0
-						   ? start
-						   : std::min<std::size_t>(Venues.size(),
-												   start + static_cast<std::size_t>(QB_.Limit));
-			Venues = VenueDB::RecordVec(Venues.begin() + start, Venues.begin() + end);
-		} else {
-			Venues.clear();
-		}
+		Venues = RESTAPI::ApplyPagination(Venues, QB_.Offset, QB_.Limit);
 		return ReturnObject("venues", Venues);
 	}
 } // namespace OpenWifi

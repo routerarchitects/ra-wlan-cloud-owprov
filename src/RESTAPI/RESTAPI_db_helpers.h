@@ -10,6 +10,7 @@
 #include "Poco/StringTokenizer.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
+#include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
 #include "framework/ConfigurationValidator.h"
 #include "libs/croncpp.h"
@@ -316,13 +317,11 @@ namespace OpenWifi {
 				if (RBAC::IsRootUser(R)) {
 					return;
 				}
-				RecVec filtered;
-				for (const auto &entry : entries) {
-					if (RBAC::IsVenueVisible(R, entry.info.id)) {
-						filtered.push_back(entry);
-					}
-				}
-				entries.swap(filtered);
+				entries = RESTAPI::FilterRecords(
+					entries,
+					[&](const auto &entry) {
+						return RBAC::IsVenueVisible(R, entry.info.id);
+					});
 			};
 
 			auto fetchAll = [&](const std::string &where) {
@@ -332,18 +331,6 @@ namespace OpenWifi {
 					DBInstance.GetRecords(0, total, entries, where);
 				}
 				return entries;
-			};
-
-			auto paginate = [&](const RecVec &entries) {
-				if (R.QB_.Offset >= entries.size()) {
-					return RecVec{};
-				}
-				auto start = static_cast<std::size_t>(R.QB_.Offset);
-				auto end = R.QB_.Limit == 0
-							  ? start
-							  : std::min<std::size_t>(entries.size(),
-													  start + static_cast<std::size_t>(R.QB_.Limit));
-				return RecVec(entries.begin() + start, entries.begin() + end);
 			};
 
 			if (!R.QB_.Select.empty()) {
@@ -372,7 +359,10 @@ namespace OpenWifi {
 			if (R.QB_.CountOnly) {
 				return R.ReturnCountOnly(Entries.size());
 			}
-			return MakeJSONObjectArray(BlockName, paginate(Entries), R);
+			return MakeJSONObjectArray(
+				BlockName,
+				RESTAPI::ApplyPagination(Entries, R.QB_.Offset, R.QB_.Limit),
+				R);
 		} else {
 			if (!R.QB_.Select.empty()) {
 				return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);

@@ -9,6 +9,7 @@
 #include "RESTAPI_entity_list_handler.h"
 #include "RESTAPI_db_helpers.h"
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
+#include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
 #include <algorithm>
 
@@ -68,18 +69,6 @@ namespace OpenWifi {
 			});
 			return visible;
 		}
-
-		template <typename T>
-		std::vector<T> ApplyPagination(const std::vector<T> &items, uint64_t offset,
-									   uint64_t limit) {
-			if (offset >= items.size()) {
-				return {};
-			}
-			auto start = static_cast<std::size_t>(offset);
-			auto end = limit == 0 ? start : std::min<std::size_t>(items.size(),
-																 start + static_cast<std::size_t>(limit));
-			return std::vector<T>(items.begin() + start, items.begin() + end);
-		}
 	} // namespace
 
 	void RESTAPI_entity_list_handler::DoGet() {
@@ -138,7 +127,7 @@ namespace OpenWifi {
 				return ReturnCountOnly(visibleEntities.size());
 			}
 			return MakeJSONObjectArray("entities",
-									   ApplyPagination(visibleEntities, QB_.Offset, QB_.Limit),
+									   RESTAPI::ApplyPagination(visibleEntities, QB_.Offset, QB_.Limit),
 									   *this);
 		}
 	}
