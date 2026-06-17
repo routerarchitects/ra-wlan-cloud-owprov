@@ -25,11 +25,10 @@ namespace OpenWifi::RESTAPI {
 		}
 
 		auto start = static_cast<std::size_t>(offset);
-		auto end = limit == 0
-			? start
-			: std::min<std::size_t>(
-				  items.size(),
-				  start + static_cast<std::size_t>(limit));
+		auto end = limit == 0 ? items.size()
+							  : std::min<std::size_t>(
+									items.size(),
+									start + static_cast<std::size_t>(limit));
 
 		return Vec(items.begin() + start, items.begin() + end);
 	}

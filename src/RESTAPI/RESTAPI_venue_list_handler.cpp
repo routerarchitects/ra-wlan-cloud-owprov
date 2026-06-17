@@ -7,13 +7,14 @@
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
+#include "framework/orm.h"
 #include <algorithm>
 
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
 		auto RRMvendor = GetParameter("RRMvendor", "");
 		if (RRMvendor.empty()) {
-			return ListHandler<VenueDB>("venues", DB_, *this);
+			return ListVenueHandler<VenueDB>("venues", DB_, *this);
 		}
 
 		auto matchesVendor = [&](const ProvObjects::Venue &venue) {
@@ -41,7 +42,7 @@ namespace OpenWifi {
 			return ReturnObject("venues", Venues);
 		}
 
-		auto Where = fmt::format(" deviceRules LIKE '%{}%' ", RRMvendor);
+		auto Where = fmt::format(" deviceRules LIKE '%{}%' ", ORM::Escape(RRMvendor));
 		VenueDB::RecordVec Venues;
 		auto Count = DB_.Count(Where);
 		if (Count > 0) {

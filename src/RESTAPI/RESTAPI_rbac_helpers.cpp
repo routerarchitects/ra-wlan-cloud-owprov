@@ -37,6 +37,11 @@ namespace OpenWifi::RBAC {
 			return false;
 		}
 
+		bool EntryAppliesToUser(const ProvObjects::ManagementPolicyEntry &entry,
+								const std::string &userId) {
+			return entry.users.empty() || Contains(entry.users, userId);
+		}
+
 		bool TargetInsideRoleScope(const ProvObjects::ManagementRole &role,
 								   const TargetScope &targetScope) {
 			if (!role.venue.empty()) {
@@ -57,9 +62,12 @@ namespace OpenWifi::RBAC {
 			return false;
 		}
 
-		bool PolicyAllows(const ProvObjects::ManagementPolicy &policy, const std::string &resource,
-						  const std::string &action) {
+		bool PolicyAllows(const ProvObjects::ManagementPolicy &policy, const std::string &userId,
+						  const std::string &resource, const std::string &action) {
 			for (const auto &entry : policy.entries) {
+				if (!EntryAppliesToUser(entry, userId)) {
+					continue;
+				}
 				bool resourceAllowed = false;
 				for (const auto &r : entry.resources) {
 					if (ResourceMatches(r, resource)) {
@@ -89,29 +97,26 @@ namespace OpenWifi::RBAC {
 			}
 
 			if (!targetScope.venue.empty()) {
-				ProvObjects::ManagementRoleVec venueRoles;
-				StorageService()->RolesDB().GetRecords(
-					0, 5000, venueRoles,
+				StorageService()->RolesDB().Iterate(
+					[&](const ProvObjects::ManagementRole &role) {
+						roles.push_back(role);
+						return true;
+					},
 					fmt::format(" venue='{}' ", ORM::Escape(targetScope.venue)));
-				for (const auto &role : venueRoles) {
-					roles.push_back(role);
-				}
 			}
 
 			if (!targetEntity.empty()) {
-				ProvObjects::ManagementRoleVec entityRoles;
-				StorageService()->RolesDB().GetRecords(
-					0, 5000, entityRoles,
-					fmt::format(" entity='{}' ", ORM::Escape(targetEntity)));
-				for (const auto &role : entityRoles) {
-					auto duplicate =
-						std::find_if(roles.begin(), roles.end(), [&](const auto &r) {
+				StorageService()->RolesDB().Iterate(
+					[&](const ProvObjects::ManagementRole &role) {
+						auto duplicate = std::find_if(roles.begin(), roles.end(), [&](const auto &r) {
 							return r.info.id == role.info.id;
 						}) != roles.end();
-					if (!duplicate) {
-						roles.push_back(role);
-					}
-				}
+						if (!duplicate) {
+							roles.push_back(role);
+						}
+						return true;
+					},
+					fmt::format(" entity='{}' ", ORM::Escape(targetEntity)));
 			}
 
 			for (const auto &role : roles) {
@@ -127,7 +132,7 @@ namespace OpenWifi::RBAC {
 					!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, policy)) {
 					continue;
 				}
-				if (PolicyAllows(policy, resourceType, action)) {
+				if (PolicyAllows(policy, userId, resourceType, action)) {
 					return true;
 				}
 			}
@@ -146,35 +151,37 @@ namespace OpenWifi::RBAC {
 			return false;
 		}
 
-		ProvObjects::ManagementRoleVec roles;
-		StorageService()->RolesDB().GetRecords(0, 5000, roles);
-		for (const auto &role : roles) {
-			if (!Contains(role.users, userId)) {
-				continue;
-			}
-
-			std::string targetEntity = role.entity;
-			if (targetEntity.empty() && !role.venue.empty()) {
-				ProvObjects::Venue venue;
-				if (StorageService()->VenueDB().GetRecord("id", role.venue, venue)) {
-					targetEntity = venue.entity;
+		bool found = false;
+		StorageService()->RolesDB().Iterate(
+			[&](const ProvObjects::ManagementRole &role) {
+				if (!Contains(role.users, userId)) {
+					return true;
 				}
-			}
-			if (targetEntity.empty()) {
-				continue;
-			}
 
-			ProvObjects::ManagementPolicy policy;
-			if (role.managementPolicy.empty() ||
-				!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, policy)) {
-				continue;
-			}
-			if (PolicyAllows(policy, resourceType, action)) {
-				entityId = targetEntity;
+				std::string targetEntity = role.entity;
+				if (targetEntity.empty() && !role.venue.empty()) {
+					ProvObjects::Venue venue;
+					if (StorageService()->VenueDB().GetRecord("id", role.venue, venue)) {
+						targetEntity = venue.entity;
+					}
+				}
+				if (targetEntity.empty()) {
+					return true;
+				}
+
+				ProvObjects::ManagementPolicy policy;
+				if (role.managementPolicy.empty() ||
+					!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, policy)) {
+					return true;
+				}
+				if (PolicyAllows(policy, userId, resourceType, action)) {
+					entityId = targetEntity;
+					found = true;
+					return false;
+				}
 				return true;
-			}
-		}
-		return false;
+			});
+		return found;
 	}
 
 	bool HasAccess(RESTAPIHandler &handler, const std::string &resourceType,

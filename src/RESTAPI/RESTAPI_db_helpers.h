@@ -13,6 +13,7 @@
 #include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
 #include "framework/ConfigurationValidator.h"
+#include "framework/orm.h"
 #include "libs/croncpp.h"
 #include "sdks/SDK_sec.h"
 
@@ -286,6 +287,94 @@ namespace OpenWifi {
 	}
 
 	template <typename DB>
+	void ListVenueHandler(const char *BlockName, DB &DBInstance, RESTAPIHandler &R) {
+		auto Entity = R.GetParameter("entity", "");
+		auto Venue = R.GetParameter("venue", "");
+
+		typedef typename DB::RecordVec RecVec;
+		typedef typename DB::RecordName RecType;
+
+		auto LocationsForVenue = R.GetParameter("locationsForVenue", "");
+		if (!LocationsForVenue.empty()) {
+			ProvObjects::Venue RequestedVenue;
+			if (!DBInstance.GetRecord("id", LocationsForVenue, RequestedVenue)) {
+				return R.NotFound();
+			}
+			if (!RBAC::RequireAccess(
+					R,
+					"venue",
+					"READ",
+					RBAC::TargetScope{RequestedVenue.entity, LocationsForVenue})) {
+				return;
+			}
+			std::vector<triplet_t> IDs;
+			GetLocationsForVenue(LocationsForVenue, IDs);
+			Poco::JSON::Array A;
+			for (const auto &[name, description, uuid] : IDs) {
+				Poco::JSON::Object O;
+				O.set("name", name);
+				O.set("description", description);
+				O.set("uuid", uuid);
+				A.add(O);
+			}
+			Poco::JSON::Object Answer;
+			Answer.set("locations", A);
+			return R.ReturnObject(Answer);
+		}
+
+		auto filterVisible = [&](RecVec &entries) {
+			if (RBAC::IsRootUser(R)) {
+				return;
+			}
+			entries = RESTAPI::FilterRecords(
+				entries,
+				[&](const auto &entry) {
+					return RBAC::IsVenueVisible(R, entry.info.id);
+				});
+		};
+
+		auto fetchAll = [&](const std::string &where) {
+			RecVec entries;
+			auto total = DBInstance.Count(where);
+			if (total > 0) {
+				DBInstance.GetRecords(0, total, entries, where);
+			}
+			return entries;
+		};
+
+		if (!R.QB_.Select.empty()) {
+			RecVec entries;
+			for (const auto &id : R.SelectedRecords()) {
+				RecType entry;
+				if (DBInstance.GetRecord("id", id, entry)) {
+					entries.push_back(entry);
+				}
+			}
+			filterVisible(entries);
+			if (R.QB_.CountOnly)
+				return R.ReturnCountOnly(entries.size());
+			return MakeJSONObjectArray(BlockName, entries, R);
+		}
+
+		RecVec Entries;
+		if (!Entity.empty()) {
+			Entries = fetchAll(fmt::format(" entity='{}' ", ORM::Escape(Entity)));
+		} else if (!Venue.empty()) {
+			Entries = fetchAll(fmt::format(" venue='{}' ", ORM::Escape(Venue)));
+		} else {
+			Entries = fetchAll("");
+		}
+		filterVisible(Entries);
+		if (R.QB_.CountOnly) {
+			return R.ReturnCountOnly(Entries.size());
+		}
+		return MakeJSONObjectArray(
+			BlockName,
+			RESTAPI::ApplyPagination(Entries, R.QB_.Offset, R.QB_.Limit),
+			R);
+	}
+
+	template <typename DB>
 	void ListHandler(const char *BlockName, DB &DBInstance, RESTAPIHandler &R) {
 		auto Entity = R.GetParameter("entity", "");
 		auto Venue = R.GetParameter("venue", "");
@@ -293,102 +382,30 @@ namespace OpenWifi {
 		typedef typename DB::RecordVec RecVec;
 		typedef typename DB::RecordName RecType;
 
-		if constexpr (std::is_same_v<RecType, ProvObjects::Venue>) {
-			auto LocationsForVenue = R.GetParameter("locationsForVenue", "");
-			if (!LocationsForVenue.empty()) {
-				std::vector<triplet_t> IDs;
-				GetLocationsForVenue(LocationsForVenue, IDs);
-				Poco::JSON::Array A;
-				for (const auto &[name, description, uuid] : IDs) {
-					Poco::JSON::Object O;
-					O.set("name", name);
-					O.set("description", description);
-					O.set("uuid", uuid);
-					A.add(O);
-				}
-				Poco::JSON::Object Answer;
-				Answer.set("locations", A);
-				return R.ReturnObject(Answer);
-			}
+		if (!R.QB_.Select.empty()) {
+			return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);
 		}
-
-		if constexpr (std::is_same_v<RecType, ProvObjects::Venue>) {
-			auto filterVisible = [&](RecVec &entries) {
-				if (RBAC::IsRootUser(R)) {
-					return;
-				}
-				entries = RESTAPI::FilterRecords(
-					entries,
-					[&](const auto &entry) {
-						return RBAC::IsVenueVisible(R, entry.info.id);
-					});
-			};
-
-			auto fetchAll = [&](const std::string &where) {
-				RecVec entries;
-				auto total = DBInstance.Count(where);
-				if (total > 0) {
-					DBInstance.GetRecords(0, total, entries, where);
-				}
-				return entries;
-			};
-
-			if (!R.QB_.Select.empty()) {
-				RecVec entries;
-				for (const auto &id : R.SelectedRecords()) {
-					RecType entry;
-					if (DBInstance.GetRecord("id", id, entry)) {
-						entries.push_back(entry);
-					}
-				}
-				filterVisible(entries);
-				if (R.QB_.CountOnly)
-					return R.ReturnCountOnly(entries.size());
-				return MakeJSONObjectArray(BlockName, entries, R);
-			}
-
+		if (!Entity.empty()) {
 			RecVec Entries;
-			if (!Entity.empty()) {
-				Entries = fetchAll(" entity='" + Entity + "' ");
-			} else if (!Venue.empty()) {
-				Entries = fetchAll(" venue='" + Venue + "' ");
-			} else {
-				Entries = fetchAll("");
-			}
-			filterVisible(Entries);
-			if (R.QB_.CountOnly) {
+			DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " entity=' " + Entity + "'");
+			if (R.QB_.CountOnly)
 				return R.ReturnCountOnly(Entries.size());
-			}
-			return MakeJSONObjectArray(
-				BlockName,
-				RESTAPI::ApplyPagination(Entries, R.QB_.Offset, R.QB_.Limit),
-				R);
+			return MakeJSONObjectArray(BlockName, Entries, R);
+		}
+		if (!Venue.empty()) {
+			RecVec Entries;
+			DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " venue=' " + Venue + "'");
+			if (R.QB_.CountOnly)
+				return R.ReturnCountOnly(Entries.size());
+			return MakeJSONObjectArray(BlockName, Entries, R);
+		} else if (R.QB_.CountOnly) {
+			Poco::JSON::Object Answer;
+			auto C = DBInstance.Count();
+			return R.ReturnCountOnly(C);
 		} else {
-			if (!R.QB_.Select.empty()) {
-				return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);
-			}
-			if (!Entity.empty()) {
-				RecVec Entries;
-				DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " entity=' " + Entity + "'");
-				if (R.QB_.CountOnly)
-					return R.ReturnCountOnly(Entries.size());
-				return MakeJSONObjectArray(BlockName, Entries, R);
-			}
-			if (!Venue.empty()) {
-				RecVec Entries;
-				DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries, " venue=' " + Venue + "'");
-				if (R.QB_.CountOnly)
-					return R.ReturnCountOnly(Entries.size());
-				return MakeJSONObjectArray(BlockName, Entries, R);
-			} else if (R.QB_.CountOnly) {
-				Poco::JSON::Object Answer;
-				auto C = DBInstance.Count();
-				return R.ReturnCountOnly(C);
-			} else {
-				RecVec Entries;
-				DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries);
-				return MakeJSONObjectArray(BlockName, Entries, R);
-			}
+			RecVec Entries;
+			DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Entries);
+			return MakeJSONObjectArray(BlockName, Entries, R);
 		}
 	}
 
