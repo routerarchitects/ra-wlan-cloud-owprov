@@ -10,15 +10,11 @@ namespace OpenWifi {
 	void RESTAPI_service_class_list_handler::DoGet() {
 		auto operatorId = GetParameter("operatorId");
 
-		if (operatorId.empty() || !StorageService()->OperatorDB().Exists("id", operatorId)) {
+		if (operatorId.empty()) {
 			return BadRequest(RESTAPI::Errors::OperatorIdMustExist);
 		}
-		ProvObjects::Operator Operator;
-		if (!StorageService()->OperatorDB().GetRecord("id", operatorId, Operator)) {
-			return BadRequest(RESTAPI::Errors::OperatorIdMustExist);
-		}
-		if (!RBAC::RequireAccess(*this, "operator", "LIST",
-								 RBAC::TargetScope{Operator.entityId, ""})) {
+		if (!RBAC::RequireOperatorAccessOrBadRequest(*this, operatorId, "LIST",
+													 RESTAPI::Errors::OperatorIdMustExist)) {
 			return;
 		}
 		return ListHandlerForOperator<ServiceClassDB>("serviceClasses", DB_, *this, operatorId);

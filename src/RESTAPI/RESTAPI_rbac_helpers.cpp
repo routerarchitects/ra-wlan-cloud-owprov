@@ -229,4 +229,48 @@ namespace OpenWifi::RBAC {
 		return IsScopeAllowed(handler, TargetScope{venue.entity, venueId});
 	}
 
+	bool LoadOperator(const std::string &operatorId, ProvObjects::Operator &op) {
+		return StorageService()->OperatorDB().GetRecord("id", operatorId, op);
+	}
+
+	bool RequireOperatorAccessForLoadedOperator(
+		RESTAPIHandler &handler,
+		const ProvObjects::Operator &op,
+		const std::string &action
+	) {
+		return RequireAccess(
+			handler,
+			"operator",
+			action,
+			TargetScope{op.entityId, ""}
+		);
+	}
+
+	bool RequireOperatorAccessOrNotFound(
+		RESTAPIHandler &handler,
+		const std::string &operatorId,
+		const std::string &action
+	) {
+		ProvObjects::Operator op;
+		if (!LoadOperator(operatorId, op)) {
+			handler.NotFound();
+			return false;
+		}
+		return RequireOperatorAccessForLoadedOperator(handler, op, action);
+	}
+
+	bool RequireOperatorAccessOrBadRequest(
+		RESTAPIHandler &handler,
+		const std::string &operatorId,
+		const std::string &action,
+		RESTAPI::Errors::msg badRequestError
+	) {
+		ProvObjects::Operator op;
+		if (!LoadOperator(operatorId, op)) {
+			handler.BadRequest(badRequestError);
+			return false;
+		}
+		return RequireOperatorAccessForLoadedOperator(handler, op, action);
+	}
+
 } // namespace OpenWifi::RBAC

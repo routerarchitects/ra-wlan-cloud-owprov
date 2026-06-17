@@ -18,12 +18,7 @@ namespace OpenWifi {
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
 		}
-		ProvObjects::Operator Operator;
-		if (!StorageService()->OperatorDB().GetRecord("id", Existing.operatorId, Operator)) {
-			return NotFound();
-		}
-		if (!RBAC::RequireAccess(*this, "operator", "READ",
-								 RBAC::TargetScope{Operator.entityId, ""})) {
+		if (!RBAC::RequireOperatorAccessOrNotFound(*this, Existing.operatorId, "READ")) {
 			return;
 		}
 		Poco::JSON::Object Answer;
@@ -41,12 +36,7 @@ namespace OpenWifi {
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
 		}
-		ProvObjects::Operator Operator;
-		if (!StorageService()->OperatorDB().GetRecord("id", Existing.operatorId, Operator)) {
-			return NotFound();
-		}
-		if (!RBAC::RequireAccess(*this, "operator", "DELETE",
-								 RBAC::TargetScope{Operator.entityId, ""})) {
+		if (!RBAC::RequireOperatorAccessOrNotFound(*this, Existing.operatorId, "DELETE")) {
 			return;
 		}
 
@@ -76,12 +66,8 @@ namespace OpenWifi {
 			!ValidContactType(NewObject.type, *this)) {
 			return;
 		}
-		ProvObjects::Operator Operator;
-		if (!StorageService()->OperatorDB().GetRecord("id", NewObject.operatorId, Operator)) {
-			return BadRequest(RESTAPI::Errors::InvalidOperatorId);
-		}
-		if (!RBAC::RequireAccess(*this, "operator", "CREATE",
-								 RBAC::TargetScope{Operator.entityId, ""})) {
+		if (!RBAC::RequireOperatorAccessOrBadRequest(*this, NewObject.operatorId, "CREATE",
+													 RESTAPI::Errors::InvalidOperatorId)) {
 			return;
 		}
 
@@ -109,12 +95,7 @@ namespace OpenWifi {
 					   RESTAPI::Errors::InvalidSubscriberDeviceId, *this)) {
 			return;
 		}
-		ProvObjects::Operator Operator;
-		if (!StorageService()->OperatorDB().GetRecord("id", Existing.operatorId, Operator)) {
-			return NotFound();
-		}
-		if (!RBAC::RequireAccess(*this, "operator", "MODIFY",
-								 RBAC::TargetScope{Operator.entityId, ""})) {
+		if (!RBAC::RequireOperatorAccessOrNotFound(*this, Existing.operatorId, "MODIFY")) {
 			return;
 		}
 
