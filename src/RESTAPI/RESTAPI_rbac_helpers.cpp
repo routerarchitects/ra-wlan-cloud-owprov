@@ -14,6 +14,166 @@ namespace OpenWifi::RBAC {
 			return std::find(values.begin(), values.end(), target) != values.end();
 		}
 
+		bool IsEntityDescendantOf(const std::string &targetEntityId,
+								  const std::string &ancestorEntityId) {
+			if (targetEntityId.empty() || ancestorEntityId.empty()) {
+				return false;
+			}
+
+			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC entity-scope check start target='{}' ancestor='{}'",
+														 targetEntityId, ancestorEntityId));
+
+			std::string currentEntityId = targetEntityId;
+			while (!currentEntityId.empty()) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC entity-scope hop current='{}' ancestor='{}'",
+									   currentEntityId, ancestorEntityId));
+				if (currentEntityId == ancestorEntityId) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC entity-scope match target='{}' ancestor='{}'",
+																 targetEntityId, ancestorEntityId));
+					return true;
+				}
+
+				ProvObjects::Entity entity;
+				if (!StorageService()->EntityDB().GetRecord("id", currentEntityId, entity)) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC entity-scope stop target='{}' current='{}' reason='entity not found'",
+																 targetEntityId, currentEntityId));
+					return false;
+				}
+				currentEntityId = entity.parent;
+			}
+			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC entity-scope miss target='{}' ancestor='{}'",
+														 targetEntityId, ancestorEntityId));
+			return false;
+		}
+
+		bool IsVenueDescendantOf(const std::string &targetVenueId,
+								const std::string &ancestorVenueId) {
+			if (targetVenueId.empty() || ancestorVenueId.empty()) {
+				return false;
+			}
+
+			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC venue-scope check start target='{}' ancestor='{}'",
+														 targetVenueId, ancestorVenueId));
+
+			std::string currentVenueId = targetVenueId;
+			while (!currentVenueId.empty()) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC venue-scope hop current='{}' ancestor='{}'",
+									   currentVenueId, ancestorVenueId));
+				if (currentVenueId == ancestorVenueId) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC venue-scope match target='{}' ancestor='{}'",
+																 targetVenueId, ancestorVenueId));
+					return true;
+				}
+
+				ProvObjects::Venue venue;
+				if (!StorageService()->VenueDB().GetRecord("id", currentVenueId, venue)) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC venue-scope stop target='{}' current='{}' reason='venue not found'",
+																 targetVenueId, currentVenueId));
+					return false;
+				}
+				currentVenueId = venue.parent;
+			}
+			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC venue-scope miss target='{}' ancestor='{}'",
+														 targetVenueId, ancestorVenueId));
+			return false;
+		}
+
+		bool IsEntityDescendantWithinOperatorDepth(const std::string &targetEntityId,
+												 const std::string &ancestorEntityId,
+												 std::size_t maxOperatorBoundaries) {
+			if (targetEntityId.empty() || ancestorEntityId.empty()) {
+				return false;
+			}
+
+			std::size_t operatorBoundaries = 0;
+			std::string currentEntityId = targetEntityId;
+			while (!currentEntityId.empty()) {
+				if (currentEntityId == ancestorEntityId) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC entity-depth match target='{}' ancestor='{}' operatorBoundaries={}",
+																 targetEntityId, ancestorEntityId,
+																 operatorBoundaries));
+					return operatorBoundaries <= maxOperatorBoundaries;
+				}
+
+				ProvObjects::Entity entity;
+				if (!StorageService()->EntityDB().GetRecord("id", currentEntityId, entity)) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC entity-depth stop target='{}' current='{}' reason='entity not found'",
+																 targetEntityId, currentEntityId));
+					return false;
+				}
+
+				if (!entity.operatorId.empty()) {
+					++operatorBoundaries;
+				}
+				if (operatorBoundaries > maxOperatorBoundaries) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC entity-depth deny target='{}' ancestor='{}' operatorBoundaries={} maxAllowed={}",
+																 targetEntityId, ancestorEntityId,
+																 operatorBoundaries, maxOperatorBoundaries));
+					return false;
+				}
+
+				currentEntityId = entity.parent;
+			}
+
+			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC entity-depth miss target='{}' ancestor='{}' operatorBoundaries={}",
+														 targetEntityId, ancestorEntityId, operatorBoundaries));
+			return false;
+		}
+
+		bool IsEntityWithinOperatorChainDepth(const std::string &entityId,
+											 std::size_t maxOperatorDepth) {
+			if (entityId.empty()) {
+				return false;
+			}
+
+			std::size_t operatorDepth = 0;
+			std::string currentEntityId = entityId;
+			while (!currentEntityId.empty()) {
+				ProvObjects::Entity entity;
+				if (!StorageService()->EntityDB().GetRecord("id", currentEntityId, entity)) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC operator-depth stop entity='{}' current='{}' reason='entity not found'",
+																 entityId, currentEntityId));
+					return false;
+				}
+
+				if (!entity.operatorId.empty()) {
+					++operatorDepth;
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC operator-depth hop entity='{}' current='{}' operatorDepth={}",
+																 entityId, currentEntityId, operatorDepth));
+					if (operatorDepth > maxOperatorDepth) {
+						poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																	 "RBAC operator-depth deny entity='{}' current='{}' operatorDepth={} maxAllowed={}",
+																	 entityId, currentEntityId, operatorDepth,
+																	 maxOperatorDepth));
+						return false;
+					}
+				}
+
+				currentEntityId = entity.parent;
+			}
+
+			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC operator-depth allow entity='{}' operatorDepth={} maxAllowed={}",
+														 entityId, operatorDepth, maxOperatorDepth));
+			return true;
+		}
+
 		bool ResourceMatches(const std::string &candidate, const std::string &required) {
 			auto c = Poco::toLower(candidate);
 			auto r = Poco::toLower(required);
@@ -44,18 +204,33 @@ namespace OpenWifi::RBAC {
 
 		bool TargetInsideRoleScope(const ProvObjects::ManagementRole &role,
 								   const TargetScope &targetScope) {
+			static constexpr std::size_t kMaxOperatorChainDepth = 2;
+
 			if (!role.venue.empty()) {
-				return !targetScope.venue.empty() && targetScope.venue == role.venue;
+				if (targetScope.venue.empty()) {
+					return false;
+				}
+				ProvObjects::Venue targetVenue;
+				if (!StorageService()->VenueDB().GetRecord("id", targetScope.venue, targetVenue)) {
+					return false;
+				}
+				return IsVenueDescendantOf(targetScope.venue, role.venue) &&
+					   IsEntityWithinOperatorChainDepth(targetVenue.entity,
+														kMaxOperatorChainDepth);
 			}
 
 			if (!role.entity.empty()) {
 				if (!targetScope.entity.empty()) {
-					return targetScope.entity == role.entity;
+					return IsEntityDescendantWithinOperatorDepth(targetScope.entity, role.entity, 1) &&
+						   IsEntityWithinOperatorChainDepth(targetScope.entity,
+														kMaxOperatorChainDepth);
 				}
 				if (!targetScope.venue.empty()) {
 					ProvObjects::Venue venue;
 					if (StorageService()->VenueDB().GetRecord("id", targetScope.venue, venue)) {
-						return venue.entity == role.entity;
+						return IsEntityDescendantWithinOperatorDepth(venue.entity, role.entity, 1) &&
+							   IsEntityWithinOperatorChainDepth(venue.entity,
+																kMaxOperatorChainDepth);
 					}
 				}
 			}
@@ -85,6 +260,82 @@ namespace OpenWifi::RBAC {
 			return false;
 		}
 
+		void AddUniqueRole(ProvObjects::ManagementRoleVec &roles,
+						   const ProvObjects::ManagementRole &role) {
+			auto duplicate = std::find_if(roles.begin(), roles.end(), [&](const auto &r) {
+				return r.info.id == role.info.id;
+			}) != roles.end();
+			if (!duplicate) {
+				roles.push_back(role);
+			}
+		}
+
+		void CollectRolesForEntityScope(const std::string &entityId,
+									   ProvObjects::ManagementRoleVec &roles) {
+			std::string currentEntityId = entityId;
+			while (!currentEntityId.empty()) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC collect-entity-role-scope current='{}'", currentEntityId));
+				std::size_t beforeCount = roles.size();
+				ProvObjects::Entity entity;
+				if (!StorageService()->EntityDB().GetRecord("id", currentEntityId, entity)) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC collect-entity-role-scope stop current='{}' reason='entity not found'",
+																 currentEntityId));
+					break;
+				}
+
+				StorageService()->RolesDB().Iterate(
+					[&](const ProvObjects::ManagementRole &role) {
+						if (role.entity == currentEntityId) {
+							AddUniqueRole(roles, role);
+						}
+						return true;
+					},
+					fmt::format(" entity='{}' ", ORM::Escape(currentEntityId)));
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC collect-entity-role-scope current='{}' added={}",
+									   currentEntityId, roles.size() - beforeCount));
+				poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC collect-entity-role-scope current='{}' parent='{}'",
+														 currentEntityId, entity.parent));
+				currentEntityId = entity.parent;
+			}
+		}
+
+		void CollectRolesForVenueScope(const std::string &venueId,
+									   ProvObjects::ManagementRoleVec &roles) {
+			std::string currentVenueId = venueId;
+			while (!currentVenueId.empty()) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC collect-venue-role-scope current='{}'", currentVenueId));
+				std::size_t beforeCount = roles.size();
+				StorageService()->RolesDB().Iterate(
+					[&](const ProvObjects::ManagementRole &role) {
+						if (role.venue == currentVenueId) {
+							AddUniqueRole(roles, role);
+						}
+						return true;
+					},
+					fmt::format(" venue='{}' ", ORM::Escape(currentVenueId)));
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC collect-venue-role-scope current='{}' added={}",
+									   currentVenueId, roles.size() - beforeCount));
+
+				ProvObjects::Venue venue;
+				if (!StorageService()->VenueDB().GetRecord("id", currentVenueId, venue)) {
+					poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																 "RBAC collect-venue-role-scope stop current='{}' reason='venue not found'",
+																 currentVenueId));
+					break;
+				}
+				poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+														 "RBAC collect-venue-role-scope current='{}' parent='{}'",
+														 currentVenueId, venue.parent));
+				currentVenueId = venue.parent;
+			}
+		}
+
 		bool CanAccessUserScope(const std::string &userId, const std::string &resourceType,
 								const std::string &action, const TargetScope &targetScope) {
 			ProvObjects::ManagementRoleVec roles;
@@ -97,26 +348,11 @@ namespace OpenWifi::RBAC {
 			}
 
 			if (!targetScope.venue.empty()) {
-				StorageService()->RolesDB().Iterate(
-					[&](const ProvObjects::ManagementRole &role) {
-						roles.push_back(role);
-						return true;
-					},
-					fmt::format(" venue='{}' ", ORM::Escape(targetScope.venue)));
+				CollectRolesForVenueScope(targetScope.venue, roles);
 			}
 
 			if (!targetEntity.empty()) {
-				StorageService()->RolesDB().Iterate(
-					[&](const ProvObjects::ManagementRole &role) {
-						auto duplicate = std::find_if(roles.begin(), roles.end(), [&](const auto &r) {
-							return r.info.id == role.info.id;
-						}) != roles.end();
-						if (!duplicate) {
-							roles.push_back(role);
-						}
-						return true;
-					},
-					fmt::format(" entity='{}' ", ORM::Escape(targetEntity)));
+				CollectRolesForEntityScope(targetEntity, roles);
 			}
 
 			for (const auto &role : roles) {
@@ -192,8 +428,12 @@ namespace OpenWifi::RBAC {
 		if (handler.UserInfo_.userinfo.id.empty()) {
 			return false;
 		}
-		return CanAccessUserScope(handler.UserInfo_.userinfo.id, resourceType, action,
-								  targetScope);
+		auto allowed = CanAccessUserScope(handler.UserInfo_.userinfo.id, resourceType, action,
+										  targetScope);
+		poco_debug(handler.Logger(),
+				   fmt::format("RBAC has-access result user='{}' resource='{}' action='{}' allowed={}",
+							   handler.UserInfo_.userinfo.id, resourceType, action, allowed));
+		return allowed;
 	}
 
 	bool RequireAccess(RESTAPIHandler &handler, const std::string &resourceType,
@@ -214,14 +454,20 @@ namespace OpenWifi::RBAC {
 		}
 		static const std::string kList = "LIST";
 		static const std::string kRead = "READ";
-		return CanAccessUserScope(handler.UserInfo_.userinfo.id, "entity", kList, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "entity", kRead, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kList, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kRead, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kList, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kRead, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementPolicy", kList, targetScope) ||
-			   CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementRole", kList, targetScope);
+		const bool allowed =
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "entity", kList, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "entity", kRead, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kList, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kRead, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kList, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kRead, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementPolicy", kList, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementRole", kList, targetScope);
+		poco_debug(handler.Logger(),
+				   fmt::format("RBAC scope-allowed result user='{}' entity='{}' venue='{}' allowed={}",
+							   handler.UserInfo_.userinfo.id, targetScope.entity,
+							   targetScope.venue, allowed));
+		return allowed;
 	}
 
 	bool IsEntityVisible(RESTAPIHandler &handler, const std::string &entityId) {

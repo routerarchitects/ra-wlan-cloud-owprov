@@ -16,7 +16,8 @@
 namespace OpenWifi {
 	namespace {
 		void CollectVisibleTree(RESTAPIHandler &handler, EntityDB &entityDB,
-								const std::string &nodeId, Poco::JSON::Array &nodesOut) {
+								const std::string &nodeId, Poco::JSON::Array &nodesOut,
+								bool promoteHiddenChildren = false) {
 			ProvObjects::Entity entity;
 			if (!entityDB.GetRecord("id", nodeId, entity)) {
 				return;
@@ -26,7 +27,7 @@ namespace OpenWifi {
 
 			Poco::JSON::Array collectedChildren;
 			for (const auto &childId : entity.children) {
-				CollectVisibleTree(handler, entityDB, childId, collectedChildren);
+				CollectVisibleTree(handler, entityDB, childId, collectedChildren, false);
 			}
 
 			Poco::JSON::Array collectedVenues;
@@ -47,6 +48,10 @@ namespace OpenWifi {
 				entityNode.set("children", collectedChildren);
 				entityNode.set("venues", collectedVenues);
 				nodesOut.add(entityNode);
+				return;
+			}
+
+			if (!promoteHiddenChildren) {
 				return;
 			}
 
@@ -103,7 +108,7 @@ namespace OpenWifi {
 			emptyTree.set("name", "root");
 			emptyTree.set("uuid", EntityDB::RootUUID());
 			Poco::JSON::Array filteredChildren;
-			CollectVisibleTree(*this, DB_, EntityDB::RootUUID(), filteredChildren);
+			CollectVisibleTree(*this, DB_, EntityDB::RootUUID(), filteredChildren, true);
 			emptyTree.set("children", filteredChildren);
 			emptyTree.set("venues", Poco::JSON::Array());
 			return ReturnObject(emptyTree);

@@ -23,6 +23,11 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		if (!RBAC::RequireAccess(*this, "managementPolicy", "READ",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		std::string Arg;
 		if (HasParameter("expandInUse", Arg) && Arg == "true") {
 			Storage::ExpandedListMap M;

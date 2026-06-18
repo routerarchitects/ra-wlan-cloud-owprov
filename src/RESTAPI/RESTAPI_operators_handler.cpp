@@ -16,18 +16,31 @@
 
 namespace OpenWifi {
 	namespace {
-		std::string ResolveParentEntityForOperator(const SecurityObjects::UserInfo &creator) {
-			if (creator.userRole == SecurityObjects::ROOT) {
-				return EntityDB::RootUUID();
+		std::string RequestedParentEntityFromBody(const Poco::JSON::Object::Ptr &rawObj) {
+			if (!rawObj) {
+				return {};
 			}
 
-			std::string parentEntity;
-			if (RBAC::ResolveEntityScopeForAccess(creator.id, "operator", "CREATE",
-												  parentEntity)) {
-				return parentEntity;
+			if (rawObj->has("parentEntityId")) {
+				return rawObj->getValue<std::string>("parentEntityId");
 			}
-
+			if (rawObj->has("entityId")) {
+				return rawObj->getValue<std::string>("entityId");
+			}
+			if (rawObj->has("parent")) {
+				return rawObj->getValue<std::string>("parent");
+			}
 			return {};
+		}
+
+		std::string ResolveParentEntityForOperator(const SecurityObjects::UserInfo &creator,
+												   const Poco::JSON::Object::Ptr &rawObj) {
+			const auto requestedParentEntity = RequestedParentEntityFromBody(rawObj);
+			if (creator.userRole == SecurityObjects::ROOT) {
+				return requestedParentEntity.empty() ? EntityDB::RootUUID() : requestedParentEntity;
+			}
+
+			return requestedParentEntity;
 		}
 
 		bool SeedChildOperatorAccess(const SecurityObjects::UserInfo &creator,
@@ -215,17 +228,22 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidRegistrationOperatorName);
 		}
 
-		if (RawObject->has("entityId")) {
-			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-		}
-
-		const auto parentEntity = ResolveParentEntityForOperator(UserInfo_.userinfo);
-		if (parentEntity.empty()) {
+		const auto requestedParentEntity =
+			ResolveParentEntityForOperator(UserInfo_.userinfo, RawObject);
+		if (requestedParentEntity.empty()) {
 			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
-		if (!RBAC::RequireAccess(*this, "operator", "CREATE",
-								 RBAC::TargetScope{parentEntity, ""})) {
-			return;
+
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			if (!RBAC::RequireAccess(*this, "operator", "CREATE",
+									 RBAC::TargetScope{requestedParentEntity, ""})) {
+				return;
+			}
+		}
+
+		if (requestedParentEntity != EntityDB::RootUUID() &&
+			!StorageService()->EntityDB().Exists("id", requestedParentEntity)) {
+			return BadRequest(RESTAPI::Errors::ParentUUIDMustExist);
 		}
 
 		if (!ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info)) {
@@ -236,7 +254,7 @@ namespace OpenWifi {
 		ProvObjects::CreateObjectInfo(UserInfo_.userinfo, NewEntity.info);
 		NewEntity.info.name = "Operator-entity:" + NewObject.info.name;
 		NewEntity.info.description = NewObject.info.description;
-		NewEntity.parent = parentEntity;
+		NewEntity.parent = requestedParentEntity;
 		NewEntity.operatorId = NewObject.info.id;
 		NewObject.entityId = NewEntity.info.id;
 

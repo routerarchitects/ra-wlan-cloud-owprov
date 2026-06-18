@@ -7,16 +7,57 @@
 #include "Poco/JSON/Parser.h"
 #include "Poco/StringTokenizer.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
 
 namespace OpenWifi {
+	namespace {
+		bool ContainsUser(const ProvObjects::ManagementRole &role, const std::string &userId) {
+			return std::find(role.users.begin(), role.users.end(), userId) != role.users.end();
+		}
+
+		bool RoleScopeOverlaps(const ProvObjects::ManagementRole &lhs,
+							   const ProvObjects::ManagementRole &rhs) {
+			if (lhs.entity != rhs.entity || lhs.venue != rhs.venue) {
+				return false;
+			}
+			for (const auto &userId : lhs.users) {
+				if (ContainsUser(rhs, userId)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		bool ManagementRoleExistsForScope(const ProvObjects::ManagementRole &candidate,
+										  const std::string &skipId = {}) {
+			bool found = false;
+			StorageService()->RolesDB().Iterate(
+				[&](const ProvObjects::ManagementRole &existing) {
+					if (!skipId.empty() && existing.info.id == skipId) {
+						return true;
+					}
+					if (RoleScopeOverlaps(candidate, existing)) {
+						found = true;
+						return false;
+					}
+					return true;
+				});
+			return found;
+		}
+	} // namespace
 
 	void RESTAPI_managementRole_handler::DoGet() {
 		ProvObjects::ManagementRole Existing;
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
 			return NotFound();
+		}
+
+		if (!RBAC::RequireAccess(*this, "managementRole", "READ",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
 		}
 
 		Poco::JSON::Object Answer;
@@ -58,6 +99,11 @@ namespace OpenWifi {
 		if (HasParameter("force", Arg) && Arg == "true")
 			Force = true;
 
+		if (!RBAC::RequireAccess(*this, "managementRole", "DELETE",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		if (!Force && !Existing.inUse.empty()) {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
@@ -98,6 +144,15 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
 		}
 
+		if (!RBAC::RequireAccess(*this, "managementRole", "CREATE",
+								 RBAC::TargetScope{NewObject.entity, NewObject.venue})) {
+			return;
+		}
+
+		if (ManagementRoleExistsForScope(NewObject)) {
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+		}
+
 		if (DB_.CreateRecord(NewObject)) {
 			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
 						  NewObject.entity, NewObject.info.id);
@@ -132,6 +187,11 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
 
+		if (!RBAC::RequireAccess(*this, "managementRole", "MODIFY",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		std::string FromPolicy, ToPolicy;
 		if (!CreateMove(RawObject, "managementPolicy",
 						&ManagementRoleDB::RecordName::managementPolicy, Existing, FromPolicy,
@@ -147,6 +207,17 @@ namespace OpenWifi {
 		if (!CreateMove(RawObject, "venue", &ManagementRoleDB::RecordName::venue, Existing,
 						FromVenue, ToVenue, StorageService()->VenueDB()))
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
+
+		if ((ToEntity != FromEntity || ToVenue != FromVenue) &&
+			!RBAC::RequireAccess(*this, "managementRole", "MODIFY",
+								 RBAC::TargetScope{ToEntity.empty() ? Existing.entity : ToEntity,
+													ToVenue.empty() ? Existing.venue : ToVenue})) {
+			return;
+		}
+
+		if (ManagementRoleExistsForScope(Existing, Existing.info.id)) {
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+		}
 
 		if (DB_.UpdateRecord("id", UUID, Existing)) {
 			MoveUsage(StorageService()->PolicyDB(), DB_, FromPolicy, ToPolicy, Existing.info.id);
