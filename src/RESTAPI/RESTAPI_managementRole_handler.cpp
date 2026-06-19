@@ -10,6 +10,7 @@
 #include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
+#include "RESTAPI_managementRole_validation.h"
 
 namespace OpenWifi {
 	namespace {
@@ -47,36 +48,7 @@ namespace OpenWifi {
 			return found;
 		}
 
-		bool ValidateManagementPolicyForRole(
-			RESTAPIHandler &handler,
-			const std::string &policyId,
-			const ProvObjects::ManagementRole &role
-		) {
-			if (policyId.empty()) {
-				return true;
-			}
 
-			ProvObjects::ManagementPolicy policy;
-			if (!StorageService()->PolicyDB().GetRecord("id", policyId, policy)) {
-				handler.BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
-				return false;
-			}
-
-			if (!RBAC::RequireAccess(
-					handler,
-					"managementPolicy",
-					"READ",
-					RBAC::TargetScope{policy.entity, policy.venue})) {
-				return false;
-			}
-
-			if (policy.entity != role.entity || policy.venue != role.venue) {
-				handler.BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-				return false;
-			}
-
-			return true;
-		}
 	} // namespace
 
 	void RESTAPI_managementRole_handler::DoGet() {

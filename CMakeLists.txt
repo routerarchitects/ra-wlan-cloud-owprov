@@ -165,6 +165,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_venue_list_handler.cpp src/RESTAPI/RESTAPI_venue_list_handler.h
         src/RESTAPI/RESTAPI_managementPolicy_list_handler.cpp src/RESTAPI/RESTAPI_managementPolicy_list_handler.h
         src/RESTAPI/RESTAPI_managementRole_handler.cpp src/RESTAPI/RESTAPI_managementRole_handler.h
+        src/RESTAPI/RESTAPI_managementRole_validation.cpp src/RESTAPI/RESTAPI_managementRole_validation.h
         src/RESTAPI/RESTAPI_managementRole_list_handler.cpp src/RESTAPI/RESTAPI_managementRole_list_handler.h
         src/RESTAPI/RESTAPI_configurations_list_handler.cpp src/RESTAPI/RESTAPI_configurations_list_handler.h
         src/RESTAPI/RESTAPI_iptocountry_handler.cpp src/RESTAPI/RESTAPI_iptocountry_handler.h
@@ -305,10 +306,13 @@ if(BUILD_TESTS)
         src/framework/utils.cpp
         src/framework/SubSystemServer.cpp
         src/SerialNumberCache.cpp
+        src/RESTAPI/RESTAPI_managementRole_validation.cpp
+        tests/support/OwprovTestSupport.cpp
     )
 
     target_include_directories(owprov_rbac_tests PRIVATE
         src
+        tests
         /usr/local/include
     )
 

@@ -204,7 +204,7 @@ namespace OpenWifi::RBAC {
 
 		bool TargetInsideRoleScope(const ProvObjects::ManagementRole &role,
 								   const TargetScope &targetScope) {
-			static constexpr std::size_t kMaxOperatorChainDepth = 2;
+			static constexpr std::size_t kMaxOperatorChainDepth = 3;
 
 			if (!role.venue.empty()) {
 				if (targetScope.venue.empty()) {
@@ -374,6 +374,32 @@ namespace OpenWifi::RBAC {
 			}
 			return false;
 		}
+
+		bool TargetInsideUserOwnerOperator(const SecurityObjects::UserInfo &user,
+										  const TargetScope &targetScope) {
+			if (user.owner.empty()) {
+				return true;
+			}
+
+			ProvObjects::Operator ownerOperator;
+			if (!StorageService()->OperatorDB().GetRecord("id", user.owner, ownerOperator) ||
+				ownerOperator.entityId.empty()) {
+				return false;
+			}
+
+			std::string targetEntity = targetScope.entity;
+			if (targetEntity.empty() && !targetScope.venue.empty()) {
+				ProvObjects::Venue venue;
+				if (StorageService()->VenueDB().GetRecord("id", targetScope.venue, venue)) {
+					targetEntity = venue.entity;
+				}
+			}
+			if (targetEntity.empty()) {
+				return false;
+			}
+
+			return IsEntityDescendantOf(targetEntity, ownerOperator.entityId);
+		}
 	} // namespace
 
 	bool IsRootUser(const RESTAPIHandler &handler) {
@@ -428,6 +454,15 @@ namespace OpenWifi::RBAC {
 		if (handler.UserInfo_.userinfo.id.empty()) {
 			return false;
 		}
+		if (!TargetInsideUserOwnerOperator(handler.UserInfo_.userinfo, targetScope)) {
+			poco_debug(handler.Logger(),
+					   fmt::format("RBAC owner-scope deny user='{}' owner='{}' resource='{}' action='{}' entity='{}' venue='{}'",
+								   handler.UserInfo_.userinfo.id,
+								   handler.UserInfo_.userinfo.owner,
+								   resourceType, action, targetScope.entity,
+								   targetScope.venue));
+			return false;
+		}
 		auto allowed = CanAccessUserScope(handler.UserInfo_.userinfo.id, resourceType, action,
 										  targetScope);
 		poco_debug(handler.Logger(),
@@ -450,6 +485,14 @@ namespace OpenWifi::RBAC {
 			return true;
 		}
 		if (handler.UserInfo_.userinfo.id.empty()) {
+			return false;
+		}
+		if (!TargetInsideUserOwnerOperator(handler.UserInfo_.userinfo, targetScope)) {
+			poco_debug(handler.Logger(),
+					   fmt::format("RBAC owner-scope-visible deny user='{}' owner='{}' entity='{}' venue='{}'",
+								   handler.UserInfo_.userinfo.id,
+								   handler.UserInfo_.userinfo.owner,
+								   targetScope.entity, targetScope.venue));
 			return false;
 		}
 		static const std::string kList = "LIST";
