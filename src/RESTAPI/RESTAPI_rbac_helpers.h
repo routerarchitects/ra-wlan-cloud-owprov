@@ -45,4 +45,7 @@ namespace OpenWifi::RBAC {
 		RESTAPI::Errors::msg badRequestError
 	);
 
+	bool HasAccessForUser(const std::string &userId, const std::string &resourceType,
+						  const std::string &action, const TargetScope &targetScope);
+
 } // namespace OpenWifi::RBAC

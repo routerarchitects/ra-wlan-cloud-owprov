@@ -20,6 +20,34 @@ defaults:
     shell: bash
 
 jobs:
+  rbac-scope-regression:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: tests/rbac/go.mod
+        cache-dependency-path: tests/rbac/go.sum
+
+    - name: Run RBAC scope regression tests
+      working-directory: tests/rbac
+      env:
+        OWSEC_BASE_URL: ${{ secrets.OWSEC_BASE_URL }}
+        OWPROV_BASE_URL: ${{ secrets.OWPROV_BASE_URL }}
+        OW_ROOT_USERNAME: ${{ secrets.OW_ROOT_USERNAME }}
+        OW_ROOT_PASSWORD: ${{ secrets.OW_ROOT_PASSWORD }}
+        OW_TEST_USER_PASSWORD: ${{ secrets.OW_TEST_USER_PASSWORD }}
+        OW_RBAC_TLS_ROOT_CA: ${{ secrets.OW_RBAC_TLS_ROOT_CA }}
+        OW_RBAC_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        go test . \
+          -run 'TestRBAC(ManagementPolicyListIsFiltered|ManagementPolicyObjectAccess|ManagementRoleObjectAccess|OperatorCreateExplicitParentSelection|OperatorEntityEndpoint|DirectObjectAccessIsDenied|ManagementPolicyAndRoleDirectChildScope|ManagementRolePolicyLinkAuthorization)$' \
+          -count=1 \
+          -v
+
   docker:
     runs-on: ubuntu-latest
     env:

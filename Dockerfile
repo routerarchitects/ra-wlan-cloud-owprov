@@ -59,6 +59,7 @@ FROM build-base AS owprov-build
 ADD CMakeLists.txt build /owprov/
 ADD cmake /owprov/cmake
 ADD src /owprov/src
+ADD tests /owprov/tests
 ADD .git /owprov/.git
 
 COPY --from=poco-build /usr/local/include /usr/local/include
@@ -70,8 +71,9 @@ COPY --from=valijson-build /usr/local/include /usr/local/include
 WORKDIR /owprov
 RUN mkdir cmake-build
 WORKDIR /owprov/cmake-build
-RUN cmake ..
+RUN cmake -DBUILD_TESTS=ON ..
 RUN cmake --build . --config Release -j8
+RUN export LD_LIBRARY_PATH=/usr/local/lib && ./owprov_rbac_tests
 
 FROM debian:$DEBIAN_VERSION
 

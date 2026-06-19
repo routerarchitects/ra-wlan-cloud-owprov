@@ -526,4 +526,12 @@ namespace OpenWifi::RBAC {
 		return RequireOperatorAccessForLoadedOperator(handler, op, action);
 	}
 
+	bool HasAccessForUser(const std::string &userId, const std::string &resourceType,
+						  const std::string &action, const TargetScope &targetScope) {
+		if (userId.empty()) {
+			return false;
+		}
+		return CanAccessUserScope(userId, resourceType, action, targetScope);
+	}
+
 } // namespace OpenWifi::RBAC
