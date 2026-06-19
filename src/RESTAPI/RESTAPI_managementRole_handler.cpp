@@ -46,6 +46,37 @@ namespace OpenWifi {
 				});
 			return found;
 		}
+
+		bool ValidateManagementPolicyForRole(
+			RESTAPIHandler &handler,
+			const std::string &policyId,
+			const ProvObjects::ManagementRole &role
+		) {
+			if (policyId.empty()) {
+				return true;
+			}
+
+			ProvObjects::ManagementPolicy policy;
+			if (!StorageService()->PolicyDB().GetRecord("id", policyId, policy)) {
+				handler.BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+				return false;
+			}
+
+			if (!RBAC::RequireAccess(
+					handler,
+					"managementPolicy",
+					"READ",
+					RBAC::TargetScope{policy.entity, policy.venue})) {
+				return false;
+			}
+
+			if (policy.entity != role.entity || policy.venue != role.venue) {
+				handler.BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+				return false;
+			}
+
+			return true;
+		}
 	} // namespace
 
 	void RESTAPI_managementRole_handler::DoGet() {
@@ -139,9 +170,8 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		if (!NewObject.managementPolicy.empty() &&
-			!StorageService()->PolicyDB().Exists("id", NewObject.managementPolicy)) {
-			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+		if (!ValidateManagementPolicyForRole(*this, NewObject.managementPolicy, NewObject)) {
+			return;
 		}
 
 		if (!RBAC::RequireAccess(*this, "managementRole", "CREATE",
@@ -212,6 +242,10 @@ namespace OpenWifi {
 			!RBAC::RequireAccess(*this, "managementRole", "MODIFY",
 								 RBAC::TargetScope{ToEntity.empty() ? Existing.entity : ToEntity,
 													ToVenue.empty() ? Existing.venue : ToVenue})) {
+			return;
+		}
+
+		if (!ValidateManagementPolicyForRole(*this, Existing.managementPolicy, Existing)) {
 			return;
 		}
 

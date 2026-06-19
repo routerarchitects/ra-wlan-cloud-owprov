@@ -24,6 +24,7 @@
 #include "RESTAPI/RESTAPI_op_contact_list_handler.h"
 #include "RESTAPI/RESTAPI_op_location_handler.h"
 #include "RESTAPI/RESTAPI_op_location_list_handler.h"
+#include "RESTAPI/RESTAPI_operator_entity_list_handler.h"
 #include "RESTAPI/RESTAPI_operators_handler.h"
 #include "RESTAPI/RESTAPI_operators_list_handler.h"
 #include "RESTAPI/RESTAPI_overrides_handler.h"
@@ -67,6 +68,7 @@ namespace OpenWifi {
 			RESTAPI_webSocketServer, RESTAPI_iptocountry_handler, RESTAPI_subscriber_handler,
 			RESTAPI_variables_handler, RESTAPI_variables_list_handler, RESTAPI_sub_devices_handler,
 			RESTAPI_sub_devices_list_handler,
+			RESTAPI_operator_entity_list_handler,
 			RESTAPI_operators_handler,
 			RESTAPI_operators_list_handler, RESTAPI_service_class_handler,
 			RESTAPI_service_class_list_handler, RESTAPI_op_contact_handler,
@@ -95,6 +97,7 @@ namespace OpenWifi {
 			RESTAPI_webSocketServer, RESTAPI_iptocountry_handler, RESTAPI_subscriber_handler,
 			RESTAPI_variables_handler, RESTAPI_variables_list_handler, RESTAPI_sub_devices_handler,
 			RESTAPI_sub_devices_list_handler,
+			RESTAPI_operator_entity_list_handler,
 			RESTAPI_operators_handler,
 			RESTAPI_operators_list_handler, RESTAPI_service_class_handler,
 			RESTAPI_service_class_list_handler, RESTAPI_op_contact_handler,

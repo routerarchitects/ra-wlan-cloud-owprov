@@ -201,6 +201,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_sub_devices_handler.cpp src/RESTAPI/RESTAPI_sub_devices_handler.h
         src/RESTAPI/RESTAPI_service_class_list_handler.cpp src/RESTAPI/RESTAPI_service_class_list_handler.h
         src/RESTAPI/RESTAPI_service_class_handler.cpp src/RESTAPI/RESTAPI_service_class_handler.h
+        src/RESTAPI/RESTAPI_operator_entity_list_handler.cpp src/RESTAPI/RESTAPI_operator_entity_list_handler.h
         src/RESTAPI/RESTAPI_operators_list_handler.cpp src/RESTAPI/RESTAPI_operators_list_handler.h
         src/RESTAPI/RESTAPI_operators_handler.cpp src/RESTAPI/RESTAPI_operators_handler.h
         src/storage/storage_op_contacts.cpp src/storage/storage_op_contacts.h

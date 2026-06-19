@@ -22,7 +22,9 @@ namespace OpenWifi {
 			policies = RESTAPI::FilterRecords(
 				policies,
 				[&](const auto &policy) {
-					return RBAC::IsScopeAllowed(*this, RBAC::TargetScope{policy.entity, policy.venue});
+					const auto scope = RBAC::TargetScope{policy.entity, policy.venue};
+					return RBAC::HasAccess(*this, "managementPolicy", "LIST", scope) ||
+						   RBAC::HasAccess(*this, "managementPolicy", "READ", scope);
 				});
 		}
 

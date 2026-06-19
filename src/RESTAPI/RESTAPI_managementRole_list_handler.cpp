@@ -47,9 +47,9 @@ namespace OpenWifi {
 			roles = RESTAPI::FilterRecords(
 				roles,
 				[&](const auto &role) {
-					return RBAC::IsScopeAllowed(
-						*this,
-						RBAC::TargetScope{role.entity, role.venue});
+					const auto scope = RBAC::TargetScope{role.entity, role.venue};
+					return RBAC::HasAccess(*this, "managementRole", "LIST", scope) ||
+						   RBAC::HasAccess(*this, "managementRole", "READ", scope);
 				});
 		}
 

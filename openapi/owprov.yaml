@@ -1199,10 +1199,9 @@ components:
           minLength: 4
           maxLength: 16
         entityId:
-          description: Generated entity assigned to this operator
+          description: On create, parent operator entity to create under for non-root users. In responses, generated entity assigned to this operator.
           type: string
           format: uuid
-          readOnly: true
 
     OperatorList:
       type: object
@@ -1211,6 +1210,34 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Operator'
+
+    OperatorEntity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        entityId:
+          type: string
+          format: uuid
+        entityName:
+          type: string
+        parentEntityId:
+          type: string
+          format: uuid
+        operatorId:
+          type: string
+          format: uuid
+        operatorName:
+          type: string
+
+    OperatorEntityList:
+      type: object
+      properties:
+        operatorEntities:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperatorEntity'
 
     SubscriberDevice:
       type: object
@@ -3712,6 +3739,35 @@ paths:
               schema:
                 oneOf:
                   - $ref: '#/components/schemas/OperatorList'
+                  - $ref: '#/components/schemas/CountAnswer'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+  /operatorEntity:
+    get:
+      operationId: getOperatorEntities
+      tags:
+        - Operators
+      summary: Retrieve operator-linked entities available as operator-create parents
+      parameters:
+        - in: query
+          description: return the number of operator-linked entities
+          name: countOnly
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Successfully retrieved operator-linked entities
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/OperatorEntityList'
                   - $ref: '#/components/schemas/CountAnswer'
         400:
           $ref: '#/components/responses/BadRequest'

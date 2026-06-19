@@ -71,6 +71,7 @@ namespace OpenWifi::ProvObjects {
 		field_to_json(Obj, "entries", entries);
 		field_to_json(Obj, "inUse", inUse);
 		field_to_json(Obj, "entity", entity);
+		field_to_json(Obj, "venue", venue);
 	}
 
 	bool ManagementPolicy::from_json(const Poco::JSON::Object::Ptr &Obj) {
@@ -79,6 +80,7 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "entries", entries);
 			field_from_json(Obj, "inUse", inUse);
 			field_from_json(Obj, "entity", entity);
+			field_from_json(Obj, "venue", venue);
 			return true;
 		} catch (...) {
 		}
