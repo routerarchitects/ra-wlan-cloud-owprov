@@ -1202,6 +1202,10 @@ components:
           description: On create, parent operator entity to create under for non-root users. In responses, generated entity assigned to this operator.
           type: string
           format: uuid
+        parentOperatorId:
+          description: Parent operator in the operator hierarchy. It is assigned from the parent entity on create.
+          type: string
+          format: uuid
 
     OperatorList:
       type: object

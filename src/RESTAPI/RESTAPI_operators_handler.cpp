@@ -16,14 +16,29 @@
 
 namespace OpenWifi {
 	namespace {
+		bool FindDefaultOperatorId(std::string &operatorId) {
+			operatorId.clear();
+			StorageService()->OperatorDB().Iterate([&](const ProvObjects::Operator &op) {
+				if (op.defaultOperator) {
+					operatorId = op.info.id;
+					return false;
+				}
+				return true;
+			});
+			return !operatorId.empty();
+		}
+
 		bool ResolveOperatorCreateParent(RESTAPIHandler &handler,
 										 const Poco::JSON::Object::Ptr &rawObj,
-										 std::string &parentEntityId) {
+										 std::string &parentEntityId,
+										 std::string &parentOperatorId) {
 			parentEntityId.clear();
+			parentOperatorId.clear();
 
 			if (!rawObj || !rawObj->has("entityId")) {
 				if (handler.UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 					parentEntityId = EntityDB::RootUUID();
+					FindDefaultOperatorId(parentOperatorId);
 					return true;
 				}
 				handler.BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
@@ -40,8 +55,13 @@ namespace OpenWifi {
 
 			if (parentEntity.operatorId.empty() ||
 				!StorageService()->OperatorDB().Exists("id", parentEntity.operatorId)) {
-				handler.BadRequest(RESTAPI::Errors::EntityMustExist);
-				return false;
+				if (parentEntity.info.id != EntityDB::RootUUID() ||
+					!FindDefaultOperatorId(parentOperatorId)) {
+					handler.BadRequest(RESTAPI::Errors::EntityMustExist);
+					return false;
+				}
+			} else {
+				parentOperatorId = parentEntity.operatorId;
 			}
 
 			if (handler.UserInfo_.userinfo.userRole != SecurityObjects::ROOT &&
@@ -72,7 +92,8 @@ namespace OpenWifi {
 			ProvObjects::ManagementPolicyEntry policyEntry;
 			policyEntry.users = {creatorUserId};
 			policyEntry.resources = {"entity", "operator", "venue", "inventory",
-									 "managementPolicy", "managementRole"};
+									 "managementPolicy", "managementRole",
+									 "configuration", "contact", "location"};
 			policyEntry.access = {"FULL"};
 			policy.entries = {policyEntry};
 
@@ -239,7 +260,9 @@ namespace OpenWifi {
 		}
 
 		std::string requestedParentEntity;
-		if (!ResolveOperatorCreateParent(*this, RawObject, requestedParentEntity)) {
+		std::string parentOperatorId;
+		if (!ResolveOperatorCreateParent(*this, RawObject, requestedParentEntity,
+										 parentOperatorId)) {
 			return;
 		}
 
@@ -254,6 +277,7 @@ namespace OpenWifi {
 		NewEntity.parent = requestedParentEntity;
 		NewEntity.operatorId = NewObject.info.id;
 		NewObject.entityId = NewEntity.info.id;
+		NewObject.parentOperatorId = parentOperatorId;
 
 		if (!StorageService()->EntityDB().CreateRecord(NewEntity)) {
 			return InternalError(RESTAPI::Errors::RecordNotCreated);

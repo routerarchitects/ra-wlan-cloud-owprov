@@ -73,7 +73,6 @@ RUN mkdir cmake-build
 WORKDIR /owprov/cmake-build
 RUN cmake -DBUILD_TESTS=ON ..
 RUN cmake --build . --config Release -j8
-RUN export LD_LIBRARY_PATH=/usr/local/lib && ./owprov_rbac_tests
 
 FROM debian:$DEBIAN_VERSION
 

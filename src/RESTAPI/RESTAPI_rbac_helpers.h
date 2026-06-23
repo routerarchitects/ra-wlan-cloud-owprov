@@ -2,6 +2,7 @@
 
 #include "framework/RESTAPI_Handler.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
+#include "RESTObjects/RESTAPI_SecurityObjects.h"
 
 namespace OpenWifi::RBAC {
 
@@ -20,6 +21,10 @@ namespace OpenWifi::RBAC {
 	bool IsScopeAllowed(RESTAPIHandler &handler, const TargetScope &targetScope);
 	bool IsEntityVisible(RESTAPIHandler &handler, const std::string &entityId);
 	bool IsVenueVisible(RESTAPIHandler &handler, const std::string &venueId);
+	bool ResolveUserOwnerOperator(const SecurityObjects::UserInfo &user,
+								  ProvObjects::Operator &ownerOperator);
+	bool ResolveUserOwnerEntity(const SecurityObjects::UserInfo &user,
+								std::string &ownerEntityId);
 
 	bool LoadOperator(
 		const std::string &operatorId,
@@ -47,5 +52,4 @@ namespace OpenWifi::RBAC {
 
 	bool HasAccessForUser(const std::string &userId, const std::string &resourceType,
 						  const std::string &action, const TargetScope &targetScope);
-
 } // namespace OpenWifi::RBAC

@@ -189,7 +189,7 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
 
-		if (!RBAC::RequireAccess(*this, "managementRole", "MODIFY",
+		if (!RBAC::RequireAccess(*this, "managementRole", "UPDATE",
 								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
 			return;
 		}
@@ -211,7 +211,7 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 
 		if ((ToEntity != FromEntity || ToVenue != FromVenue) &&
-			!RBAC::RequireAccess(*this, "managementRole", "MODIFY",
+			!RBAC::RequireAccess(*this, "managementRole", "UPDATE",
 								 RBAC::TargetScope{ToEntity.empty() ? Existing.entity : ToEntity,
 													ToVenue.empty() ? Existing.venue : ToVenue})) {
 			return;

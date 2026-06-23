@@ -15,6 +15,18 @@
 
 namespace OpenWifi {
 	namespace {
+		ProvObjects::Entity WithVisibleChildReferences(RESTAPIHandler &handler,
+													   ProvObjects::Entity entity) {
+			Types::UUIDvec_t visibleChildren;
+			for (const auto &childId : entity.children) {
+				if (RBAC::IsEntityVisible(handler, childId)) {
+					visibleChildren.push_back(childId);
+				}
+			}
+			entity.children = visibleChildren;
+			return entity;
+		}
+
 		void CollectVisibleTree(RESTAPIHandler &handler, EntityDB &entityDB,
 								const std::string &nodeId, Poco::JSON::Array &nodesOut,
 								bool promoteHiddenChildren = false) {
@@ -68,7 +80,7 @@ namespace OpenWifi {
 			std::vector<ProvObjects::Entity> visible;
 			entityDB.Iterate([&](const ProvObjects::Entity &entity) {
 				if (RBAC::IsEntityVisible(handler, entity.info.id)) {
-					visible.push_back(entity);
+					visible.push_back(WithVisibleChildReferences(handler, entity));
 				}
 				return true;
 			});
@@ -119,7 +131,7 @@ namespace OpenWifi {
 					ProvObjects::Entity entity;
 					if (DB_.GetRecord("id", id, entity) &&
 						RBAC::IsEntityVisible(*this, entity.info.id)) {
-						selectedVisible.push_back(entity);
+						selectedVisible.push_back(WithVisibleChildReferences(*this, entity));
 					}
 				}
 				if (QB_.CountOnly) {
@@ -139,6 +151,9 @@ namespace OpenWifi {
 
 	void RESTAPI_entity_list_handler::DoPost() {
 		if (GetBoolParameter("setTree", false)) {
+			if (!RBAC::IsRootUser(*this)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
 			const auto &FullTree = ParsedBody_;
 			DB_.ImportTree(FullTree);
 			return OK();

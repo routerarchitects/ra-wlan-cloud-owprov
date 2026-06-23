@@ -698,6 +698,7 @@ namespace OpenWifi::ProvObjects {
         Types::StringVec sourceIP;
         std::string registrationId;
         Types::UUID_t entityId;
+        Types::UUID_t parentOperatorId;
 
         void to_json(Poco::JSON::Object &Obj) const;
 

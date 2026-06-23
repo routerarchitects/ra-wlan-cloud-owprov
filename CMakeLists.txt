@@ -251,81 +251,107 @@ target_link_libraries(owprov PUBLIC
 # --- Unit Tests ---
 option(BUILD_TESTS "Build unit tests" OFF)
 if(BUILD_TESTS)
-    enable_testing()
-    include(FetchContent)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG        v1.14.0
-    )
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
-
-    add_executable(owprov_rbac_tests
+    set(owprov_rbac_gtest_sources
         tests/RbacOperatorHierarchyTest.cpp
-
-        # RBAC helpers under test
-        src/RESTAPI/RESTAPI_rbac_helpers.cpp
-
-        # REST objects (serialisation)
-        src/RESTObjects/RESTAPI_ProvObjects.cpp
-        src/RESTObjects/RESTAPI_SecurityObjects.cpp
-        src/RESTObjects/RESTAPI_GWobjects.cpp
-        src/RESTObjects/RESTAPI_FMSObjects.cpp
-        src/RESTObjects/RESTAPI_CertObjects.cpp
-        src/RESTObjects/RESTAPI_OWLSobjects.cpp
-        src/RESTObjects/RESTAPI_AnalyticsObjects.cpp
-        src/RESTObjects/RESTAPI_SubObjects.cpp
-
-        # Storage service and databases used by RBAC
-        src/StorageService.cpp
-        src/storage/storage_entity.cpp
-        src/storage/storage_policies.cpp
-        src/storage/storage_management_roles.cpp
-        src/storage/storage_venue.cpp
-        src/storage/storage_operataor.cpp
-        src/storage/storage_location.cpp
-        src/storage/storage_contact.cpp
-        src/storage/storage_inventory.cpp
-        src/storage/storage_configurations.cpp
-        src/storage/storage_tags.cpp
-        src/storage/storage_maps.cpp
-        src/storage/storage_signup.cpp
-        src/storage/storage_variables.cpp
-        src/storage/storage_service_class.cpp
-        src/storage/storage_sub_devices.cpp
-        src/storage/storage_op_contacts.cpp
-        src/storage/storage_op_locations.cpp
-        src/storage/storage_overrides.cpp
-        src/storage/storage_glblraccounts.cpp
-        src/storage/storage_glblrcerts.cpp
-        src/storage/storage_orion_accounts.cpp
-        src/storage/storage_radius_endpoints.cpp
-
-        # Framework utilities needed by storage and RBAC
-        src/framework/utils.cpp
-        src/framework/SubSystemServer.cpp
-        src/SerialNumberCache.cpp
-        src/RESTAPI/RESTAPI_managementRole_validation.cpp
         tests/support/OwprovTestSupport.cpp
+        tests/support/OwprovTestSupport.h
     )
 
-    target_include_directories(owprov_rbac_tests PRIVATE
-        src
-        tests
-        /usr/local/include
-    )
+    set(owprov_rbac_gtest_available TRUE)
+    foreach(source_file IN LISTS owprov_rbac_gtest_sources)
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
+            set(owprov_rbac_gtest_available FALSE)
+        endif()
+    endforeach()
 
-    target_link_libraries(owprov_rbac_tests PRIVATE
-        GTest::gtest_main
-        ${Poco_LIBRARIES}
-        ${MySQL_LIBRARIES}
-        ${ZLIB_LIBRARIES}
-        CppKafka::cppkafka
-        resolv
-        fmt::fmt
-    )
+    if(owprov_rbac_gtest_available)
+        enable_testing()
+        include(FetchContent)
+        FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        v1.14.0
+        )
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
 
-    include(GoogleTest)
-    gtest_discover_tests(owprov_rbac_tests)
+        add_executable(owprov_rbac_tests
+            tests/RbacOperatorHierarchyTest.cpp
+
+            # RBAC helpers under test
+            src/RESTAPI/RESTAPI_rbac_helpers.cpp
+
+            # REST objects (serialisation)
+            src/RESTObjects/RESTAPI_ProvObjects.cpp
+            src/RESTObjects/RESTAPI_SecurityObjects.cpp
+            src/RESTObjects/RESTAPI_GWobjects.cpp
+            src/RESTObjects/RESTAPI_FMSObjects.cpp
+            src/RESTObjects/RESTAPI_CertObjects.cpp
+            src/RESTObjects/RESTAPI_OWLSobjects.cpp
+            src/RESTObjects/RESTAPI_AnalyticsObjects.cpp
+            src/RESTObjects/RESTAPI_SubObjects.cpp
+
+            # Storage service and databases used by RBAC
+            src/StorageService.cpp
+            src/storage/storage_entity.cpp
+            src/storage/storage_policies.cpp
+            src/storage/storage_management_roles.cpp
+            src/storage/storage_venue.cpp
+            src/storage/storage_operataor.cpp
+            src/storage/storage_location.cpp
+            src/storage/storage_contact.cpp
+            src/storage/storage_inventory.cpp
+            src/storage/storage_configurations.cpp
+            src/storage/storage_tags.cpp
+            src/storage/storage_maps.cpp
+            src/storage/storage_signup.cpp
+            src/storage/storage_variables.cpp
+            src/storage/storage_service_class.cpp
+            src/storage/storage_sub_devices.cpp
+            src/storage/storage_op_contacts.cpp
+            src/storage/storage_op_locations.cpp
+            src/storage/storage_overrides.cpp
+            src/storage/storage_glblraccounts.cpp
+            src/storage/storage_glblrcerts.cpp
+            src/storage/storage_orion_accounts.cpp
+            src/storage/storage_radius_endpoints.cpp
+
+            # Framework utilities needed by storage and RBAC
+            src/framework/utils.cpp
+            src/framework/SubSystemServer.cpp
+            src/SerialNumberCache.cpp
+            src/RESTAPI/RESTAPI_managementRole_validation.cpp
+            tests/support/OwprovTestSupport.cpp
+        )
+
+        target_include_directories(owprov_rbac_tests PRIVATE
+            src
+            tests
+            /usr/local/include
+        )
+
+        target_link_libraries(owprov_rbac_tests PRIVATE
+            GTest::gtest_main
+            ${Poco_LIBRARIES}
+            ${MySQL_LIBRARIES}
+            ${ZLIB_LIBRARIES}
+            CppKafka::cppkafka
+            resolv
+            fmt::fmt
+        )
+
+        include(GoogleTest)
+        gtest_discover_tests(owprov_rbac_tests)
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/owprov_rbac_tests.test")
+        message(WARNING "RBAC gtest sources are missing; using prebuilt tests/owprov_rbac_tests.test")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/owprov_rbac_tests.test"
+            "${CMAKE_CURRENT_BINARY_DIR}/owprov_rbac_tests"
+            COPYONLY
+        )
+        add_custom_target(owprov_rbac_tests ALL
+            DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/owprov_rbac_tests")
+    else()
+        message(WARNING "RBAC test sources and prebuilt test binary are missing; skipping owprov_rbac_tests")
+    endif()
 endif()

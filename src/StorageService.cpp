@@ -505,9 +505,39 @@ namespace OpenWifi {
 			return true;
 		};
 
+		std::string DefaultOperatorId;
+		OperatorDB().Iterate([&](const ProvObjects::Operator &op) {
+			if (op.defaultOperator) {
+				DefaultOperatorId = op.info.id;
+				return false;
+			}
+			return true;
+		});
+
 		auto FixOperator = [&](const ProvObjects::Operator &O) -> bool {
 			ProvObjects::Operator NewOp{O};
 			bool modified = false;
+
+			auto ResolveParentOperatorId = [&](const ProvObjects::Entity &entity) {
+				if (entity.parent.empty()) {
+					return std::string{};
+				}
+
+				ProvObjects::Entity parentEntity;
+				if (!EntityDB().GetRecord("id", entity.parent, parentEntity)) {
+					return std::string{};
+				}
+
+				if (!parentEntity.operatorId.empty()) {
+					return parentEntity.operatorId;
+				}
+
+				if (parentEntity.info.id == EntityDB::RootUUID()) {
+					return DefaultOperatorId;
+				}
+
+				return std::string{};
+			};
 
 			if (O.deviceRules.rrm == "yes") {
 				NewOp.deviceRules.rrm = "inherit";
@@ -518,6 +548,10 @@ namespace OpenWifi {
 			if (O.defaultOperator) {
 				if (NewOp.entityId != EntityDB::RootUUID()) {
 					NewOp.entityId = EntityDB::RootUUID();
+					modified = true;
+				}
+				if (!NewOp.parentOperatorId.empty()) {
+					NewOp.parentOperatorId.clear();
 					modified = true;
 				}
 
@@ -551,6 +585,13 @@ namespace OpenWifi {
 					ProvObjects::Entity UpdatedEntity{LinkedEntity};
 					UpdatedEntity.operatorId = O.info.id;
 					EntityDB().UpdateRecord("id", LinkedEntity.info.id, UpdatedEntity);
+					LinkedEntity = UpdatedEntity;
+				}
+
+				auto parentOperatorId = ResolveParentOperatorId(LinkedEntity);
+				if (NewOp.parentOperatorId != parentOperatorId) {
+					NewOp.parentOperatorId = parentOperatorId;
+					modified = true;
 				}
 			}
 
@@ -611,6 +652,7 @@ namespace OpenWifi {
 			DefOp.info.created = DefOp.info.modified = Utils::Now();
 			DefOp.deviceRules.rrm = "inherit";
 			DefOp.entityId = EntityDB::RootUUID();
+			DefOp.parentOperatorId.clear();
 			OperatorDB_->CreateRecord(DefOp);
 
 			ProvObjects::ServiceClass DefSer;

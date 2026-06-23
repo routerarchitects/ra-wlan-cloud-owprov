@@ -134,7 +134,7 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		if (!RBAC::RequireAccess(*this, "managementPolicy", "MODIFY",
+		if (!RBAC::RequireAccess(*this, "managementPolicy", "UPDATE",
 								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
 			return;
 		}
@@ -154,7 +154,7 @@ namespace OpenWifi {
 						ToEntity, StorageService()->EntityDB()))
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		if (ToEntity != FromEntity &&
-			!RBAC::RequireAccess(*this, "managementPolicy", "MODIFY",
+			!RBAC::RequireAccess(*this, "managementPolicy", "UPDATE",
 								 RBAC::TargetScope{ToEntity, Existing.venue})) {
 			return;
 		}
@@ -164,7 +164,7 @@ namespace OpenWifi {
 						ToVenue, StorageService()->VenueDB()))
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		if (ToVenue != FromVenue &&
-			!RBAC::RequireAccess(*this, "managementPolicy", "MODIFY",
+			!RBAC::RequireAccess(*this, "managementPolicy", "UPDATE",
 								 RBAC::TargetScope{Existing.entity, ToVenue})) {
 			return;
 		}
