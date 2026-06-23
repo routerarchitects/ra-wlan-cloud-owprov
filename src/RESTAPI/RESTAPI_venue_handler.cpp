@@ -18,6 +18,9 @@
 #include "framework/MicroServiceFuncs.h"
 
 #include "Kafka_ProvUpdater.h"
+#ifdef CGW_INTEGRATION
+#include "InfraGroupEvents.h"
+#endif
 
 namespace OpenWifi {
 
@@ -113,6 +116,18 @@ namespace OpenWifi {
 		if (!Existing.entity.empty())
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
 		DB_.DeleteRecord("id", UUID);
+#ifdef CGW_INTEGRATION
+		std::uint32_t groupId = 0;
+		if (!StorageService()->GroupsMapDB().GetGroup(UUID, groupId)) {
+			poco_error(Logger(), fmt::format("Delete Venue groupsmap lookup failure {}, groupId {}", UUID, groupId));
+		} else {
+			PublishInfraGroupEvent("infrastructure_group_delete", groupId);
+			poco_debug(Logger(), fmt::format("Message published for infrastructure_group_delete VenueId {}: groupID ({})", UUID,groupId));
+		}
+		if (!StorageService()->GroupsMapDB().DeleteVenue(UUID)) {
+			poco_error(Logger(), fmt::format("Delete groupsmap delete failure {}, groupId {}", UUID, groupId));
+		}
+#endif
 
 		UpdateKafkaProvisioningObject(ProvisioningOperation::removal, Existing);
 
@@ -204,6 +219,20 @@ namespace OpenWifi {
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
+#ifdef CGW_INTEGRATION
+			std::uint32_t groupId = 0;
+			if (!StorageService()->GroupsMapDB().AddVenue(NewObject.info.id, groupId)) {
+				poco_error(Logger(), fmt::format("Groupsmap Venue creation failure {}, groupId {}",
+												 NewObject.info.id, groupId));
+				// Do not fail the entire request if the groupsmap entry creation fails
+			} else {
+				PublishInfraGroupEvent("infrastructure_group_create", groupId);
+				poco_debug(Logger(),
+						   fmt::format("Message published for infrastructure_group_create VenueId "
+									   "{}: groupID ({})",
+									   NewObject.info.id, groupId));
+			}
+#endif
 			MoveUsage(StorageService()->ContactDB(), DB_, {}, NewObject.contacts,
 					  NewObject.info.id);
 			MoveUsage(StorageService()->LocationDB(), DB_, "", NewObject.location,

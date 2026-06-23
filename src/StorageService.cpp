@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 //
 //	License type: BSD 3-Clause License
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
@@ -44,7 +49,9 @@ namespace OpenWifi {
         GLBLRCertsDB_ = std::make_unique<OpenWifi::GLBLRCertsDB>(dbType_, *Pool_, Logger());
         OrionAccountsDB_ = std::make_unique<OpenWifi::OrionAccountsDB>(dbType_, *Pool_, Logger());
         RadiusEndpointDB_ = std::make_unique<OpenWifi::RadiusEndpointDB>(dbType_, *Pool_, Logger());
-
+#ifdef CGW_INTEGRATION
+        GroupsMapDB_ = std::make_unique<OpenWifi::GroupsMapDB>(dbType_, *Pool_, Logger());
+#endif
 		EntityDB_->Create();
 		PolicyDB_->Create();
 		VenueDB_->Create();
@@ -68,7 +75,9 @@ namespace OpenWifi {
         GLBLRCertsDB_->Create();
         OrionAccountsDB_->Create();
         RadiusEndpointDB_->Create();
-
+#ifdef CGW_INTEGRATION
+        GroupsMapDB_->Create();
+#endif
 		ExistFunc_[EntityDB_->Prefix()] = [=](const char *F, std::string &V) -> bool {
 			return EntityDB_->Exists(F, V);
 		};
@@ -138,7 +147,11 @@ namespace OpenWifi {
         ExistFunc_[RadiusEndpointDB_->Prefix()] = [=](const char *F, std::string &V) -> bool {
             return RadiusEndpointDB_->Exists(F, V);
         };
-
+#ifdef CGW_INTEGRATION
+        ExistFunc_[GroupsMapDB_->Prefix()] = [=](const char *F, std::string &V) -> bool {
+            return GroupsMapDB_->Exists(F, V);
+        };
+#endif
 
 
         ExpandFunc_[EntityDB_->Prefix()] = [=](const char *F, std::string &V, std::string &Name,
