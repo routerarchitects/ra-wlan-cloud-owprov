@@ -102,3 +102,83 @@ jobs:
         token: ${{ secrets.WLAN_TESTING_PAT }}
         ref: master
         inputs: '{"force_latest": "true"}'
+
+  rbac-integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+
+      - name: Build local Docker image
+        run: |
+          docker build -t owprov:test .
+
+      - name: Set up hosts file
+        run: |
+          echo "127.0.0.1 openwifi.wlan.local" | sudo tee -a /etc/hosts
+
+      - name: Run Fake OWSEC Service and C++ service with DB seeding
+        run: |
+          # 1. Start Fake OWSEC Service initially for root-token validation during seeding
+          python3 test_scripts/fakes/fake_owsec_service.py --host 127.0.0.1 --port 8099 &
+          OWSEC_PID=$!
+          sleep 2
+
+          # 2. Start C++ owprov service container using SQLite storage and FAKE OWSEC URL
+          docker run -d --name owprov --net=host \
+            -e TEMPLATE_CONFIG=true \
+            -e SELFSIGNED_CERTS=true \
+            -e STORAGE_TYPE=sqlite \
+            -e CI_FAKE_EXTERNAL_SERVICES=1 \
+            -e FAKE_EXTERNAL_SERVICE_OWSEC=http://127.0.0.1:8099 \
+            -e KAFKA_ENABLE=false \
+            -e RUN_CHOWN=true \
+            owprov:test
+
+          # Wait for container to be ready
+          sleep 8
+          docker logs owprov
+
+          # 3. Seed the RBAC schema/data
+          python3 test_scripts/integration/seed_rbac.py
+
+          # 4. Restart Fake OWSEC Service with seeded environment variables sourced
+          kill $OWSEC_PID
+          source ./seeded_env.sh
+          python3 test_scripts/fakes/fake_owsec_service.py --host 127.0.0.1 --port 8099 &
+          sleep 2
+
+      - name: Run Fake OWSEC Unit Tests
+        run: |
+          python3 test_scripts/fakes/test_fake_owsec_rbac_tokens.py
+
+      - name: Run RBAC API Integration Tests
+        run: |
+          source ./seeded_env.sh
+          export OWPROV_BASE_URL="https://openwifi.wlan.local:16005/api/v1"
+          export FAKE_OWSEC_URL="http://127.0.0.1:8099"
+          export OWPROV_TLS_VERIFY=false
+          python3 test_scripts/integration/test_rbac_scope_api.py
+
+      - name: Run RBAC Contract Integration Tests
+        run: |
+          source ./seeded_env.sh
+          export OWPROV_BASE_URL="https://openwifi.wlan.local:16005/api/v1"
+          export FAKE_OWSEC_URL="http://127.0.0.1:8099"
+          export OWPROV_TLS_VERIFY=false
+          python3 test_scripts/integration/test_rbac_scope_contract.py
+
+      - name: Dump Docker Logs on Failure
+        if: failure()
+        run: |
+          docker logs owprov
+
