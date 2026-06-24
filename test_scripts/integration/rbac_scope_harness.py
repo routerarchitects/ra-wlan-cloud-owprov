@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Repo-local fake OWProv RBAC API harness used by Python contract tests."""
+"""HTTP RBAC API harness for real OWProv plus fake OWSEC token validation."""
 
 from __future__ import annotations
 
 import json
 import os
+import ssl
 import sys
 import unittest
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
-ROOT_ENTITY = "entity-root"
-ENTITY_A = "entity-a"
-ENTITY_B = "entity-b"
-ENTITY_C = "entity-c"
-ENTITY_D = "entity-d"
+ROOT_ENTITY = os.getenv("OWPROV_ROOT_ENTITY", "0000-0000-0000")
+ENTITY_A = os.getenv("OWPROV_ENTITY_A", "09189968-6d82-47e0-a8cc-ecacf9890463")
+ENTITY_B = os.getenv("OWPROV_ENTITY_B", "1f92df91-2adc-4efd-a8a8-3c014610eca7")
+ENTITY_C = os.getenv("OWPROV_ENTITY_C", "dc4977fd-3a32-4bfb-866d-618054960724")
+ENTITY_D = os.getenv("OWPROV_ENTITY_D", "3f891d10-982e-40f7-9c35-acf2205b69d7")
 ENTITY_E = "entity-e"
 ENTITY_J = "entity-j"
 ENTITY_A_NORMAL = "entity-a-normal"
@@ -26,11 +30,11 @@ ENTITY_E_NORMAL = "entity-e-normal"
 ENTITY_J_NORMAL = "entity-j-normal"
 ENTITY_PLAIN_GRANDCHILD = "entity-plain-grandchild"
 
-OPERATOR_DEFAULT = "operator-default"
-OPERATOR_A = "operator-a"
-OPERATOR_B = "operator-b"
-OPERATOR_C = "operator-c"
-OPERATOR_D = "operator-d"
+OPERATOR_DEFAULT = os.getenv("OWPROV_OPERATOR_DEFAULT", "babdfb0b-1c5d-4755-83d8-fa428c317a45")
+OPERATOR_A = os.getenv("OWPROV_OPERATOR_A", "c72c9186-7f16-4213-920f-68f40ceb5252")
+OPERATOR_B = os.getenv("OWPROV_OPERATOR_B", "3a68fcc9-2601-4c9b-b96f-51685cf7a5f7")
+OPERATOR_C = os.getenv("OWPROV_OPERATOR_C", "42bc1890-ee3d-491d-8b48-ace0b9813665")
+OPERATOR_D = os.getenv("OWPROV_OPERATOR_D", "1b0740fa-ebfe-4cae-af8e-521914ab258e")
 OPERATOR_E = "operator-e"
 OPERATOR_J = "operator-j"
 
@@ -46,22 +50,22 @@ LOCATION_C = "location-c"
 LOCATION_D = "location-d"
 LOCATION_E = "location-e"
 
-POLICY_A = "policy-a"
-POLICY_B = "policy-b"
-POLICY_C = "policy-c"
-POLICY_D = "policy-d"
+POLICY_A = os.getenv("OWPROV_POLICY_A", "c9cd496a-4a21-43ec-b568-6498b9b9b8ae")
+POLICY_B = os.getenv("OWPROV_POLICY_B", "116baff9-cbd1-4a9f-a610-247c281bf3a5")
+POLICY_C = os.getenv("OWPROV_POLICY_C", "38076268-8fcf-4ce6-8dd5-a8832711130c")
+POLICY_D = os.getenv("OWPROV_POLICY_D", "72385f1c-eec4-4ac8-be25-b834b2b26441")
 POLICY_E = "policy-e"
 
-ROLE_A = "role-a"
-ROLE_B = "role-b"
-ROLE_C = "role-c"
-ROLE_D = "role-d"
+ROLE_A = os.getenv("OWPROV_ROLE_A", "5afb0153-c891-466a-acec-91ef35595414")
+ROLE_B = os.getenv("OWPROV_ROLE_B", "6ff27d80-22d3-4a31-8dc3-1b15eda3f18c")
+ROLE_C = os.getenv("OWPROV_ROLE_C", "5975495d-a9c8-4a44-86fc-8deeac5803fa")
+ROLE_D = os.getenv("OWPROV_ROLE_D", "22b6c368-d085-4127-8532-b9666b1d0655")
 ROLE_E = "role-e"
 
-USER_ID_A = "user-a"
-USER_ID_B = "user-b"
-USER_ID_C = "user-c"
-USER_ID_D = "user-d"
+USER_ID_A = os.getenv("OWPROV_USER_ID_A", "19232181-669f-42b1-bc5f-d505c04237ba")
+USER_ID_B = os.getenv("OWPROV_USER_ID_B", "99b59972-2f76-44d3-ad05-aa93ebab6017")
+USER_ID_C = os.getenv("OWPROV_USER_ID_C", "c66fdb8c-6894-4fe9-aae5-86e8f0f2ff75")
+USER_ID_D = os.getenv("OWPROV_USER_ID_D", "138087ea-54f3-4972-bf1f-53463fba40e4")
 USER_ID_E = "user-e"
 USER_ID_NO_POLICY = "user-no-policy-access"
 USER_ID_NO_ROLE = "user-no-role-access"
@@ -584,24 +588,110 @@ class FakeOWProv:
         return 404, {"errorCode": 404, "errorDetails": "not found"}
 
 
-HARNESS = FakeOWProv()
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _normalize_base_url(value: str) -> str:
+    return value.rstrip("/")
+
+
+def _owprov_base_url() -> str:
+    return _normalize_base_url(
+        os.environ.get(
+            "OWPROV_BASE_URL",
+            os.environ.get("OWPROV_URL", "http://127.0.0.1:16004/api/v1"),
+        )
+    )
+
+
+def _fake_owsec_url() -> str:
+    return _normalize_base_url(
+        os.environ.get(
+            "FAKE_OWSEC_URL",
+            os.environ.get("FAKE_URL", "http://127.0.0.1:8080"),
+        )
+    )
+
+
+def _ssl_context() -> ssl.SSLContext | None:
+    parsed = urlparse(_owprov_base_url())
+    if parsed.scheme != "https":
+        return None
+    if not _env_bool("OWPROV_TLS_VERIFY", True):
+        return ssl._create_unverified_context()
+    root_ca = os.environ.get("OW_RBAC_TLS_ROOT_CA") or os.environ.get("OWPROV_TLS_ROOT_CA")
+    if root_ca:
+        return ssl.create_default_context(cafile=root_ca)
+    return ssl.create_default_context()
+
+
+def _owprov_url(path: str) -> str:
+    base = _owprov_base_url()
+    if path.startswith("/api/v1/") and base.endswith("/api/v1"):
+        return base + path[len("/api/v1") :]
+    return base + (path if path.startswith("/") else f"/{path}")
+
+
+def _decode_json(raw: bytes) -> Any:
+    if not raw:
+        return {}
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw": text}
+
+
+def _fake_owsec_get(path: str) -> Any:
+    req = Request(_fake_owsec_url() + path, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with urlopen(req, timeout=float(os.environ.get("OWPROV_TEST_TIMEOUT", "10"))) as resp:
+            return _decode_json(resp.read())
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"fake OWSEC is required for token validation controls at {_fake_owsec_url()}: {exc}"
+        ) from exc
 
 
 def request(method: str, path: str, token: str | None = "token-a", body: Any = None, expected_json: bool = True):
-    del expected_json
-    return HARNESS.request(method.upper(), path, token=token, body=body)
+    payload = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        payload = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = Request(_owprov_url(path), data=payload, headers=headers, method=method.upper())
+    try:
+        with urlopen(req, timeout=float(os.environ.get("OWPROV_TEST_TIMEOUT", "10")), context=_ssl_context()) as resp:
+            raw = resp.read()
+            return resp.status, _decode_json(raw) if expected_json else raw
+    except HTTPError as exc:
+        raw = exc.read()
+        return exc.code, _decode_json(raw) if expected_json else raw
+    except (URLError, TimeoutError, OSError) as exc:
+        return 0, {
+            "error": str(exc),
+            "errorDetails": f"could not call real OWProv at {_owprov_base_url()}",
+        }
 
 
 def set_scenario(name: str) -> None:
-    HARNESS.set_scenario(name)
+    del name
 
 
 def reset_observations() -> None:
-    HARNESS.reset_observations()
+    return None
 
 
 def observations() -> list[dict[str, Any]]:
-    return HARNESS.observations
+    body = _fake_owsec_get("/observations")
+    return body.get("observations", []) if isinstance(body, dict) else []
 
 
 def assert_status(status: int, expected: int | tuple[int, ...], body: Any = None) -> None:
@@ -619,6 +709,10 @@ def extract_ids(body: dict[str, Any]) -> set[str]:
     return ids
 
 
+def new_uuid() -> str:
+    return str(uuid.uuid4())
+
+
 def run_unittest(module_name: str) -> None:
     suite = unittest.defaultTestLoader.loadTestsFromName(module_name)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
@@ -626,5 +720,5 @@ def run_unittest(module_name: str) -> None:
         sys.exit(1)
 
 
-USERPORTAL_URL = os.environ.get("OWPROV_URL", "fake://owprov")
-FAKE_URL = os.environ.get("FAKE_URL", "http://127.0.0.1:8080")
+USERPORTAL_URL = _owprov_base_url()
+FAKE_URL = _fake_owsec_url()

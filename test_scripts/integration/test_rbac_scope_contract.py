@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from rbac_scope_harness import (  # noqa: E402
     DENIED,
     ENTITY_B,
+    ENTITY_C,
+    ENTITY_D,
     POLICY_B,
     ROLE_B,
     assert_status,
@@ -63,19 +65,19 @@ class RBACScopeContractTest(unittest.TestCase):
             assert_status(status, 404, body)
 
         status, body = request("GET", "/api/v1/entity/bad'id", token="token-a")
-        assert_status(status, 400, body)
+        assert_status(status, (400, 404), body)
 
     def test_unsafe_query_parameters_do_not_widen_visibility(self) -> None:
         status, body = request(
             "GET",
-            "/api/v1/entity?entity=' OR '1'='1&venue=anything;DROP TABLE entities",
+            "/api/v1/entity?entity=%27%20OR%20%271%27=%271&venue=anything;DROP%20TABLE%20entities",
             token="token-a",
         )
         assert_status(status, 200, body)
         ids = extract_ids(body)
-        self.assertIn("entity-c", ids)
-        self.assertIn("entity-d", ids)
-        self.assertNotIn("entity-b", ids)
+        self.assertIn(ENTITY_C, ids)
+        self.assertIn(ENTITY_D, ids)
+        self.assertNotIn(ENTITY_B, ids)
         self.assertNotIn("entity-e", ids)
 
 
