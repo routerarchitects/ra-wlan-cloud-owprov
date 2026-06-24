@@ -133,20 +133,172 @@ jobs:
           OWSEC_PID=$!
           sleep 2
 
-          # 2. Start C++ owprov service container using SQLite storage and FAKE OWSEC URL
+          # 2. Create complete OWProv runtime directory on the runner
+          rm -rf /tmp/owprov-data
+          mkdir -p /tmp/owprov-data/certs
+          mkdir -p /tmp/owprov-data/data
+          mkdir -p /tmp/owprov-data/logs
+
+          echo '{}' > /tmp/owprov-data/data/registry.json
+          chmod -R 777 /tmp/owprov-data
+
+          # 3. Generate REST API certificates with password pass:mypassword and chmod to 644
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 1 \
+            -keyout /tmp/owprov-data/certs/restapi-key.pem \
+            -out /tmp/owprov-data/certs/restapi-cert.pem \
+            -subj "/CN=openwifi.wlan.local" \
+            -addext "subjectAltName=DNS:openwifi.wlan.local,DNS:localhost,IP:127.0.0.1" \
+            -passout pass:mypassword
+
+          cp /tmp/owprov-data/certs/restapi-cert.pem /tmp/owprov-data/certs/restapi-ca.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-key.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-cert.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-ca.pem
+
+          # 4. Validate the generated cert/key
+          openssl rsa \
+            -in /tmp/owprov-data/certs/restapi-key.pem \
+            -passin pass:mypassword \
+            -check \
+            -noout
+
+          openssl x509 \
+            -in /tmp/owprov-data/certs/restapi-cert.pem \
+            -noout \
+            -subject \
+            -issuer
+
+          ls -l /tmp/owprov-data/certs
+
+          # 5. Render owprov.properties on the runner using envsubst
+          export OWPROV_ROOT=/owprov-data
+          export FIRMWARE_UPDATER_UPGRADE=yes
+          export FIRMWARE_UPDATER_RCONLY=no
+          export RRM_PROVIDERS=owrrm
+
+          export RESTAPI_HOST_ROOTCA=/owprov-data/certs/restapi-ca.pem
+          export RESTAPI_HOST_PORT=16005
+          export RESTAPI_HOST_CERT=/owprov-data/certs/restapi-cert.pem
+          export RESTAPI_HOST_KEY=/owprov-data/certs/restapi-key.pem
+          export RESTAPI_HOST_KEY_PASSWORD=mypassword
+
+          export INTERNAL_RESTAPI_HOST_ROOTCA=/owprov-data/certs/restapi-ca.pem
+          export INTERNAL_RESTAPI_HOST_PORT=17005
+          export INTERNAL_RESTAPI_HOST_CERT=/owprov-data/certs/restapi-cert.pem
+          export INTERNAL_RESTAPI_HOST_KEY=/owprov-data/certs/restapi-key.pem
+          export INTERNAL_RESTAPI_HOST_KEY_PASSWORD=mypassword
+
+          export SERVICE_KEY=/owprov-data/certs/restapi-key.pem
+          export SERVICE_KEY_PASSWORD=mypassword
+
+          export SYSTEM_DATA=/owprov-data/data
+          export SYSTEM_URI_PRIVATE=https://localhost:17005
+          export SYSTEM_URI_PUBLIC=https://localhost:16005
+          export SYSTEM_URI_UI=http://localhost
+
+          export SECURITY_RESTAPI_DISABLE=false
+
+          export KAFKA_ENABLE=false
+          export KAFKA_BROKERLIST=localhost:9092
+          export KAFKA_SSL_CA_LOCATION=
+          export KAFKA_SSL_CERTIFICATE_LOCATION=
+          export KAFKA_SSL_KEY_LOCATION=
+          export KAFKA_SSL_KEY_PASSWORD=
+
+          export STORAGE_TYPE=sqlite
+          export STORAGE_TYPE_POSTGRESQL_HOST=localhost
+          export STORAGE_TYPE_POSTGRESQL_USERNAME=owprov
+          export STORAGE_TYPE_POSTGRESQL_PASSWORD=owprov
+          export STORAGE_TYPE_POSTGRESQL_DATABASE=owprov
+          export STORAGE_TYPE_POSTGRESQL_PORT=5432
+          export STORAGE_TYPE_MYSQL_HOST=localhost
+          export STORAGE_TYPE_MYSQL_USERNAME=owprov
+          export STORAGE_TYPE_MYSQL_PASSWORD=owprov
+          export STORAGE_TYPE_MYSQL_DATABASE=owprov
+          export STORAGE_TYPE_MYSQL_PORT=3306
+
+          envsubst < owprov.properties.tmpl > /tmp/owprov-data/owprov.properties
+
+          echo "---- rendered /tmp/owprov-data/owprov.properties ----"
+          cat /tmp/owprov-data/owprov.properties
+
+          # 6. Validate that the rendered config contains no unresolved placeholders
+          if grep -n '\$OWPROV_ROOT' /tmp/owprov-data/owprov.properties; then
+            echo "ERROR: OWPROV_ROOT placeholder was not expanded"
+            exit 1
+          fi
+
+          if grep -n '\$[A-Z_][A-Z0-9_]*' /tmp/owprov-data/owprov.properties; then
+            echo "ERROR: unresolved environment placeholder found"
+            exit 1
+          fi
+
+          # 7. Validate required runtime files/directories
+          test -s /tmp/owprov-data/owprov.properties
+          test -s /tmp/owprov-data/certs/restapi-key.pem
+          test -s /tmp/owprov-data/certs/restapi-cert.pem
+          test -s /tmp/owprov-data/certs/restapi-ca.pem
+          test -s /tmp/owprov-data/data/registry.json
+          cat /tmp/owprov-data/data/registry.json
+          test -d /tmp/owprov-data/data
+          test -w /tmp/owprov-data/data
+          test -d /tmp/owprov-data/logs
+          test -w /tmp/owprov-data/logs
+
+          dump_owprov_gdb_trace() {
+            echo "Collecting OWProv gdb stack trace after startup crash..."
+            docker rm owprov || true
+            docker run --rm --net=host \
+              --cap-add=SYS_PTRACE \
+              --security-opt seccomp=unconfined \
+              -v /tmp/owprov-data:/owprov-data \
+              -e RUN_CHOWN=true \
+              -e CI_FAKE_EXTERNAL_SERVICES=1 \
+              -e FAKE_EXTERNAL_SERVICE_OWSEC=http://127.0.0.1:8099 \
+              --entrypoint bash \
+              owprov:test \
+              -c '
+                set -e
+                apt-get update
+                apt-get install --no-install-recommends -y gdb
+                chown -R owprov:owprov /owprov-data
+                gosu owprov gdb -batch \
+                  -ex "set pagination off" \
+                  -ex "run" \
+                  -ex "thread apply all bt full" \
+                  --args /openwifi/owprov
+              ' || true
+          }
+
+          # 8. Start C++ owprov service container using SQLite storage and FAKE OWSEC URL
           docker run -d --name owprov --net=host \
-            -e TEMPLATE_CONFIG=true \
-            -e SELFSIGNED_CERTS=true \
-            -e STORAGE_TYPE=sqlite \
+            -v /tmp/owprov-data:/owprov-data \
+            -e RUN_CHOWN=true \
             -e CI_FAKE_EXTERNAL_SERVICES=1 \
             -e FAKE_EXTERNAL_SERVICE_OWSEC=http://127.0.0.1:8099 \
-            -e KAFKA_ENABLE=false \
-            -e RUN_CHOWN=true \
             owprov:test
 
-          # Wait for container to be ready
-          sleep 8
-          docker logs owprov
+          # 9. Wait for container to be ready
+          for i in {1..30}; do
+            if [ "$(docker inspect -f '{{.State.Running}}' owprov 2>/dev/null || echo false)" != "true" ]; then
+              echo "OWProv container exited before becoming ready"
+              docker logs owprov || true
+              dump_owprov_gdb_trace
+              exit 1
+            fi
+
+            if curl -k -fsS -H 'Authorization: Bearer root-token' \
+              https://localhost:16005/api/v1/system?command=info >/dev/null; then
+              echo "OWProv is ready"
+              break
+            fi
+
+            echo "Waiting for OWProv..."
+            sleep 2
+          done
+
+          curl -k -fsS -H 'Authorization: Bearer root-token' \
+            https://localhost:16005/api/v1/system?command=info >/dev/null
 
           # 3. Seed the RBAC schema/data
           python3 test_scripts/integration/seed_rbac.py
@@ -181,4 +333,3 @@ jobs:
         if: failure()
         run: |
           docker logs owprov
-

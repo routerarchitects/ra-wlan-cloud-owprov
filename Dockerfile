@@ -15,7 +15,6 @@ FROM build-base AS poco-build
 
 ARG POCO_VERSION
 
-ADD https://api.github.com/repos/Telecominfraproject/wlan-cloud-lib-poco/git/refs/tags/${POCO_VERSION} version.json
 RUN git clone https://github.com/Telecominfraproject/wlan-cloud-lib-poco --branch ${POCO_VERSION} /poco
 
 
@@ -30,7 +29,6 @@ FROM build-base AS cppkafka-build
 
 ARG CPPKAFKA_VERSION
 
-ADD https://api.github.com/repos/Telecominfraproject/wlan-cloud-lib-cppkafka/git/refs/tags/${CPPKAFKA_VERSION} version.json
 RUN git clone https://github.com/Telecominfraproject/wlan-cloud-lib-cppkafka --branch ${CPPKAFKA_VERSION} /cppkafka
 
 WORKDIR /cppkafka
@@ -44,7 +42,6 @@ FROM build-base AS valijson-build
 
 ARG VALIJASON_VERSION
 
-ADD https://api.github.com/repos/Telecominfraproject/wlan-cloud-lib-valijson/git/refs/tags/${VALIJASON_VERSION} version.json
 RUN git clone https://github.com/Telecominfraproject/wlan-cloud-lib-valijson --branch ${VALIJASON_VERSION} /valijson
 
 WORKDIR /valijson
@@ -59,7 +56,6 @@ FROM build-base AS owprov-build
 ADD CMakeLists.txt build /owprov/
 ADD cmake /owprov/cmake
 ADD src /owprov/src
-ADD tests /owprov/tests
 ADD .git /owprov/.git
 
 COPY --from=poco-build /usr/local/include /usr/local/include
@@ -71,7 +67,7 @@ COPY --from=valijson-build /usr/local/include /usr/local/include
 WORKDIR /owprov
 RUN mkdir cmake-build
 WORKDIR /owprov/cmake-build
-RUN cmake -DBUILD_TESTS=ON ..
+RUN cmake ..
 RUN cmake --build . --config Release -j8
 
 FROM debian:$DEBIAN_VERSION

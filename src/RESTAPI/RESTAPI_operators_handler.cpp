@@ -89,13 +89,24 @@ namespace OpenWifi {
 			policy.venue.clear();
 			policy.inUse.clear();
 
-			ProvObjects::ManagementPolicyEntry policyEntry;
-			policyEntry.users = {creatorUserId};
-			policyEntry.resources = {"entity", "operator", "venue", "inventory",
-									 "managementPolicy", "managementRole",
-									 "configuration", "contact", "location"};
-			policyEntry.access = {"FULL"};
-			policy.entries = {policyEntry};
+			const auto policyScope = fmt::format(
+				R"({{"type":"entity","entityId":"{}","includeVenues":true,"includeChildEntities":true}})",
+				createdEntity.info.id);
+
+			const std::vector<std::string> resources{
+				"entity", "venue", "operator", "inventory", "configuration",
+				"managementPolicy", "managementRole"};
+
+			policy.entries.clear();
+			policy.entries.reserve(resources.size());
+			for (const auto &resource : resources) {
+				ProvObjects::ManagementPolicyEntry policyEntry;
+				policyEntry.users = {creatorUserId};
+				policyEntry.resources = {resource};
+				policyEntry.access = {"FULL"};
+				policyEntry.policy = policyScope;
+				policy.entries.push_back(std::move(policyEntry));
+			}
 
 			if (!StorageService()->PolicyDB().CreateRecord(policy)) {
 				return false;

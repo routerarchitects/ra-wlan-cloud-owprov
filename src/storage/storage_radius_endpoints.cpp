@@ -17,7 +17,7 @@ namespace OpenWifi {
             ORM::Field{"RadsecServers", ORM::FieldType::FT_TEXT},
             ORM::Field{"RadiusServers", ORM::FieldType::FT_TEXT},
             ORM::Field{"PoolStrategy", ORM::FieldType::FT_TEXT},
-            ORM::Field{"Index", ORM::FieldType::FT_TEXT},
+            ORM::Field{"radiusIndex", ORM::FieldType::FT_TEXT},
             ORM::Field{"UsedBy", ORM::FieldType::FT_TEXT},
             ORM::Field{"UseGWProxy", ORM::FieldType::FT_BOOLEAN},
             ORM::Field{"NasIdentifier", ORM::FieldType::FT_TEXT},
