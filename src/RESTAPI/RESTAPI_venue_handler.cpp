@@ -52,6 +52,39 @@ namespace OpenWifi {
 		return SerialNumbers;
 	}
 
+	bool ValidateManagementPolicyForVenue(RESTAPIHandler &handler,
+										  const std::string &policyId,
+										  const std::string &venueId,
+										  const ProvObjects::Venue &venue) {
+		if (policyId.empty()) {
+			return true;
+		}
+
+		ProvObjects::ManagementPolicy policy;
+		if (!StorageService()->PolicyDB().GetRecord("id", policyId, policy)) {
+			handler.BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+			return false;
+		}
+
+		if (!RBAC::HasAccess(handler, "managementPolicy", "READ",
+							 RBAC::TargetScope{policy.entity, policy.venue})) {
+			handler.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			return false;
+		}
+
+		if (policy.entity != venue.entity) {
+			handler.BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			return false;
+		}
+
+		if (!policy.venue.empty() && policy.venue != venueId) {
+			handler.BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			return false;
+		}
+
+		return true;
+	}
+
 	void RESTAPI_venue_handler::DoGet() {
 		std::string UUID = GetBinding("uuid", "");
 		ProvObjects::Venue Existing;
@@ -171,11 +204,13 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
+		ProvObjects::Venue PolicyScopeVenue = NewObject;
 		if (!NewObject.parent.empty()) {
 			ProvObjects::Venue ParentVenue;
 			if (!StorageService()->VenueDB().GetRecord("id", NewObject.parent, ParentVenue)) {
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
+			PolicyScopeVenue.entity = ParentVenue.entity;
 			if (!RBAC::RequireAccess(*this, "venue", "CREATE",
 									 RBAC::TargetScope{ParentVenue.entity, NewObject.parent})) {
 				return;
@@ -204,9 +239,9 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::LocationMustExist);
 		}
 
-		if (!NewObject.managementPolicy.empty() &&
-			!StorageService()->PolicyDB().Exists("id", NewObject.managementPolicy)) {
-			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+		if (!ValidateManagementPolicyForVenue(*this, NewObject.managementPolicy,
+											   NewObject.info.id, PolicyScopeVenue)) {
+			return;
 		}
 
 		if (!NewObject.deviceConfiguration.empty()) {
@@ -516,11 +551,24 @@ namespace OpenWifi {
 
 		std::string MoveFromPolicy, MoveToPolicy;
 		if (AssignIfPresent(RawObject, "managementPolicy", MoveToPolicy)) {
-			if (MoveToPolicy.empty() || !StorageService()->PolicyDB().Exists("id", MoveToPolicy)) {
-				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
-			}
 			MoveFromPolicy = Existing.managementPolicy;
 			Existing.managementPolicy = MoveToPolicy;
+		}
+
+		if (RawObject->has("managementPolicy")) {
+			ProvObjects::Venue PolicyScopeVenue = Existing;
+			if (!PolicyScopeVenue.parent.empty()) {
+				ProvObjects::Venue ParentVenue;
+				if (!StorageService()->VenueDB().GetRecord("id", PolicyScopeVenue.parent,
+															ParentVenue)) {
+					return BadRequest(RESTAPI::Errors::VenueMustExist);
+				}
+				PolicyScopeVenue.entity = ParentVenue.entity;
+			}
+			if (!ValidateManagementPolicyForVenue(*this, Existing.managementPolicy, UUID,
+												   PolicyScopeVenue)) {
+				return;
+			}
 		}
 
 		Types::UUIDvec_t MoveToConfigurations, MoveFromConfigurations;

@@ -10,8 +10,10 @@ USER_ID_A = "19232181-669f-42b1-bc5f-d505c04237ba"
 USER_ID_B = "99b59972-2f76-44d3-ad05-aa93ebab6017"
 USER_ID_C = "c66fdb8c-6894-4fe9-aae5-86e8f0f2ff75"
 USER_ID_D = "138087ea-54f3-4972-bf1f-53463fba40e4"
+USER_ID_CSR_A = "f917c90f-1ee6-4df2-8a24-cfb9f7caab71"
 
 OWPROV_URL = "https://openwifi.wlan.local:16005/api/v1"
+MANAGEMENT_RESOURCES = ["entity", "venue", "operator", "inventory", "configuration", "managementPolicy", "managementRole"]
 
 # Unverified SSL Context for self-signed certificates
 ctx = ssl._create_unverified_context()
@@ -100,16 +102,26 @@ def main():
 
     # 3. Create management policies
     print("Creating Management Policies...")
-    def make_policy(name, entity_id, user_id):
+    def make_policy(name, entity_id, user_id, access=None):
+        if access is None:
+            access = ["READ", "LIST", "CREATE", "UPDATE", "MODIFY", "DELETE"]
+        scope = json.dumps({
+            "type": "entity",
+            "entityId": entity_id,
+            "includeVenues": True,
+            "includeChildEntities": True,
+        }, separators=(",", ":"))
         return request("POST", "/managementPolicy/00000000-0000-0000-0000-000000000000", {
             "entity": entity_id,
             "name": name,
             "entries": [
                 {
                     "users": [user_id],
-                    "resources": ["entity", "operator", "venue", "managementPolicy", "managementRole"],
-                    "access": ["READ", "LIST", "CREATE", "UPDATE", "MODIFY", "DELETE"]
+                    "resources": [resource],
+                    "access": access,
+                    "policy": scope
                 }
+                for resource in MANAGEMENT_RESOURCES
             ]
         })
 
@@ -117,12 +129,14 @@ def main():
     pol_b = make_policy("policy-B", ent_b_id, USER_ID_B)
     pol_c = make_policy("policy-C", ent_c_id, USER_ID_C)
     pol_d = make_policy("policy-D", ent_d_id, USER_ID_D)
+    pol_csr_a = make_policy("policy-CSR-A", ent_a_id, USER_ID_CSR_A, ["READ", "LIST"])
     
     pol_a_id = pol_a["id"]
     pol_b_id = pol_b["id"]
     pol_c_id = pol_c["id"]
     pol_d_id = pol_d["id"]
-    print(f"-> Policies: A={pol_a_id}, B={pol_b_id}, C={pol_c_id}, D={pol_d_id}")
+    pol_csr_a_id = pol_csr_a["id"]
+    print(f"-> Policies: A={pol_a_id}, B={pol_b_id}, C={pol_c_id}, D={pol_d_id}, CSR_A={pol_csr_a_id}")
 
     # 4. Create management roles
     print("Creating Management Roles...")
@@ -138,12 +152,14 @@ def main():
     role_b = make_role("role-B", ent_b_id, pol_b_id, USER_ID_B)
     role_c = make_role("role-C", ent_c_id, pol_c_id, USER_ID_C)
     role_d = make_role("role-D", ent_d_id, pol_d_id, USER_ID_D)
+    role_csr_a = make_role("role-CSR-A", ent_a_id, pol_csr_a_id, USER_ID_CSR_A)
 
     role_a_id = role_a["id"]
     role_b_id = role_b["id"]
     role_c_id = role_c["id"]
     role_d_id = role_d["id"]
-    print(f"-> Roles: A={role_a_id}, B={role_b_id}, C={role_c_id}, D={role_d_id}")
+    role_csr_a_id = role_csr_a["id"]
+    print(f"-> Roles: A={role_a_id}, B={role_b_id}, C={role_c_id}, D={role_d_id}, CSR_A={role_csr_a_id}")
 
     # Print out environment variables to source
     env_vars = {
@@ -160,10 +176,12 @@ def main():
         "OWPROV_POLICY_B": pol_b_id,
         "OWPROV_POLICY_C": pol_c_id,
         "OWPROV_POLICY_D": pol_d_id,
+        "OWPROV_POLICY_CSR_A": pol_csr_a_id,
         "OWPROV_ROLE_A": role_a_id,
         "OWPROV_ROLE_B": role_b_id,
         "OWPROV_ROLE_C": role_c_id,
         "OWPROV_ROLE_D": role_d_id,
+        "OWPROV_ROLE_CSR_A": role_csr_a_id,
     }
 
     print("\nSUCCESS! Seeded variables:")

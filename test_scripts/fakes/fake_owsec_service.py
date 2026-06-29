@@ -22,6 +22,7 @@ TOKEN_B = os.getenv("OWPROV_TOKEN_B", "token-b")
 TOKEN_C = os.getenv("OWPROV_TOKEN_C", "token-c")
 TOKEN_D = os.getenv("OWPROV_TOKEN_D", "token-d")
 TOKEN_E = os.getenv("OWPROV_TOKEN_E", "token-e")
+TOKEN_CSR_A = os.getenv("OWPROV_TOKEN_CSR_A", "token-csr-a")
 TOKEN_NO_POLICY_ACCESS = os.getenv("OWPROV_TOKEN_NO_POLICY_ACCESS", "token-no-policy-access")
 TOKEN_NO_ROLE_ACCESS = os.getenv("OWPROV_TOKEN_NO_ROLE_ACCESS", "token-no-role-access")
 
@@ -29,6 +30,7 @@ USER_ID_A = os.getenv("OWPROV_USER_ID_A", "19232181-669f-42b1-bc5f-d505c04237ba"
 USER_ID_B = os.getenv("OWPROV_USER_ID_B", "99b59972-2f76-44d3-ad05-aa93ebab6017")
 USER_ID_C = os.getenv("OWPROV_USER_ID_C", "c66fdb8c-6894-4fe9-aae5-86e8f0f2ff75")
 USER_ID_D = os.getenv("OWPROV_USER_ID_D", "138087ea-54f3-4972-bf1f-53463fba40e4")
+USER_ID_CSR_A = os.getenv("OWPROV_USER_ID_CSR_A", "f917c90f-1ee6-4df2-8a24-cfb9f7caab71")
 USER_ID_READ_ONLY_A = os.getenv("OWPROV_USER_ID_READ_ONLY_A", "4054c847-ed42-4bcd-a9a3-aa88c94136b6")
 USER_ID_NO_ACCESS_A = os.getenv("OWPROV_USER_ID_NO_ACCESS_A", "00000000-0000-0000-0000-0000000000aa")
 
@@ -105,6 +107,17 @@ TOKEN_IDENTITIES: dict[str, dict[str, Any]] = {
         "username": "operator-e@test.com",
         "email": "operator-e@test.com",
         "owner": "operator-e",
+        "userRole": "operator",
+        "root": False,
+        "canPolicy": True,
+        "canRole": True,
+    },
+    TOKEN_CSR_A: {
+        "alias": "OWPROV_TOKEN_CSR_A",
+        "id": USER_ID_CSR_A,
+        "username": "csr-a@test.com",
+        "email": "csr-a@test.com",
+        "owner": OPERATOR_A_ID,
         "userRole": "operator",
         "root": False,
         "canPolicy": True,
@@ -198,6 +211,13 @@ USERS: dict[str, dict[str, Any]] = {
         "email": "user-e@example.test",
         "name": "userE",
         "owner": OPERATOR_E,
+        "userRole": "admin",
+    },
+    TOKEN_CSR_A: {
+        "id": USER_ID_CSR_A,
+        "email": "csr-a@example.test",
+        "name": "csrA",
+        "owner": OPERATOR_A,
         "userRole": "admin",
     },
     TOKEN_NO_POLICY_ACCESS: {

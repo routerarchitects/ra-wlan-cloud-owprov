@@ -129,6 +129,7 @@ class TestRBACTokenDefaults(unittest.TestCase):
             "OWPROV_TOKEN_C": "token-c",
             "OWPROV_TOKEN_D": "token-d",
             "OWPROV_TOKEN_E": "token-e",
+            "OWPROV_TOKEN_CSR_A": "token-csr-a",
             "OWPROV_TOKEN_NO_POLICY_ACCESS": "token-no-policy-access",
             "OWPROV_TOKEN_NO_ROLE_ACCESS": "token-no-role-access",
         }
@@ -143,7 +144,7 @@ class TestRBACTokenDefaults(unittest.TestCase):
 
 
 class TestTokenIdentitiesMap(unittest.TestCase):
-    """Verify TOKEN_IDENTITIES has all 8 expected tokens."""
+    """Verify TOKEN_IDENTITIES has all expected RBAC tokens."""
 
     def test_all_tokens_present(self) -> None:
         expected_aliases = {
@@ -153,6 +154,7 @@ class TestTokenIdentitiesMap(unittest.TestCase):
             "OWPROV_TOKEN_C",
             "OWPROV_TOKEN_D",
             "OWPROV_TOKEN_E",
+            "OWPROV_TOKEN_CSR_A",
             "OWPROV_TOKEN_NO_POLICY_ACCESS",
             "OWPROV_TOKEN_NO_ROLE_ACCESS",
         }

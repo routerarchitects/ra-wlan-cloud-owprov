@@ -67,6 +67,7 @@ USER_ID_B = os.getenv("OWPROV_USER_ID_B", "99b59972-2f76-44d3-ad05-aa93ebab6017"
 USER_ID_C = os.getenv("OWPROV_USER_ID_C", "c66fdb8c-6894-4fe9-aae5-86e8f0f2ff75")
 USER_ID_D = os.getenv("OWPROV_USER_ID_D", "138087ea-54f3-4972-bf1f-53463fba40e4")
 USER_ID_E = "user-e"
+USER_ID_CSR_A = "user-csr-a"
 USER_ID_NO_POLICY = "user-no-policy-access"
 USER_ID_NO_ROLE = "user-no-role-access"
 
@@ -82,6 +83,8 @@ class FakeUser:
     root: bool = False
     can_policy: bool = True
     can_role: bool = True
+    can_mutate_policy: bool = True
+    can_mutate_role: bool = True
 
 
 @dataclass
@@ -242,6 +245,13 @@ class FakeOWProv:
             "token-c": FakeUser(USER_ID_C, "token-c", OPERATOR_C),
             "token-d": FakeUser(USER_ID_D, "token-d", OPERATOR_D),
             "token-e": FakeUser(USER_ID_E, "token-e", OPERATOR_E),
+            "token-csr-a": FakeUser(
+                USER_ID_CSR_A,
+                "token-csr-a",
+                OPERATOR_A,
+                can_mutate_policy=False,
+                can_mutate_role=False,
+            ),
             "token-no-policy-access": FakeUser(
                 USER_ID_NO_POLICY, "token-no-policy-access", OPERATOR_A, can_policy=False
             ),
@@ -364,8 +374,12 @@ class FakeOWProv:
             return True
         if resource == "managementPolicy" and not user.can_policy:
             return False
+        if resource == "managementPolicy" and action in {"CREATE", "POST", "UPDATE", "PUT", "MODIFY", "DELETE"}:
+            return user.can_mutate_policy and self._authorized_entity(user, entity_id)
         if resource == "managementRole" and not user.can_role:
             return False
+        if resource == "managementRole" and action in {"CREATE", "POST", "UPDATE", "PUT", "MODIFY", "DELETE"}:
+            return user.can_mutate_role and self._authorized_entity(user, entity_id)
         return self._authorized_entity(user, entity_id)
 
     def _entity(self, method: str, entity_id: str, query: dict[str, list[str]], user: FakeUser) -> tuple[int, Any]:
@@ -535,33 +549,119 @@ class FakeOWProv:
             return 403, {"errorCode": 403}
         if method == "POST":
             new_id = role_id or body.get("id") or f"role-created-{len(self.roles) + 1}"
+            if self._role_scope_exists(target_entity, body.get("venue", ""), body.get("users", []), new_id):
+                return 400, {"errorCode": 400, "errorDetails": "duplicate role scope"}
             self.roles[new_id] = self._role(new_id, target_entity, policy_id, body.get("users", []))
+            self.roles[new_id]["venue"] = body.get("venue", "")
             return 200, deepcopy(self.roles[new_id])
         if role_id not in self.roles:
             return self._invalid_id(role_id)
         if method == "PUT":
+            final_users = body.get("users", self.roles[role_id].get("users", []))
+            final_venue = body.get("venue", self.roles[role_id].get("venue", ""))
+            if self._role_scope_exists(target_entity, final_venue, final_users, role_id):
+                return 400, {"errorCode": 400, "errorDetails": "duplicate role scope"}
             self.roles[role_id]["name"] = body.get("name", self.roles[role_id]["name"])
+            self.roles[role_id]["entity"] = target_entity
+            self.roles[role_id]["venue"] = final_venue
+            self.roles[role_id]["managementPolicy"] = policy_id
+            self.roles[role_id]["users"] = final_users
             return 200, deepcopy(self.roles[role_id])
         if method == "DELETE":
             self.roles.pop(role_id, None)
             return 200, {"ok": True}
         return 404, {"errorCode": 404}
 
+    def _role_scope_exists(self, entity_id: str, venue_id: str, users: list[str], skip_id: str) -> bool:
+        for rid, role in self.roles.items():
+            if rid == skip_id:
+                continue
+            if role.get("entity") != entity_id or role.get("venue", "") != venue_id:
+                continue
+            if set(role.get("users", [])) & set(users):
+                return True
+        return False
+
+    def _validate_venue_policy(self, user: FakeUser, policy_id: str, entity_id: str, venue_id: str) -> tuple[bool, int]:
+        if not policy_id:
+            return True, 200
+        if policy_id not in self.policies:
+            return False, 400
+        policy = self.policies[policy_id]
+        if not self._can(user, "managementPolicy", "READ", policy["entity"]):
+            return False, 403
+        if policy["entity"] != entity_id:
+            return False, 400
+        if policy.get("venue") and policy["venue"] != venue_id:
+            return False, 400
+        return True, 200
+
     def _venue(self, method: str, venue_id: str, query: dict[str, list[str]], user: FakeUser) -> tuple[int, Any]:
-        if method != "GET":
-            return 404, {"errorCode": 404}
-        if venue_id:
+        if method == "GET" and venue_id:
             if venue_id not in self.venues:
                 return self._invalid_id(venue_id)
             venue = self.venues[venue_id]
             if not self._can(user, "venue", "READ", venue["entity"]):
                 return 403, {"errorCode": 403}
             return 200, deepcopy(venue)
-        visible = set(self._visible_entities(user))
-        ids = [vid for vid, venue in self.venues.items() if venue["entity"] in visible]
-        if query.get("countOnly", ["false"])[0].lower() == "true":
-            return 200, {"count": len(ids)}
-        return 200, {"venues": [deepcopy(self.venues[vid]) for vid in ids]}
+        if method == "GET":
+            visible = set(self._visible_entities(user))
+            ids = [vid for vid, venue in self.venues.items() if venue["entity"] in visible]
+            if query.get("countOnly", ["false"])[0].lower() == "true":
+                return 200, {"count": len(ids)}
+            return 200, {"venues": [deepcopy(self.venues[vid]) for vid in ids]}
+
+        if method == "POST":
+            new_id = venue_id or body.get("id") or f"venue-created-{len(self.venues) + 1}"
+            entity_id = body.get("entity", "")
+            parent_id = body.get("parent", "")
+            if parent_id:
+                if parent_id not in self.venues:
+                    return 400, {"errorCode": 400}
+                entity_id = self.venues[parent_id]["entity"]
+            if not entity_id or entity_id not in self.entities:
+                return 400, {"errorCode": 400}
+            if not self._can(user, "venue", "CREATE", entity_id):
+                return 403, {"errorCode": 403}
+            ok, failure_status = self._validate_venue_policy(user, body.get("managementPolicy", ""), entity_id, new_id)
+            if not ok:
+                return failure_status, {"errorCode": failure_status}
+            self.venues[new_id] = {
+                "id": new_id,
+                "name": body.get("name", new_id),
+                "entity": entity_id,
+                "parent": parent_id,
+                "managementPolicy": body.get("managementPolicy", ""),
+            }
+            return 200, deepcopy(self.venues[new_id])
+
+        if venue_id not in self.venues:
+            return self._invalid_id(venue_id)
+        existing = self.venues[venue_id]
+        final_entity = body.get("entity", existing["entity"])
+        if body.get("parent"):
+            parent_id = body["parent"]
+            if parent_id not in self.venues:
+                return 400, {"errorCode": 400}
+            final_entity = self.venues[parent_id]["entity"]
+        if final_entity not in self.entities:
+            return 400, {"errorCode": 400}
+        action = {"PUT": "UPDATE", "DELETE": "DELETE"}.get(method, method)
+        if not self._can(user, "venue", action, final_entity):
+            return 403, {"errorCode": 403}
+        if method == "PUT":
+            policy_id = body.get("managementPolicy", existing.get("managementPolicy", ""))
+            if "managementPolicy" in body:
+                ok, failure_status = self._validate_venue_policy(user, policy_id, final_entity, venue_id)
+                if not ok:
+                    return failure_status, {"errorCode": failure_status}
+            existing.update({k: v for k, v in body.items() if k in {"name", "entity", "parent", "managementPolicy"}})
+            existing["entity"] = final_entity
+            return 200, deepcopy(existing)
+        if method == "DELETE":
+            self.venues.pop(venue_id, None)
+            return 200, {"ok": True}
+        return 404, {"errorCode": 404}
 
     def _location(self, method: str, query: dict[str, list[str]], user: FakeUser) -> tuple[int, Any]:
         if method != "GET":

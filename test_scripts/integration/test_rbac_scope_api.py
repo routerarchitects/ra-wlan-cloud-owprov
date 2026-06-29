@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import unittest
 
@@ -15,6 +16,7 @@ from rbac_scope_harness import (  # noqa: E402
     ENTITY_B,
     ENTITY_C,
     ENTITY_D,
+    ENTITY_E,
     OPERATOR_A,
     OPERATOR_B,
     OPERATOR_C,
@@ -23,12 +25,18 @@ from rbac_scope_harness import (  # noqa: E402
     POLICY_B,
     POLICY_C,
     POLICY_D,
+    POLICY_E,
     ROLE_A,
     ROLE_B,
     ROLE_C,
     ROLE_D,
+    ROLE_E,
     ROOT_ENTITY,
     USER_ID_A,
+    USER_ID_B,
+    USER_ID_C,
+    USER_ID_CSR_A,
+    VENUE_C,
     assert_status,
     extract_ids,
     new_uuid,
@@ -37,6 +45,51 @@ from rbac_scope_harness import (  # noqa: E402
     run_unittest,
     set_scenario,
 )
+
+MANAGEMENT_RESOURCES = [
+    "entity",
+    "venue",
+    "operator",
+    "inventory",
+    "configuration",
+    "managementPolicy",
+    "managementRole",
+]
+
+
+def policy_payload(policy_id: str, entity_id: str, user_id: str, access: list[str] | None = None) -> dict:
+    if access is None:
+        access = ["FULL"]
+    scope = {
+        "type": "entity",
+        "entityId": entity_id,
+        "includeVenues": True,
+        "includeChildEntities": True,
+    }
+    return {
+        "id": policy_id,
+        "entity": entity_id,
+        "name": f"policy-{policy_id}",
+        "entries": [
+            {
+                "users": [user_id],
+                "resources": [resource],
+                "access": access,
+                "policy": json.dumps(scope, separators=(",", ":")),
+            }
+            for resource in MANAGEMENT_RESOURCES
+        ],
+    }
+
+
+def role_payload(role_id: str, entity_id: str, policy_id: str, user_id: str = USER_ID_B) -> dict:
+    return {
+        "id": role_id,
+        "name": f"role-{role_id}",
+        "entity": entity_id,
+        "managementPolicy": policy_id,
+        "users": [user_id],
+    }
 
 
 class RBACScopeAPITest(unittest.TestCase):
@@ -269,6 +322,341 @@ class RBACScopeAPITest(unittest.TestCase):
         ):
             status, body = request(method, path, token="token-no-role-access", body=payload)
             assert_status(status, 403, body)
+
+    def test_admin_policy_role_crud_allows_own_and_direct_child_scope(self) -> None:
+        for label, entity_id in (("own", ENTITY_A), ("direct-child", ENTITY_C)):
+            with self.subTest(scope=label, resource="managementPolicy"):
+                policy_id = new_uuid()
+                status, body = request(
+                    "POST",
+                    f"/api/v1/managementPolicy/{policy_id}",
+                    token="token-a",
+                    body=policy_payload(policy_id, entity_id, USER_ID_A),
+                )
+                assert_status(status, 200, body)
+                policy_id = body.get("id", policy_id)
+
+                status, body = request("GET", f"/api/v1/managementPolicy/{policy_id}", token="token-a")
+                assert_status(status, 200, body)
+
+                status, body = request(
+                    "PUT",
+                    f"/api/v1/managementPolicy/{policy_id}",
+                    token="token-a",
+                    body={"id": policy_id, "name": f"policy-{label}-updated", "entity": entity_id},
+                )
+                assert_status(status, 200, body)
+
+            with self.subTest(scope=label, resource="managementRole"):
+                role_id = new_uuid()
+                status, body = request(
+                    "POST",
+                    f"/api/v1/managementRole/{role_id}",
+                    token="token-a",
+                    body=role_payload(role_id, entity_id, policy_id),
+                )
+                assert_status(status, 200, body)
+                role_id = body.get("id", role_id)
+
+                status, body = request("GET", f"/api/v1/managementRole/{role_id}", token="token-a")
+                assert_status(status, 200, body)
+
+                status, body = request(
+                    "PUT",
+                    f"/api/v1/managementRole/{role_id}",
+                    token="token-a",
+                    body={"id": role_id, "name": f"role-{label}-updated"},
+                )
+                assert_status(status, 200, body)
+
+                status, body = request("DELETE", f"/api/v1/managementRole/{role_id}", token="token-a")
+                assert_status(status, 200, body)
+
+            with self.subTest(scope=label, resource="managementPolicy-delete"):
+                status, body = request("DELETE", f"/api/v1/managementPolicy/{policy_id}", token="token-a")
+                assert_status(status, 200, body)
+
+    def test_admin_policy_role_crud_denies_parent_sibling_and_grandchild_scope(self) -> None:
+        denied_scopes = (
+            ("parent", "token-c", ENTITY_A, POLICY_A, ROLE_A),
+            ("sibling", "token-c", ENTITY_D, POLICY_D, ROLE_D),
+            ("grandchild", "token-a", ENTITY_E, POLICY_E, ROLE_E),
+        )
+
+        for relation, token, entity_id, policy_id, role_id in denied_scopes:
+            with self.subTest(relation=relation, resource="managementPolicy"):
+                status, body = request("GET", f"/api/v1/managementPolicy/{policy_id}", token=token)
+                assert_status(status, DENIED, body)
+
+                create_id = new_uuid()
+                status, body = request(
+                    "POST",
+                    f"/api/v1/managementPolicy/{create_id}",
+                    token=token,
+                    body=policy_payload(create_id, entity_id, USER_ID_A),
+                )
+                assert_status(status, DENIED, body)
+
+                status, body = request(
+                    "PUT",
+                    f"/api/v1/managementPolicy/{policy_id}",
+                    token=token,
+                    body={"id": policy_id, "name": f"denied-{relation}", "entity": entity_id},
+                )
+                assert_status(status, DENIED, body)
+
+                status, body = request("DELETE", f"/api/v1/managementPolicy/{policy_id}", token=token)
+                assert_status(status, DENIED, body)
+
+            with self.subTest(relation=relation, resource="managementRole"):
+                status, body = request("GET", f"/api/v1/managementRole/{role_id}", token=token)
+                assert_status(status, DENIED, body)
+
+                create_id = new_uuid()
+                status, body = request(
+                    "POST",
+                    f"/api/v1/managementRole/{create_id}",
+                    token=token,
+                    body=role_payload(create_id, entity_id, policy_id),
+                )
+                assert_status(status, DENIED, body)
+
+                status, body = request(
+                    "PUT",
+                    f"/api/v1/managementRole/{role_id}",
+                    token=token,
+                    body={"id": role_id, "name": f"denied-{relation}"},
+                )
+                assert_status(status, DENIED, body)
+
+                status, body = request("DELETE", f"/api/v1/managementRole/{role_id}", token=token)
+                assert_status(status, DENIED, body)
+
+    def test_csr_policy_role_read_list_allowed_but_mutation_denied(self) -> None:
+        for path, key, expected_id in (
+            ("/api/v1/managementPolicy", "managementPolicies", POLICY_A),
+            ("/api/v1/managementRole", "roles", ROLE_A),
+        ):
+            with self.subTest(path=path, action="LIST"):
+                status, body = request("GET", path, token="token-csr-a")
+                assert_status(status, 200, body)
+                self.assertIn(expected_id, {item["id"] for item in body.get(key, [])})
+
+                status, body = request("GET", f"{path}?countOnly=true", token="token-csr-a")
+                assert_status(status, 200, body)
+                self.assertGreaterEqual(body.get("count", 0), 1)
+
+        for policy_id in (POLICY_A, POLICY_C):
+            status, body = request("GET", f"/api/v1/managementPolicy/{policy_id}", token="token-csr-a")
+            assert_status(status, 200, body)
+
+        for role_id in (ROLE_A, ROLE_C):
+            status, body = request("GET", f"/api/v1/managementRole/{role_id}", token="token-csr-a")
+            assert_status(status, 200, body)
+
+        denied_policy_id = new_uuid()
+        for method, path, payload in (
+            (
+                "POST",
+                f"/api/v1/managementPolicy/{denied_policy_id}",
+                policy_payload(denied_policy_id, ENTITY_A, USER_ID_CSR_A, ["READ", "LIST"]),
+            ),
+            ("PUT", f"/api/v1/managementPolicy/{POLICY_A}", {"id": POLICY_A, "name": "csr-denied"}),
+            ("DELETE", f"/api/v1/managementPolicy/{POLICY_A}", None),
+        ):
+            status, body = request(method, path, token="token-csr-a", body=payload)
+            assert_status(status, 403, body)
+
+        denied_role_id = new_uuid()
+        for method, path, payload in (
+            (
+                "POST",
+                f"/api/v1/managementRole/{denied_role_id}",
+                role_payload(denied_role_id, ENTITY_A, POLICY_A, USER_ID_CSR_A),
+            ),
+            ("PUT", f"/api/v1/managementRole/{ROLE_A}", {"id": ROLE_A, "name": "csr-denied"}),
+            ("DELETE", f"/api/v1/managementRole/{ROLE_A}", None),
+        ):
+            status, body = request(method, path, token="token-csr-a", body=payload)
+            assert_status(status, 403, body)
+
+    def test_venue_management_policy_attachment_scope_validation(self) -> None:
+        allowed_venue_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/venue/{allowed_venue_id}",
+            token="token-a",
+            body={"id": allowed_venue_id, "name": f"venue-{allowed_venue_id}", "entity": ENTITY_C, "managementPolicy": POLICY_C},
+        )
+        assert_status(status, 200, body)
+
+        denied_venue_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/venue/{denied_venue_id}",
+            token="token-a",
+            body={"id": denied_venue_id, "name": f"venue-{denied_venue_id}", "entity": ENTITY_C, "managementPolicy": POLICY_B},
+        )
+        assert_status(status, (400, 403), body)
+
+        update_venue_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/venue/{update_venue_id}",
+            token="token-a",
+            body={"id": update_venue_id, "name": f"venue-{update_venue_id}", "entity": ENTITY_C},
+        )
+        assert_status(status, 200, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/venue/{update_venue_id}",
+            token="token-a",
+            body={"id": update_venue_id, "name": f"venue-{update_venue_id}-policy-c", "managementPolicy": POLICY_C},
+        )
+        assert_status(status, 200, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/venue/{update_venue_id}",
+            token="token-a",
+            body={"id": update_venue_id, "name": f"venue-{update_venue_id}-policy-b", "managementPolicy": POLICY_B},
+        )
+        assert_status(status, (400, 403), body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/venue/{update_venue_id}",
+            token="token-a",
+            body={"id": update_venue_id, "name": f"venue-{update_venue_id}-policy-d", "managementPolicy": POLICY_D},
+        )
+        assert_status(status, (400, 403), body)
+
+        no_policy_venue_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/venue/{no_policy_venue_id}",
+            token="token-no-policy-access",
+            body={"id": no_policy_venue_id, "name": f"venue-{no_policy_venue_id}", "entity": ENTITY_C, "managementPolicy": POLICY_C},
+        )
+        assert_status(status, 403, body)
+
+        root_venue_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/venue/{root_venue_id}",
+            token="root-token",
+            body={"id": root_venue_id, "name": f"venue-{root_venue_id}", "entity": ENTITY_B, "managementPolicy": POLICY_B},
+        )
+        assert_status(status, 200, body)
+
+    def test_management_role_update_scope_policy_validation_and_no_partial_mutation(self) -> None:
+        policy_c_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/managementPolicy/{policy_c_id}",
+            token="root-token",
+            body=policy_payload(policy_c_id, ENTITY_C, USER_ID_B),
+        )
+        assert_status(status, 200, body)
+
+        policy_d_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/managementPolicy/{policy_d_id}",
+            token="root-token",
+            body=policy_payload(policy_d_id, ENTITY_D, USER_ID_B),
+        )
+        assert_status(status, 200, body)
+
+        role_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/managementRole/{role_id}",
+            token="root-token",
+            body=role_payload(role_id, ENTITY_C, policy_c_id, USER_ID_B),
+        )
+        assert_status(status, 200, body)
+        role_id = body.get("id", role_id)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "role-c-policy-c", "managementPolicy": policy_c_id},
+        )
+        assert_status(status, 200, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "role-c-policy-b", "managementPolicy": POLICY_B},
+        )
+        assert_status(status, (400, 403), body)
+
+        status, body = request("GET", f"/api/v1/managementRole/{role_id}", token="root-token")
+        assert_status(status, 200, body)
+        self.assertEqual(body.get("entity"), ENTITY_C)
+        self.assertEqual(body.get("managementPolicy"), policy_c_id)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "role-d-policy-d", "entity": ENTITY_D, "managementPolicy": policy_d_id},
+        )
+        assert_status(status, 200, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "role-b-policy-b", "entity": ENTITY_B, "managementPolicy": POLICY_B},
+        )
+        assert_status(status, 403, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "role-d-policy-c", "managementPolicy": policy_c_id},
+        )
+        assert_status(status, 400, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "role-c-no-policy-change", "entity": ENTITY_C},
+        )
+        assert_status(status, 400, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-csr-a",
+            body={"id": role_id, "name": "csr-update-denied"},
+        )
+        assert_status(status, 403, body)
+
+    def test_management_role_update_duplicate_check_uses_final_candidate(self) -> None:
+        role_id = new_uuid()
+        status, body = request(
+            "POST",
+            f"/api/v1/managementRole/{role_id}",
+            token="root-token",
+            body=role_payload(role_id, ENTITY_C, POLICY_C, USER_ID_B),
+        )
+        assert_status(status, 200, body)
+
+        status, body = request(
+            "PUT",
+            f"/api/v1/managementRole/{role_id}",
+            token="token-a",
+            body={"id": role_id, "name": "duplicate-final-candidate", "users": [USER_ID_C]},
+        )
+        assert_status(status, 400, body)
 
     def test_lists_are_filtered_before_count_and_pagination(self) -> None:
         list_expectations = (

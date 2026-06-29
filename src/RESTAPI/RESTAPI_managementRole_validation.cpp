@@ -6,10 +6,10 @@
 
 namespace OpenWifi {
 
-	bool ValidateManagementPolicyForRole(
+	bool ValidateManagementPolicyForTargetScope(
 		RESTAPIHandler &handler,
 		const std::string &policyId,
-		const ProvObjects::ManagementRole &role
+		const RBAC::TargetScope &targetScope
 	) {
 		if (policyId.empty()) {
 			return true;
@@ -34,7 +34,7 @@ namespace OpenWifi {
 			return false;
 		}
 
-		if (policy.entity != role.entity || policy.venue != role.venue) {
+		if (policy.entity != targetScope.entity || policy.venue != targetScope.venue) {
 			if (handler.Response != nullptr) {
 				handler.BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			}
@@ -42,6 +42,15 @@ namespace OpenWifi {
 		}
 
 		return true;
+	}
+
+	bool ValidateManagementPolicyForRole(
+		RESTAPIHandler &handler,
+		const std::string &policyId,
+		const ProvObjects::ManagementRole &role
+	) {
+		return ValidateManagementPolicyForTargetScope(
+			handler, policyId, RBAC::TargetScope{role.entity, role.venue});
 	}
 
 } // namespace OpenWifi
