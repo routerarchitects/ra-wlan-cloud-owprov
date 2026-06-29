@@ -100,6 +100,17 @@ def main():
     ent_d_id = op_d["entityId"]
     print(f"-> Operator D: {op_d_id}, Entity D: {ent_d_id}")
 
+    print("Creating Operator E under Entity C...")
+    op_e = request("POST", "/operator/00000000-0000-0000-0000-000000000000", {
+        "name": "Operator E",
+        "description": "Operator E description",
+        "registrationId": "operator-e",
+        "entityId": ent_c_id
+    })
+    op_e_id = op_e["id"]
+    ent_e_id = op_e["entityId"]
+    print(f"-> Operator E: {op_e_id}, Entity E: {ent_e_id}")
+
     # 3. Create management policies
     print("Creating Management Policies...")
     def make_policy(name, entity_id, user_id, access=None):
@@ -130,13 +141,15 @@ def main():
     pol_c = make_policy("policy-C", ent_c_id, USER_ID_C)
     pol_d = make_policy("policy-D", ent_d_id, USER_ID_D)
     pol_csr_a = make_policy("policy-CSR-A", ent_a_id, USER_ID_CSR_A, ["READ", "LIST"])
+    pol_e = make_policy("policy-E", ent_e_id, "user-e")
     
     pol_a_id = pol_a["id"]
     pol_b_id = pol_b["id"]
     pol_c_id = pol_c["id"]
     pol_d_id = pol_d["id"]
     pol_csr_a_id = pol_csr_a["id"]
-    print(f"-> Policies: A={pol_a_id}, B={pol_b_id}, C={pol_c_id}, D={pol_d_id}, CSR_A={pol_csr_a_id}")
+    pol_e_id = pol_e["id"]
+    print(f"-> Policies: A={pol_a_id}, B={pol_b_id}, C={pol_c_id}, D={pol_d_id}, CSR_A={pol_csr_a_id}, E={pol_e_id}")
 
     # 4. Create management roles
     print("Creating Management Roles...")
@@ -153,13 +166,15 @@ def main():
     role_c = make_role("role-C", ent_c_id, pol_c_id, USER_ID_C)
     role_d = make_role("role-D", ent_d_id, pol_d_id, USER_ID_D)
     role_csr_a = make_role("role-CSR-A", ent_a_id, pol_csr_a_id, USER_ID_CSR_A)
+    role_e = make_role("role-E", ent_e_id, pol_e_id, "user-e")
 
     role_a_id = role_a["id"]
     role_b_id = role_b["id"]
     role_c_id = role_c["id"]
     role_d_id = role_d["id"]
     role_csr_a_id = role_csr_a["id"]
-    print(f"-> Roles: A={role_a_id}, B={role_b_id}, C={role_c_id}, D={role_d_id}, CSR_A={role_csr_a_id}")
+    role_e_id = role_e["id"]
+    print(f"-> Roles: A={role_a_id}, B={role_b_id}, C={role_c_id}, D={role_d_id}, CSR_A={role_csr_a_id}, E={role_e_id}")
 
     # Print out environment variables to source
     env_vars = {
@@ -168,19 +183,23 @@ def main():
         "OWPROV_ENTITY_B": ent_b_id,
         "OWPROV_ENTITY_C": ent_c_id,
         "OWPROV_ENTITY_D": ent_d_id,
+        "OWPROV_ENTITY_E": ent_e_id,
         "OWPROV_OPERATOR_A": op_a_id,
         "OWPROV_OPERATOR_B": op_b_id,
         "OWPROV_OPERATOR_C": op_c_id,
         "OWPROV_OPERATOR_D": op_d_id,
+        "OWPROV_OPERATOR_E": op_e_id,
         "OWPROV_POLICY_A": pol_a_id,
         "OWPROV_POLICY_B": pol_b_id,
         "OWPROV_POLICY_C": pol_c_id,
         "OWPROV_POLICY_D": pol_d_id,
+        "OWPROV_POLICY_E": pol_e_id,
         "OWPROV_POLICY_CSR_A": pol_csr_a_id,
         "OWPROV_ROLE_A": role_a_id,
         "OWPROV_ROLE_B": role_b_id,
         "OWPROV_ROLE_C": role_c_id,
         "OWPROV_ROLE_D": role_d_id,
+        "OWPROV_ROLE_E": role_e_id,
         "OWPROV_ROLE_CSR_A": role_csr_a_id,
     }
 

@@ -13,15 +13,43 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, urlparse
+
+def load_seeded_env():
+    import os
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        for path in [
+            os.path.join(base_dir, "seeded_env.sh"),
+            os.path.join(base_dir, "..", "seeded_env.sh"),
+            os.path.join(base_dir, "..", "..", "seeded_env.sh"),
+            "seeded_env.sh"
+        ]:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("export "):
+                            parts = line[7:].split("=", 1)
+                            if len(parts) == 2:
+                                key, val = parts[0].strip(), parts[1].strip()
+                                if val.startswith('"') and val.endswith('"'):
+                                    val = val[1:-1]
+                                elif val.startswith("'") and val.endswith("'"):
+                                    val = val[1:-1]
+                                os.environ[key] = val
+    except Exception as e:
+        pass
+
+load_seeded_env()
 
 ROOT_ENTITY = os.getenv("OWPROV_ROOT_ENTITY", "0000-0000-0000")
 ENTITY_A = os.getenv("OWPROV_ENTITY_A", "09189968-6d82-47e0-a8cc-ecacf9890463")
 ENTITY_B = os.getenv("OWPROV_ENTITY_B", "1f92df91-2adc-4efd-a8a8-3c014610eca7")
 ENTITY_C = os.getenv("OWPROV_ENTITY_C", "dc4977fd-3a32-4bfb-866d-618054960724")
 ENTITY_D = os.getenv("OWPROV_ENTITY_D", "3f891d10-982e-40f7-9c35-acf2205b69d7")
-ENTITY_E = "entity-e"
+ENTITY_E = os.getenv("OWPROV_ENTITY_E", "entity-e")
 ENTITY_J = "entity-j"
 ENTITY_A_NORMAL = "entity-a-normal"
 ENTITY_C_NORMAL = "entity-c-normal"
@@ -35,7 +63,7 @@ OPERATOR_A = os.getenv("OWPROV_OPERATOR_A", "c72c9186-7f16-4213-920f-68f40ceb525
 OPERATOR_B = os.getenv("OWPROV_OPERATOR_B", "3a68fcc9-2601-4c9b-b96f-51685cf7a5f7")
 OPERATOR_C = os.getenv("OWPROV_OPERATOR_C", "42bc1890-ee3d-491d-8b48-ace0b9813665")
 OPERATOR_D = os.getenv("OWPROV_OPERATOR_D", "1b0740fa-ebfe-4cae-af8e-521914ab258e")
-OPERATOR_E = "operator-e"
+OPERATOR_E = os.getenv("OWPROV_OPERATOR_E", "operator-e")
 OPERATOR_J = "operator-j"
 
 VENUE_A = "venue-a"
@@ -54,19 +82,21 @@ POLICY_A = os.getenv("OWPROV_POLICY_A", "c9cd496a-4a21-43ec-b568-6498b9b9b8ae")
 POLICY_B = os.getenv("OWPROV_POLICY_B", "116baff9-cbd1-4a9f-a610-247c281bf3a5")
 POLICY_C = os.getenv("OWPROV_POLICY_C", "38076268-8fcf-4ce6-8dd5-a8832711130c")
 POLICY_D = os.getenv("OWPROV_POLICY_D", "72385f1c-eec4-4ac8-be25-b834b2b26441")
-POLICY_E = "policy-e"
+POLICY_E = os.getenv("OWPROV_POLICY_E", "policy-e")
+POLICY_CSR_A = os.getenv("OWPROV_POLICY_CSR_A", "policy-csr-a")
 
 ROLE_A = os.getenv("OWPROV_ROLE_A", "5afb0153-c891-466a-acec-91ef35595414")
 ROLE_B = os.getenv("OWPROV_ROLE_B", "6ff27d80-22d3-4a31-8dc3-1b15eda3f18c")
 ROLE_C = os.getenv("OWPROV_ROLE_C", "5975495d-a9c8-4a44-86fc-8deeac5803fa")
 ROLE_D = os.getenv("OWPROV_ROLE_D", "22b6c368-d085-4127-8532-b9666b1d0655")
-ROLE_E = "role-e"
+ROLE_E = os.getenv("OWPROV_ROLE_E", "role-e")
+ROLE_CSR_A = os.getenv("OWPROV_ROLE_CSR_A", "role-csr-a")
 
 USER_ID_A = os.getenv("OWPROV_USER_ID_A", "19232181-669f-42b1-bc5f-d505c04237ba")
 USER_ID_B = os.getenv("OWPROV_USER_ID_B", "99b59972-2f76-44d3-ad05-aa93ebab6017")
 USER_ID_C = os.getenv("OWPROV_USER_ID_C", "c66fdb8c-6894-4fe9-aae5-86e8f0f2ff75")
 USER_ID_D = os.getenv("OWPROV_USER_ID_D", "138087ea-54f3-4972-bf1f-53463fba40e4")
-USER_ID_E = "user-e"
+USER_ID_E = os.getenv("OWPROV_USER_ID_E", "user-e")
 USER_ID_CSR_A = "user-csr-a"
 USER_ID_NO_POLICY = "user-no-policy-access"
 USER_ID_NO_ROLE = "user-no-role-access"
@@ -703,7 +733,7 @@ def _owprov_base_url() -> str:
     return _normalize_base_url(
         os.environ.get(
             "OWPROV_BASE_URL",
-            os.environ.get("OWPROV_URL", "http://127.0.0.1:16004/api/v1"),
+            os.environ.get("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"),
         )
     )
 
@@ -723,7 +753,11 @@ def _ssl_context() -> ssl.SSLContext | None:
         return None
     if not _env_bool("OWPROV_TLS_VERIFY", True):
         return ssl._create_unverified_context()
-    root_ca = os.environ.get("OW_RBAC_TLS_ROOT_CA") or os.environ.get("OWPROV_TLS_ROOT_CA")
+    root_ca = (
+        os.environ.get("OW_RBAC_TLS_ROOT_CA")
+        or os.environ.get("OWPROV_TLS_ROOT_CA")
+        or "/home/uttam/openwifi_workspace/deployment/wlan-cloud-ucentral-deploy/docker-compose/certs/restapi-ca.pem"
+    )
     if root_ca:
         return ssl.create_default_context(cafile=root_ca)
     return ssl.create_default_context()

@@ -26,11 +26,13 @@ from rbac_scope_harness import (  # noqa: E402
     POLICY_C,
     POLICY_D,
     POLICY_E,
+    POLICY_CSR_A,
     ROLE_A,
     ROLE_B,
     ROLE_C,
     ROLE_D,
     ROLE_E,
+    ROLE_CSR_A,
     ROOT_ENTITY,
     USER_ID_A,
     USER_ID_B,
@@ -489,6 +491,7 @@ class RBACScopeAPITest(unittest.TestCase):
             body={"id": allowed_venue_id, "name": f"venue-{allowed_venue_id}", "entity": ENTITY_C, "managementPolicy": POLICY_C},
         )
         assert_status(status, 200, body)
+        allowed_venue_id = body.get("id", allowed_venue_id)
 
         denied_venue_id = new_uuid()
         status, body = request(
@@ -507,6 +510,7 @@ class RBACScopeAPITest(unittest.TestCase):
             body={"id": update_venue_id, "name": f"venue-{update_venue_id}", "entity": ENTITY_C},
         )
         assert_status(status, 200, body)
+        update_venue_id = body.get("id", update_venue_id)
 
         status, body = request(
             "PUT",
@@ -549,6 +553,11 @@ class RBACScopeAPITest(unittest.TestCase):
             body={"id": root_venue_id, "name": f"venue-{root_venue_id}", "entity": ENTITY_B, "managementPolicy": POLICY_B},
         )
         assert_status(status, 200, body)
+        root_venue_id = body.get("id", root_venue_id)
+
+        # Cleanup created venues
+        for vid in [allowed_venue_id, update_venue_id, root_venue_id]:
+            request("DELETE", f"/api/v1/venue/{vid}", token="root-token")
 
     def test_management_role_update_scope_policy_validation_and_no_partial_mutation(self) -> None:
         policy_c_id = new_uuid()
@@ -559,6 +568,7 @@ class RBACScopeAPITest(unittest.TestCase):
             body=policy_payload(policy_c_id, ENTITY_C, USER_ID_B),
         )
         assert_status(status, 200, body)
+        policy_c_id = body.get("id", policy_c_id)
 
         policy_d_id = new_uuid()
         status, body = request(
@@ -568,6 +578,7 @@ class RBACScopeAPITest(unittest.TestCase):
             body=policy_payload(policy_d_id, ENTITY_D, USER_ID_B),
         )
         assert_status(status, 200, body)
+        policy_d_id = body.get("id", policy_d_id)
 
         role_id = new_uuid()
         status, body = request(
@@ -640,6 +651,13 @@ class RBACScopeAPITest(unittest.TestCase):
         )
         assert_status(status, 403, body)
 
+        status, body = request("DELETE", f"/api/v1/managementRole/{role_id}", token="root-token")
+        assert_status(status, 200, body)
+        status, body = request("DELETE", f"/api/v1/managementPolicy/{policy_c_id}", token="root-token")
+        assert_status(status, 200, body)
+        status, body = request("DELETE", f"/api/v1/managementPolicy/{policy_d_id}", token="root-token")
+        assert_status(status, 200, body)
+
     def test_management_role_update_duplicate_check_uses_final_candidate(self) -> None:
         role_id = new_uuid()
         status, body = request(
@@ -649,6 +667,7 @@ class RBACScopeAPITest(unittest.TestCase):
             body=role_payload(role_id, ENTITY_C, POLICY_C, USER_ID_B),
         )
         assert_status(status, 200, body)
+        role_id = body.get("id", role_id)
 
         status, body = request(
             "PUT",
@@ -658,11 +677,14 @@ class RBACScopeAPITest(unittest.TestCase):
         )
         assert_status(status, 400, body)
 
+        status, body = request("DELETE", f"/api/v1/managementRole/{role_id}", token="root-token")
+        assert_status(status, 200, body)
+
     def test_lists_are_filtered_before_count_and_pagination(self) -> None:
         list_expectations = (
             ("/api/v1/entity", "entities", {ENTITY_A, ENTITY_C, ENTITY_D}, {ENTITY_B}),
-            ("/api/v1/managementPolicy", "managementPolicies", {POLICY_A, POLICY_C, POLICY_D}, {POLICY_B}),
-            ("/api/v1/managementRole", "roles", {ROLE_A, ROLE_C, ROLE_D}, {ROLE_B}),
+            ("/api/v1/managementPolicy", "managementPolicies", {POLICY_A, POLICY_C, POLICY_D, POLICY_CSR_A}, {POLICY_B}),
+            ("/api/v1/managementRole", "roles", {ROLE_A, ROLE_C, ROLE_D, ROLE_CSR_A}, {ROLE_B}),
         )
 
         for path, _, allowed, denied in list_expectations:

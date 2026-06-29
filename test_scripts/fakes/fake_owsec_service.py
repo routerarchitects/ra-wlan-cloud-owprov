@@ -12,9 +12,34 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 
-# ---------------------------------------------------------------------------
-# Deterministic RBAC token values (configurable via environment variables)
-# ---------------------------------------------------------------------------
+
+def load_seeded_env():
+    import os
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        for path in [
+            os.path.join(base_dir, "seeded_env.sh"),
+            os.path.join(base_dir, "..", "seeded_env.sh"),
+            os.path.join(base_dir, "..", "..", "seeded_env.sh"),
+            "seeded_env.sh"
+        ]:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("export "):
+                            parts = line[7:].split("=", 1)
+                            if len(parts) == 2:
+                                key, val = parts[0].strip(), parts[1].strip()
+                                if val.startswith('"') and val.endswith('"'):
+                                    val = val[1:-1]
+                                elif val.startswith("'") and val.endswith("'"):
+                                    val = val[1:-1]
+                                os.environ[key] = val
+    except Exception as e:
+        pass
+
+load_seeded_env()
 
 TOKEN_ROOT = os.getenv("OWPROV_ROOT_TOKEN", "root-token")
 TOKEN_A = os.getenv("OWPROV_TOKEN_A", "token-a")
