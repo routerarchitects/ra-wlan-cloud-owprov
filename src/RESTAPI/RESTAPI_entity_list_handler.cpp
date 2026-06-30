@@ -39,7 +39,8 @@ namespace OpenWifi {
 
 			Poco::JSON::Array collectedChildren;
 			for (const auto &childId : entity.children) {
-				CollectVisibleTree(handler, entityDB, childId, collectedChildren, false);
+				CollectVisibleTree(handler, entityDB, childId, collectedChildren,
+								   promoteHiddenChildren || selfVisible);
 			}
 
 			Poco::JSON::Array collectedVenues;
