@@ -38,7 +38,6 @@ from rbac_scope_harness import (  # noqa: E402
     USER_ID_B,
     USER_ID_C,
     USER_ID_CSR_A,
-    VENUE_C,
     assert_status,
     extract_ids,
     new_uuid,
@@ -169,6 +168,57 @@ class RBACScopeAPITest(unittest.TestCase):
 
         status, body = request("GET", f"/api/v1/operator/{OPERATOR_D}", token="token-c")
         assert_status(status, DENIED, body)
+
+    def test_operator_location_select_cannot_cross_operator_scope(self) -> None:
+        created_ids: list[str] = []
+
+        def create_operator_location(operator_id: str) -> str:
+            request_id = new_uuid()
+            status, body = request(
+                "POST",
+                f"/api/v1/operatorLocation/{request_id}",
+                token="root-token",
+                body={
+                    "name": f"operator-location-{request_id}",
+                    "type": "SERVICE",
+                    "operatorId": operator_id,
+                },
+            )
+            assert_status(status, 200, body)
+            location_id = body.get("id", request_id)
+            created_ids.append(location_id)
+            return location_id
+
+        try:
+            own_location_id = create_operator_location(OPERATOR_A)
+            sibling_location_id = create_operator_location(OPERATOR_B)
+
+            status, body = request(
+                "GET",
+                f"/api/v1/operatorLocation?operatorId={OPERATOR_A}&select={own_location_id}",
+                token="token-a",
+            )
+            assert_status(status, 200, body)
+            ids = extract_ids(body)
+            self.assertEqual(ids, {own_location_id})
+
+            status, body = request(
+                "GET",
+                f"/api/v1/operatorLocation?operatorId={OPERATOR_A}&select={sibling_location_id}",
+                token="token-a",
+            )
+            assert_status(status, 403, body)
+
+            status, body = request(
+                "GET",
+                f"/api/v1/operatorLocation?operatorId={OPERATOR_A}"
+                f"&select={own_location_id},{sibling_location_id}",
+                token="token-a",
+            )
+            assert_status(status, 403, body)
+        finally:
+            for location_id in created_ids:
+                request("DELETE", f"/api/v1/operatorLocation/{location_id}", token="root-token")
 
     def test_management_policy_api_scope(self) -> None:
         for entity_id in (ENTITY_C, ENTITY_D):
@@ -708,9 +758,64 @@ class RBACScopeAPITest(unittest.TestCase):
         assert_status(status, 200, body)
         self.assertEqual(body["venues"], [])
 
-        status, body = request("GET", "/api/v1/location?locationsForVenue=unknown-venue", token="token-a")
-        assert_status(status, 200, body)
-        self.assertEqual(body["locations"], [])
+    def test_locations_for_venue_is_authorized_by_venue_scope(self) -> None:
+        venue_id = new_uuid()
+        location_id = new_uuid()
+        location_name = f"location-{location_id}"
+
+        try:
+            status, body = request(
+                "POST",
+                f"/api/v1/location/{location_id}",
+                token="root-token",
+                body={
+                    "id": location_id,
+                    "name": location_name,
+                    "entity": ENTITY_C,
+                    "type": "SERVICE",
+                },
+            )
+            assert_status(status, 200, body)
+            location_id = body.get("id", location_id)
+
+            status, body = request(
+                "POST",
+                f"/api/v1/venue/{venue_id}",
+                token="root-token",
+                body={
+                    "id": venue_id,
+                    "name": f"venue-{venue_id}",
+                    "entity": ENTITY_C,
+                },
+            )
+            assert_status(status, 200, body)
+            venue_id = body.get("id", venue_id)
+
+            status, body = request(
+                "GET", f"/api/v1/location?locationsForVenue={venue_id}", token="token-a"
+            )
+            assert_status(status, 200, body)
+            self.assertIn(location_id, {item.get("uuid") for item in body.get("locations", [])})
+
+            status, body = request(
+                "GET", f"/api/v1/location?locationsForVenue={venue_id}", token="root-token"
+            )
+            assert_status(status, 200, body)
+            self.assertIn(location_id, {item.get("uuid") for item in body.get("locations", [])})
+
+            status, body = request(
+                "GET", f"/api/v1/location?locationsForVenue={venue_id}", token="token-b"
+            )
+            assert_status(status, 403, body)
+        finally:
+            request("DELETE", f"/api/v1/venue/{venue_id}", token="root-token")
+            request("DELETE", f"/api/v1/location/{location_id}", token="root-token")
+
+    def test_locations_for_venue_unknown_venue_returns_not_found(self) -> None:
+        status, body = request(
+            "GET", "/api/v1/location?locationsForVenue=unknown-venue", token="token-a"
+        )
+        assert_status(status, 404, body)
 
 
 if __name__ == "__main__":

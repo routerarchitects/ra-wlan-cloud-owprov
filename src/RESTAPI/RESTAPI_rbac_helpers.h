@@ -50,6 +50,15 @@ namespace OpenWifi::RBAC {
 		RESTAPI::Errors::msg badRequestError
 	);
 
+	bool ResolveInventoryScope(const std::string &serialNumber, TargetScope &scope);
+	bool ResolveConfigurationOverrideScope(const std::string &serialNumber, TargetScope &scope);
+	bool ResolveManagementPolicyScope(const std::string &policyId, TargetScope &scope);
+	bool ResolveConfigurationScope(const std::string &uuid, TargetScope &scope);
+	bool ResolveContactScope(const std::string &uuid, TargetScope &scope);
+	bool ResolveLocationScope(const std::string &uuid, TargetScope &scope);
+	bool ResolveVariableScope(const std::string &uuid, TargetScope &scope);
+	bool ResolveMapScope(const std::string &uuid, TargetScope &scope);
+
 	bool HasAccessForUser(const std::string &userId, const std::string &resourceType,
 						  const std::string &action, const TargetScope &targetScope);
 } // namespace OpenWifi::RBAC

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <algorithm>
+#include <type_traits>
 #include <utility>
 
 #include "Poco/StringTokenizer.h"
@@ -243,6 +244,11 @@ namespace OpenWifi {
 		return true;
 	}
 
+	template <typename T, typename = void> struct HasSubscriberId : std::false_type {};
+	template <typename T>
+	struct HasSubscriberId<T, std::void_t<decltype(std::declval<T>().subscriberId)>>
+		: std::true_type {};
+
 	typedef std::tuple<std::string, std::string, std::string> triplet_t;
 
 	inline void AddLocationTriplet(const std::string &id, std::vector<triplet_t> &IDs) {
@@ -293,34 +299,6 @@ namespace OpenWifi {
 
 		typedef typename DB::RecordVec RecVec;
 		typedef typename DB::RecordName RecType;
-
-		auto LocationsForVenue = R.GetParameter("locationsForVenue", "");
-		if (!LocationsForVenue.empty()) {
-			ProvObjects::Venue RequestedVenue;
-			if (!DBInstance.GetRecord("id", LocationsForVenue, RequestedVenue)) {
-				return R.NotFound();
-			}
-			if (!RBAC::RequireAccess(
-					R,
-					"venue",
-					"READ",
-					RBAC::TargetScope{RequestedVenue.entity, LocationsForVenue})) {
-				return;
-			}
-			std::vector<triplet_t> IDs;
-			GetLocationsForVenue(LocationsForVenue, IDs);
-			Poco::JSON::Array A;
-			for (const auto &[name, description, uuid] : IDs) {
-				Poco::JSON::Object O;
-				O.set("name", name);
-				O.set("description", description);
-				O.set("uuid", uuid);
-				A.add(O);
-			}
-			Poco::JSON::Object Answer;
-			Answer.set("locations", A);
-			return R.ReturnObject(Answer);
-		}
 
 		auto filterVisible = [&](RecVec &entries) {
 			if (RBAC::IsRootUser(R)) {
@@ -427,7 +405,31 @@ namespace OpenWifi {
 		}
 
 		if (!R.QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DB), RecType>(BlockName, DB, R);
+			Poco::JSON::Array ObjArr;
+			for (const auto &i : R.SelectedRecords()) {
+				RecType E;
+				if (!DB.GetRecord("id", i, E)) {
+					return R.BadRequest(RESTAPI::Errors::UnknownId);
+				}
+				if (E.operatorId != OperatorId) {
+					return R.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+				if constexpr (HasSubscriberId<RecType>::value) {
+					if (!subscriberId.empty() && E.subscriberId != subscriberId) {
+						return R.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+					}
+				} else if (!subscriberId.empty()) {
+					return R.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+				Poco::JSON::Object Obj;
+				E.to_json(Obj);
+				if (R.NeedAdditionalInfo())
+					AddExtendedInfo(E, Obj);
+				ObjArr.add(Obj);
+			}
+			Poco::JSON::Object Answer;
+			Answer.set(BlockName, ObjArr);
+			return R.ReturnObject(Answer);
 		}
 
 		RecVec Entries;

@@ -36,6 +36,14 @@ namespace OpenWifi {
 			!DB_.GetRecord(RESTAPI::Protocol::SERIALNUMBER, SerialNumber, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveInventoryScope(SerialNumber, scope)) {
+			if (!RBAC::RequireAccess(*this, "inventory", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 		poco_debug(Logger(), fmt::format("{},{}: Retrieving inventory information.",
 										 Existing.serialNumber, Existing.info.id));
 
@@ -141,6 +149,14 @@ namespace OpenWifi {
 			!DB_.GetRecord(RESTAPI::Protocol::SERIALNUMBER, SerialNumber, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveInventoryScope(SerialNumber, scope)) {
+			if (!RBAC::RequireAccess(*this, "inventory", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		const auto subscriberAssociationExists =
 			!Existing.subscriber.empty() ||
@@ -209,6 +225,33 @@ namespace OpenWifi {
 		ProvObjects::InventoryTag NewObject;
 		if (!NewObject.from_json(RawObject)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		RBAC::TargetScope scope;
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue venue;
+			if (StorageService()->VenueDB().GetRecord("id", NewObject.venue, venue) &&
+				!venue.entity.empty()) {
+				scope.entity = venue.entity;
+				scope.venue = venue.info.id;
+			}
+		} else if (!NewObject.entity.empty()) {
+			scope.entity = NewObject.entity;
+		} else if (!NewObject.location.empty()) {
+			RBAC::ResolveLocationScope(NewObject.location, scope);
+		} else if (!NewObject.contact.empty()) {
+			RBAC::ResolveContactScope(NewObject.contact, scope);
+		} else if (!NewObject.deviceConfiguration.empty()) {
+			RBAC::ResolveConfigurationScope(NewObject.deviceConfiguration, scope);
+		} else if (RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope)) {
+			// scope resolved from the attached policy
+		}
+		if (!scope.entity.empty() || !scope.venue.empty()) {
+			if (!RBAC::RequireAccess(*this, "inventory", "CREATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		NormalizeMac(NewObject.serialNumber);
@@ -323,6 +366,14 @@ namespace OpenWifi {
 		if (SerialNumber.empty() ||
 			!DB_.GetRecord(RESTAPI::Protocol::SERIALNUMBER, SerialNumber, Existing)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveInventoryScope(SerialNumber, scope)) {
+			if (!RBAC::RequireAccess(*this, "inventory", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		std::string previous_venue = Existing.venue;

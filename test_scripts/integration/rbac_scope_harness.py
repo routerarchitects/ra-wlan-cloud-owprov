@@ -223,6 +223,7 @@ class FakeOWProv:
             LOCATION_D: {"id": LOCATION_D, "name": "location-D", "venue": VENUE_D, "entity": ENTITY_D},
             LOCATION_E: {"id": LOCATION_E, "name": "location-E", "venue": VENUE_E, "entity": ENTITY_E},
         }
+        self.operator_locations: dict[str, dict[str, Any]] = {}
         self.policies = {
             POLICY_A: self._policy(POLICY_A, ENTITY_A),
             POLICY_B: self._policy(POLICY_B, ENTITY_B),
@@ -329,6 +330,8 @@ class FakeOWProv:
                 return self._venue(method, resource_id, query, user)
             if resource == "location":
                 return self._location(method, query, user)
+            if resource == "operatorLocation":
+                return self._operator_location(method, resource_id, query, user, body or {})
         except ValueError:
             return 400, {"errorCode": 400, "errorDetails": "malformed request"}
 
@@ -698,13 +701,105 @@ class FakeOWProv:
             return 404, {"errorCode": 404}
         venue_id = query.get("locationsForVenue", [""])[0]
         if not venue_id:
-            return 400, {"errorCode": 400}
+            visible = set(self._visible_entities(user))
+            return 200, {
+                "locations": [
+                    deepcopy(location)
+                    for location in self.locations.values()
+                    if location["entity"] in visible
+                ]
+            }
         if venue_id not in self.venues:
             return 404, {"errorCode": 404}
         venue = self.venues[venue_id]
         if not self._can(user, "venue", "READ", venue["entity"]):
             return 403, {"errorCode": 403}
-        return 200, {"locations": [deepcopy(loc) for loc in self.locations.values() if loc["venue"] == venue_id]}
+        return 200, {
+            "locations": [
+                {
+                    "name": location["name"],
+                    "description": location.get("description", ""),
+                    "uuid": location["id"],
+                }
+                for location in self.locations.values()
+                if location.get("venue") == venue_id or location["entity"] == venue["entity"]
+            ]
+        }
+
+    def _operator_location(
+        self,
+        method: str,
+        location_id: str,
+        query: dict[str, list[str]],
+        user: FakeUser,
+        body: dict[str, Any],
+    ) -> tuple[int, Any]:
+        if method == "POST":
+            operator_id = body.get("operatorId", "")
+            if operator_id not in self.operators:
+                return 400, {"errorCode": 400}
+            if not self._can(user, "operator", "CREATE", self.operators[operator_id]["entityId"]):
+                return 403, {"errorCode": 403}
+            new_id = body.get("id") or location_id or f"operator-location-{len(self.operator_locations) + 1}"
+            self.operator_locations[new_id] = {
+                "id": new_id,
+                "name": body.get("name", new_id),
+                "type": body.get("type", "SERVICE"),
+                "operatorId": operator_id,
+                "subscriberDeviceId": body.get("subscriberDeviceId", ""),
+                "managementPolicy": body.get("managementPolicy", ""),
+            }
+            return 200, deepcopy(self.operator_locations[new_id])
+
+        if method == "DELETE":
+            if location_id not in self.operator_locations:
+                return 404, {"errorCode": 404}
+            location = self.operator_locations[location_id]
+            operator_id = location["operatorId"]
+            if not self._can(user, "operator", "DELETE", self.operators[operator_id]["entityId"]):
+                return 403, {"errorCode": 403}
+            del self.operator_locations[location_id]
+            return 200, {}
+
+        if method == "GET" and location_id:
+            if location_id not in self.operator_locations:
+                return 404, {"errorCode": 404}
+            location = self.operator_locations[location_id]
+            operator_id = location["operatorId"]
+            if not self._can(user, "operator", "READ", self.operators[operator_id]["entityId"]):
+                return 403, {"errorCode": 403}
+            return 200, deepcopy(location)
+
+        if method != "GET":
+            return 404, {"errorCode": 404}
+
+        operator_id = query.get("operatorId", [""])[0]
+        if operator_id not in self.operators:
+            return 400, {"errorCode": 400}
+        if not self._can(user, "operator", "LIST", self.operators[operator_id]["entityId"]):
+            return 403, {"errorCode": 403}
+
+        selected = []
+        for value in query.get("select", []):
+            selected.extend(item for item in value.split(",") if item)
+        if selected:
+            locations = []
+            for selected_id in selected:
+                if selected_id not in self.operator_locations:
+                    return 400, {"errorCode": 400}
+                location = self.operator_locations[selected_id]
+                if location["operatorId"] != operator_id:
+                    return 403, {"errorCode": 403}
+                locations.append(deepcopy(location))
+            return 200, {"locations": locations}
+
+        return 200, {
+            "locations": [
+                deepcopy(location)
+                for location in self.operator_locations.values()
+                if location["operatorId"] == operator_id
+            ]
+        }
 
     @staticmethod
     def _unsafe_filter(query: dict[str, list[str]]) -> bool:

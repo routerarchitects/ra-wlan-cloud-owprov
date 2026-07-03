@@ -17,6 +17,14 @@ namespace OpenWifi {
 		if (!DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveVariableScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "variable", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		Poco::JSON::Object Answer;
 		if (QB_.AdditionalInfo)
@@ -34,6 +42,14 @@ namespace OpenWifi {
 		VariablesDB::RecordName Existing;
 		if (!DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveVariableScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "variable", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		if (!Existing.configurations.empty()) {
@@ -60,6 +76,29 @@ namespace OpenWifi {
 		VariablesDB::RecordName NewObject;
 		if (!NewObject.from_json(RawObj)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		RBAC::TargetScope scope;
+		if (!NewObject.entity.empty()) {
+			scope.entity = NewObject.entity;
+		} else if (!NewObject.venue.empty()) {
+			ProvObjects::Venue venue;
+			if (StorageService()->VenueDB().GetRecord("id", NewObject.venue, venue) &&
+				!venue.entity.empty()) {
+				scope.entity = venue.entity;
+				scope.venue = venue.info.id;
+			}
+		} else if (!NewObject.inventory.empty()) {
+			RBAC::ResolveInventoryScope(NewObject.inventory, scope);
+		} else if (RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope)) {
+			// scope resolved from the attached policy
+		}
+		if (!scope.entity.empty() || !scope.venue.empty()) {
+			if (!RBAC::RequireAccess(*this, "variable", "CREATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		if (!NewObject.entity.empty() &&
@@ -107,6 +146,14 @@ namespace OpenWifi {
 		VariablesDB::RecordName Existing;
 		if (!StorageService()->VariablesDB().GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveVariableScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "variable", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		const auto &RawObject = ParsedBody_;

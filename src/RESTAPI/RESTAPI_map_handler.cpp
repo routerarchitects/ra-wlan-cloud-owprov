@@ -19,6 +19,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveMapScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "map", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		Poco::JSON::Object Answer;
 		if (QB_.AdditionalInfo)
@@ -33,10 +41,12 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
 			return NotFound();
 		}
-
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT &&
-			UserInfo_.userinfo.userRole != SecurityObjects::ADMIN &&
-			UserInfo_.userinfo.id != Existing.creator) {
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveMapScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "map", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
 			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
@@ -64,6 +74,27 @@ namespace OpenWifi {
 		ProvObjects::Map NewObject;
 		if (!NewObject.from_json(RawObject)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		RBAC::TargetScope scope;
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue venue;
+			if (StorageService()->VenueDB().GetRecord("id", NewObject.venue, venue) &&
+				!venue.entity.empty()) {
+				scope.entity = venue.entity;
+				scope.venue = venue.info.id;
+			}
+		} else if (!NewObject.entity.empty()) {
+			scope.entity = NewObject.entity;
+		} else if (RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope)) {
+			// scope resolved from the attached policy
+		}
+		if (!scope.entity.empty() || !scope.venue.empty()) {
+			if (!RBAC::RequireAccess(*this, "map", "CREATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		if (!CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info)) {
@@ -110,6 +141,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveMapScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "map", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		const auto &RawObject = ParsedBody_;
 		ProvObjects::Map NewObject;
@@ -119,34 +158,6 @@ namespace OpenWifi {
 
 		if (!UpdateObjectInfo(RawObject, UserInfo_.userinfo, Existing.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
-		}
-
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT &&
-			UserInfo_.userinfo.userRole != SecurityObjects::ADMIN &&
-			UserInfo_.userinfo.id != Existing.creator) {
-			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
-		}
-
-		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT ||
-			UserInfo_.userinfo.userRole == SecurityObjects::ADMIN) {
-
-		} else if (Existing.creator != UserInfo_.userinfo.id) {
-			if (Existing.visibility == "private") {
-				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
-			}
-			if (Existing.visibility == "select") {
-				bool allowed = false;
-				for (const auto &i : Existing.access.list) {
-					for (const auto &j : i.users.list) {
-						if (j == UserInfo_.userinfo.id) {
-							allowed = true;
-						}
-					}
-				}
-				if (!allowed) {
-					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
-				}
-			}
 		}
 
 		std::string FromPolicy, ToPolicy;
