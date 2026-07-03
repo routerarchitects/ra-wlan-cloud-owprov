@@ -65,7 +65,11 @@ namespace OpenWifi {
 			Initialized_ = true;
 			std::vector<std::string> DeviceTypes;
 			AppServiceRegistry().Get("deviceTypes", DeviceTypes);
-            std::for_each(DeviceTypes.begin(),DeviceTypes.end(),[&](const std::string &s){ DeviceTypes_.insert(s);});
+			std::for_each(DeviceTypes.begin(),DeviceTypes.end(),[&](const std::string &s){ DeviceTypes_.insert(s);});
+			DeviceTypes_.insert("tplink_archer-ax23-v1");
+			DeviceTypes_.insert("tplink_archer-ax23-v1-olg");
+			DeviceTypes_.insert("asus_rt-ax53u");
+			DeviceTypes_.insert("asus_rt-ax53u-olg");
 		}
 
 		inline bool UpdateDeviceTypes() {

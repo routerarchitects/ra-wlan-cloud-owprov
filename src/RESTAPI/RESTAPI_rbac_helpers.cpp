@@ -390,6 +390,110 @@ namespace OpenWifi::RBAC {
 
 			return TargetInsideActorOperatorAccess(actorOperator, targetEntityId);
 		}
+
+		bool ResolveScopeFromVenue(const std::string &venueId, TargetScope &scope) {
+			if (venueId.empty()) {
+				return false;
+			}
+
+			ProvObjects::Venue venue;
+			if (!StorageService()->VenueDB().GetRecord("id", venueId, venue)) {
+				return false;
+			}
+			if (venue.entity.empty()) {
+				return false;
+			}
+
+			scope.entity = venue.entity;
+			scope.venue = venue.info.id;
+			return true;
+		}
+
+		bool ResolveScopeFromInventoryRecord(const ProvObjects::InventoryTag &inventory,
+											TargetScope &scope) {
+			if (!inventory.venue.empty() && ResolveScopeFromVenue(inventory.venue, scope)) {
+				return true;
+			}
+
+			if (!inventory.entity.empty()) {
+				scope.entity = inventory.entity;
+				scope.venue.clear();
+				return true;
+			}
+
+			return false;
+		}
+
+		bool ResolveScopeFromManagementPolicy(const std::string &policyId, TargetScope &scope) {
+			if (policyId.empty()) {
+				return false;
+			}
+
+			ProvObjects::ManagementPolicy policy;
+			if (!StorageService()->PolicyDB().GetRecord("id", policyId, policy)) {
+				return false;
+			}
+
+			if (!policy.venue.empty() && ResolveScopeFromVenue(policy.venue, scope)) {
+				return true;
+			}
+
+			if (!policy.entity.empty()) {
+				scope.entity = policy.entity;
+				scope.venue.clear();
+				return true;
+			}
+
+			return false;
+		}
+
+		template <typename MatchFn>
+		bool ResolveScopeFromInventoryMatches(MatchFn &&match, TargetScope &scope) {
+			bool found = false;
+			StorageService()->InventoryDB().Iterate(
+				[&](const ProvObjects::InventoryTag &inventory) {
+					if (!match(inventory)) {
+						return true;
+					}
+					found = ResolveScopeFromInventoryRecord(inventory, scope);
+					return !found;
+				});
+			return found;
+		}
+
+		template <typename EntityMatchFn, typename VenueMatchFn>
+		bool ResolveScopeFromEntityVenueMatches(EntityMatchFn &&entityMatch,
+												VenueMatchFn &&venueMatch,
+												TargetScope &scope) {
+			bool found = false;
+
+			StorageService()->EntityDB().Iterate([&](const ProvObjects::Entity &entity) {
+				if (!entityMatch(entity)) {
+					return true;
+				}
+				scope.entity = entity.info.id;
+				scope.venue.clear();
+				found = true;
+				return false;
+			});
+			if (found) {
+				return true;
+			}
+
+			StorageService()->VenueDB().Iterate([&](const ProvObjects::Venue &venue) {
+				if (!venueMatch(venue)) {
+					return true;
+				}
+				if (venue.entity.empty()) {
+					return true;
+				}
+				scope.entity = venue.entity;
+				scope.venue = venue.info.id;
+				found = true;
+				return false;
+			});
+			return found;
+		}
 	} // namespace
 
 	bool IsRootUser(const RESTAPIHandler &handler) {
@@ -476,8 +580,257 @@ namespace OpenWifi::RBAC {
 					return false;
 				}
 				return true;
-			});
+		});
 		return found;
+	}
+
+	bool ResolveInventoryScope(const std::string &serialNumber, TargetScope &scope) {
+		scope = {};
+		if (serialNumber.empty()) {
+			return false;
+		}
+
+		ProvObjects::InventoryTag inventory;
+		if (!StorageService()->InventoryDB().GetRecord("serialNumber", serialNumber, inventory)) {
+			return false;
+		}
+
+		if (ResolveScopeFromInventoryRecord(inventory, scope)) {
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(inventory.managementPolicy, scope)) {
+			return true;
+		}
+
+		return ResolveScopeFromEntityVenueMatches(
+			[&](const ProvObjects::Entity &entity) {
+				return Contains(entity.devices, inventory.info.id);
+			},
+			[&](const ProvObjects::Venue &venue) { return Contains(venue.devices, inventory.info.id); },
+			scope);
+	}
+
+	bool ResolveConfigurationOverrideScope(const std::string &serialNumber, TargetScope &scope) {
+		scope = {};
+		if (serialNumber.empty()) {
+			return false;
+		}
+
+		ProvObjects::ConfigurationOverrideList overrides;
+		if (!StorageService()->OverridesDB().GetRecord("serialNumber", serialNumber, overrides)) {
+			return false;
+		}
+
+		if (ResolveScopeFromManagementPolicy(overrides.managementPolicy, scope)) {
+			return true;
+		}
+
+		return ResolveInventoryScope(serialNumber, scope);
+	}
+
+	bool ResolveManagementPolicyScope(const std::string &policyId, TargetScope &scope) {
+		scope = {};
+		return ResolveScopeFromManagementPolicy(policyId, scope);
+	}
+
+	bool ResolveConfigurationScope(const std::string &uuid, TargetScope &scope) {
+		scope = {};
+		if (uuid.empty()) {
+			return false;
+		}
+
+		ProvObjects::DeviceConfiguration configuration;
+		if (!StorageService()->ConfigurationDB().GetRecord("id", uuid, configuration)) {
+			return false;
+		}
+
+		if (!configuration.venue.empty() && ResolveScopeFromVenue(configuration.venue, scope)) {
+			return true;
+		}
+
+		if (!configuration.entity.empty()) {
+			scope.entity = configuration.entity;
+			scope.venue.clear();
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(configuration.managementPolicy, scope)) {
+			return true;
+		}
+
+		if (ResolveScopeFromInventoryMatches(
+				[&](const ProvObjects::InventoryTag &inventory) {
+					return inventory.deviceConfiguration == configuration.info.id;
+				},
+				scope)) {
+			return true;
+		}
+
+		return ResolveScopeFromEntityVenueMatches(
+			[&](const ProvObjects::Entity &entity) {
+				return Contains(entity.configurations, configuration.info.id);
+			},
+			[&](const ProvObjects::Venue &venue) {
+				return Contains(venue.configurations, configuration.info.id);
+			},
+			scope);
+	}
+
+	bool ResolveContactScope(const std::string &uuid, TargetScope &scope) {
+		scope = {};
+		if (uuid.empty()) {
+			return false;
+		}
+
+		ProvObjects::Contact contact;
+		if (!StorageService()->ContactDB().GetRecord("id", uuid, contact)) {
+			return false;
+		}
+
+		if (!contact.entity.empty()) {
+			scope.entity = contact.entity;
+			scope.venue.clear();
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(contact.managementPolicy, scope)) {
+			return true;
+		}
+
+		if (ResolveScopeFromInventoryMatches(
+				[&](const ProvObjects::InventoryTag &inventory) {
+					return inventory.contact == contact.info.id;
+				},
+				scope)) {
+			return true;
+		}
+
+		return ResolveScopeFromEntityVenueMatches(
+			[&](const ProvObjects::Entity &entity) {
+				return Contains(entity.contacts, contact.info.id);
+			},
+			[&](const ProvObjects::Venue &venue) {
+				return Contains(venue.contacts, contact.info.id);
+			},
+			scope);
+	}
+
+	bool ResolveLocationScope(const std::string &uuid, TargetScope &scope) {
+		scope = {};
+		if (uuid.empty()) {
+			return false;
+		}
+
+		ProvObjects::Location location;
+		if (!StorageService()->LocationDB().GetRecord("id", uuid, location)) {
+			return false;
+		}
+
+		if (!location.entity.empty()) {
+			scope.entity = location.entity;
+			scope.venue.clear();
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(location.managementPolicy, scope)) {
+			return true;
+		}
+
+		if (ResolveScopeFromInventoryMatches(
+				[&](const ProvObjects::InventoryTag &inventory) {
+					return inventory.location == location.info.id;
+				},
+				scope)) {
+			return true;
+		}
+
+		return ResolveScopeFromEntityVenueMatches(
+			[&](const ProvObjects::Entity &entity) {
+				return Contains(entity.locations, location.info.id);
+			},
+			[&](const ProvObjects::Venue &venue) { return venue.location == location.info.id; },
+			scope);
+	}
+
+	bool ResolveVariableScope(const std::string &uuid, TargetScope &scope) {
+		scope = {};
+		if (uuid.empty()) {
+			return false;
+		}
+
+		ProvObjects::VariableBlock variable;
+		if (!StorageService()->VariablesDB().GetRecord("id", uuid, variable)) {
+			return false;
+		}
+
+		if (!variable.venue.empty() && ResolveScopeFromVenue(variable.venue, scope)) {
+			return true;
+		}
+
+		if (!variable.entity.empty()) {
+			scope.entity = variable.entity;
+			scope.venue.clear();
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(variable.managementPolicy, scope)) {
+			return true;
+		}
+
+		if (!variable.inventory.empty() && ResolveInventoryScope(variable.inventory, scope)) {
+			return true;
+		}
+
+		if (ResolveScopeFromEntityVenueMatches(
+				[&](const ProvObjects::Entity &entity) {
+					return Contains(entity.variables, variable.info.id);
+				},
+				[&](const ProvObjects::Venue &venue) { return Contains(venue.variables, variable.info.id); },
+				scope)) {
+			return true;
+		}
+
+		bool found = false;
+		StorageService()->ConfigurationDB().Iterate([&](const ProvObjects::DeviceConfiguration &configuration) {
+			if (!Contains(configuration.variables, variable.info.id)) {
+				return true;
+			}
+			found = ResolveConfigurationScope(configuration.info.id, scope);
+			return !found;
+		});
+		return found;
+	}
+
+	bool ResolveMapScope(const std::string &uuid, TargetScope &scope) {
+		scope = {};
+		if (uuid.empty()) {
+			return false;
+		}
+
+		ProvObjects::Map map;
+		if (!StorageService()->MapDB().GetRecord("id", uuid, map)) {
+			return false;
+		}
+
+		if (!map.venue.empty() && ResolveScopeFromVenue(map.venue, scope)) {
+			return true;
+		}
+
+		if (!map.entity.empty()) {
+			scope.entity = map.entity;
+			scope.venue.clear();
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(map.managementPolicy, scope)) {
+			return true;
+		}
+
+		return ResolveScopeFromEntityVenueMatches(
+			[&](const ProvObjects::Entity &entity) { return Contains(entity.maps, map.info.id); },
+			[&](const ProvObjects::Venue &venue) { return Contains(venue.maps, map.info.id); },
+			scope);
 	}
 
 	bool HasAccess(RESTAPIHandler &handler, const std::string &resourceType,

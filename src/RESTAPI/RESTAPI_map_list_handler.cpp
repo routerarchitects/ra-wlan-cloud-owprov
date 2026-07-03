@@ -10,15 +10,45 @@
 namespace OpenWifi {
 	void RESTAPI_map_list_handler::DoGet() {
 		const char *BlockName{"list"};
+		auto allow = [&](const auto &record) {
+			RBAC::TargetScope scope;
+			if (!RBAC::ResolveMapScope(record.info.id, scope)) {
+				return RBAC::IsRootUser(*this);
+			}
+			return RBAC::HasAccess(*this, "map", "LIST", scope) ||
+				   RBAC::HasAccess(*this, "map", "READ", scope);
+		};
+		auto collect = [&](auto &&predicate) {
+			MapDB::RecordVec maps;
+			DB_.Iterate([&](const MapDB::RecordName &record) {
+				if (predicate(record) && allow(record)) {
+					maps.push_back(record);
+				}
+				return true;
+			});
+			return maps;
+		};
 		if (GetBoolParameter("myMaps", false)) {
-			auto where = DB_.OP("creator", ORM::EQ, UserInfo_.userinfo.id);
-			MapDB::RecordVec Maps;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Maps, where);
-			return MakeJSONObjectArray(BlockName, Maps, *this);
+			auto Maps = collect([&](const auto &record) { return record.creator == UserInfo_.userinfo.id; });
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(Maps.size());
+			}
+			return MakeJSONObjectArray(BlockName,
+									   RESTAPI::ApplyPagination(Maps, QB_.Offset, QB_.Limit), *this);
 		} else if (GetBoolParameter("sharedWithMe", false)) {
-
+			auto Maps = collect([](const auto &) { return true; });
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(Maps.size());
+			}
+			return MakeJSONObjectArray(BlockName,
+									   RESTAPI::ApplyPagination(Maps, QB_.Offset, QB_.Limit), *this);
 		} else {
-			return ListHandler<MapDB>(BlockName, DB_, *this);
+			auto Maps = collect([](const auto &) { return true; });
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(Maps.size());
+			}
+			return MakeJSONObjectArray(BlockName,
+									   RESTAPI::ApplyPagination(Maps, QB_.Offset, QB_.Limit), *this);
 		}
 	}
 } // namespace OpenWifi

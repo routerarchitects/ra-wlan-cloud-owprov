@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "RESTAPI_overrides_handler.h"
+#include "RESTAPI/RESTAPI_db_helpers.h"
 #include "framework/utils.h"
 
 namespace OpenWifi {
@@ -18,6 +19,14 @@ namespace OpenWifi {
 		ProvObjects::ConfigurationOverrideList ExistingObject;
 		if (!DB_.GetRecord("serialNumber", SerialNumber, ExistingObject)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveConfigurationOverrideScope(SerialNumber, scope)) {
+			if (!RBAC::RequireAccess(*this, "configurationOverride", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 		Poco::JSON::Object Answer;
 		ExistingObject.to_json(Answer);
@@ -40,6 +49,14 @@ namespace OpenWifi {
 		ProvObjects::ConfigurationOverrideList ExistingObject;
 		if (!DB_.GetRecord("serialNumber", SerialNumber, ExistingObject)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveConfigurationOverrideScope(SerialNumber, scope)) {
+			if (!RBAC::RequireAccess(*this, "configurationOverride", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		ExistingObject.overrides.erase(
@@ -73,7 +90,26 @@ namespace OpenWifi {
 		}
 
 		ProvObjects::ConfigurationOverrideList ExistingObject;
-		if (!DB_.GetRecord("serialNumber", SerialNumber, ExistingObject)) {
+		RBAC::TargetScope scope;
+		bool hasExisting = DB_.GetRecord("serialNumber", SerialNumber, ExistingObject);
+		bool scopeResolved = false;
+		if (hasExisting) {
+			scopeResolved = RBAC::ResolveConfigurationOverrideScope(SerialNumber, scope);
+		} else {
+			scopeResolved = RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope);
+			if (!scopeResolved) {
+				scopeResolved = RBAC::ResolveInventoryScope(SerialNumber, scope);
+			}
+		}
+		if (scopeResolved) {
+			if (!RBAC::RequireAccess(*this, "configurationOverride", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+
+		if (!hasExisting) {
 			ExistingObject.serialNumber = SerialNumber;
 			DB_.CreateRecord(ExistingObject);
 		} else {

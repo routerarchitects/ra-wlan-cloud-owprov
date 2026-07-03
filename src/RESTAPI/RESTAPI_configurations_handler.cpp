@@ -31,6 +31,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveConfigurationScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "configuration", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		Poco::JSON::Object Answer;
 		std::string Arg;
@@ -68,6 +76,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveConfigurationScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "configuration", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		if (!Existing.inUse.empty()) {
 			return BadRequest(RESTAPI::Errors::StillInUse);
@@ -92,6 +108,14 @@ namespace OpenWifi {
 		if (UUID.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingUUID);
 		}
+		RBAC::TargetScope uuidScope;
+		if (RBAC::ResolveConfigurationScope(UUID, uuidScope)) {
+			if (!RBAC::RequireAccess(*this, "configuration", "CREATE", uuidScope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		const auto &RawObject = ParsedBody_;
 		std::string Arg;
@@ -113,6 +137,27 @@ namespace OpenWifi {
 		ProvObjects::DeviceConfiguration NewObject;
 		if (!NewObject.from_json(RawObject)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		RBAC::TargetScope scope;
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue venue;
+			if (StorageService()->VenueDB().GetRecord("id", NewObject.venue, venue) &&
+				!venue.entity.empty()) {
+				scope.entity = venue.entity;
+				scope.venue = venue.info.id;
+			}
+		} else if (!NewObject.entity.empty()) {
+			scope.entity = NewObject.entity;
+		} else if (RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope)) {
+			// scope resolved from the attached policy
+		}
+		if (!scope.entity.empty() || !scope.venue.empty()) {
+			if (!RBAC::RequireAccess(*this, "configuration", "CREATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		if ((RawObject->has("deviceRules") && !ValidDeviceRules(NewObject.deviceRules, *this))) {
@@ -191,12 +236,21 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveConfigurationScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "configuration", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		ProvObjects::DeviceConfiguration NewObject;
 		const auto &RawObject = ParsedBody_;
 		if (!NewObject.from_json(RawObject)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 		}
+
 
 		if ((RawObject->has("deviceRules") && !ValidDeviceRules(NewObject.deviceRules, *this))) {
 			return;
