@@ -50,11 +50,21 @@ namespace OpenWifi {
 
 		if (!cert_file_.empty() && !key_file_.empty()) {
 			Poco::Crypto::X509Certificate Cert(cert_file_);
-			Poco::Crypto::X509Certificate Root(root_ca_);
-
 			Context->useCertificate(Cert);
-			Context->addChainCertificate(Root);
-			Context->addCertificateAuthority(Root);
+
+			if (!root_ca_.empty()) {
+				try {
+					std::vector<Poco::Crypto::X509Certificate> RootCerts =
+						Poco::Net::X509Certificate::readPEM(root_ca_);
+					for (const auto &rc : RootCerts) {
+						Context->addChainCertificate(rc);
+						Context->addCertificateAuthority(rc);
+					}
+				} catch (const Poco::Exception &E) {
+					L.fatal(fmt::format("Failed to load CA certificate chain from {}: {}", root_ca_, E.displayText()));
+					throw;
+				}
+			}
 
 			if (level_ == Poco::Net::Context::VERIFY_STRICT) {
 				if (issuer_cert_file_.empty()) {
