@@ -12,6 +12,7 @@
 #include "Poco/Net/HTTPServerResponse.h"
 #include "Poco/String.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "SerialNumberCache.h"
 #include "framework/RESTAPI_utils.h"
 #include "framework/utils.h"
@@ -22,6 +23,47 @@
 #include <set>
 
 namespace OpenWifi {
+	namespace {
+		bool RequireSubscriberDeviceAccess(RESTAPIHandler &handler,
+										   const ProvObjects::SubscriberDevice &device,
+										   const std::string &action) {
+			RBAC::TargetScope scope;
+			if (RBAC::ResolveSubscriberDeviceScope(device, scope)) {
+				return RBAC::RequireAccess(handler, "subscriberDevice", action, scope);
+			}
+			if (RBAC::IsRootUser(handler)) {
+				return true;
+			}
+			handler.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			return false;
+		}
+
+		bool SameScope(const RBAC::TargetScope &lhs, const RBAC::TargetScope &rhs) {
+			return lhs.entity == rhs.entity && lhs.venue == rhs.venue;
+		}
+
+		bool RequireSubscriberDeviceCandidateAccess(
+			RESTAPIHandler &handler,
+			const ProvObjects::SubscriberDevice &existingDevice,
+			const ProvObjects::SubscriberDevice &candidateDevice,
+			const std::string &action) {
+			if (!RequireSubscriberDeviceAccess(handler, existingDevice, action)) {
+				return false;
+			}
+
+			RBAC::TargetScope existingScope;
+			RBAC::TargetScope candidateScope;
+			const auto existingResolved =
+				RBAC::ResolveSubscriberDeviceScope(existingDevice, existingScope);
+			const auto candidateResolved =
+				RBAC::ResolveSubscriberDeviceScope(candidateDevice, candidateScope);
+			if (existingResolved && candidateResolved && SameScope(existingScope, candidateScope)) {
+				return true;
+			}
+			return RequireSubscriberDeviceAccess(handler, candidateDevice, action);
+		}
+	} // namespace
+
 	void RESTAPI_sub_devices_handler::CleanupSubscriberConfigurationRecord(
 		const std::string &deviceConfiguration, const std::string &inventoryId) {
 		if (deviceConfiguration.empty()) {
@@ -306,14 +348,18 @@ namespace OpenWifi {
 			return false;
 		}
 
-		const auto &rawObject = ParsedBody_;
-		if (!updateObject.from_json(rawObject)) {
-			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		if (!DB_.GetRecord("id", uuid, existingObject)) {
+			NotFound();
 			return false;
 		}
 
-		if (!DB_.GetRecord("id", uuid, existingObject)) {
-			NotFound();
+		if (!RequireSubscriberDeviceAccess(*this, existingObject, "UPDATE")) {
+			return false;
+		}
+
+		const auto &rawObject = ParsedBody_;
+		if (!updateObject.from_json(rawObject)) {
+			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 			return false;
 		}
 
@@ -790,6 +836,9 @@ namespace OpenWifi {
 		if (!LoadDeviceFromBinding(existingObject, true)) {
 			return;
 		}
+		if (!RequireSubscriberDeviceAccess(*this, existingObject, "READ")) {
+			return;
+		}
 		return ReturnSubscriberDeviceObject(existingObject);
 	}
 
@@ -801,6 +850,9 @@ namespace OpenWifi {
 
 		ProvObjects::SubscriberDevice existingObject;
 		if (!ValidateDeleteRequest(deviceIdOrSerial, existingObject)) {
+			return;
+		}
+		if (!RequireSubscriberDeviceAccess(*this, existingObject, "DELETE")) {
 			return;
 		}
 		if (!StopMonitoring(existingObject)) {
@@ -824,6 +876,10 @@ namespace OpenWifi {
 	void RESTAPI_sub_devices_handler::DoPost() {
 		SubscriberDeviceDB::RecordName newObject = {};
 		if (!ParsePostRequest(newObject)) {
+			return;
+		}
+
+		if (!RequireSubscriberDeviceAccess(*this, newObject, "CREATE")) {
 			return;
 		}
 
@@ -892,6 +948,15 @@ namespace OpenWifi {
 		}
 
 		const auto &rawObject = ParsedBody_;
+		auto candidateObject = existingObject;
+		if (!ApplyPutRequest(updateObject, candidateObject, rawObject)) {
+			return;
+		}
+		if (!RequireSubscriberDeviceCandidateAccess(*this, existingObject, candidateObject,
+													"UPDATE")) {
+			return;
+		}
+
 		if (!UpdateConfiguration(uuid, existingObject, updateObject, rawObject,
 								 hasUpdatedConfiguration)) {
 			return;

@@ -95,7 +95,7 @@ namespace OpenWifi {
 
 			const std::vector<std::string> resources{
 				"entity", "venue", "operator", "inventory", "configuration",
-				"managementPolicy", "managementRole"};
+				"subscriber", "subscriberDevice", "managementPolicy", "managementRole"};
 
 			policy.entries.clear();
 			policy.entries.reserve(resources.size());

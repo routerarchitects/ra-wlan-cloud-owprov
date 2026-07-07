@@ -94,7 +94,13 @@ namespace OpenWifi::RBAC {
 			if (c == r) {
 				return true;
 			}
-			if ((c == "inventory" && r == "device") || (c == "device" && r == "inventory")) {
+			const auto isInventoryResource = [](const std::string &resource) {
+				return resource == "inventory" || resource == "device";
+			};
+			if (isInventoryResource(c) && isInventoryResource(r)) {
+				return true;
+			}
+			if (r == "subscriberdevice" && isInventoryResource(c)) {
 				return true;
 			}
 			return false;
@@ -833,6 +839,50 @@ namespace OpenWifi::RBAC {
 			scope);
 	}
 
+	bool ResolveSubscriberScope(const std::string &subscriberId, TargetScope &scope) {
+		scope = {};
+		if (subscriberId.empty()) {
+			return false;
+		}
+
+		ProvObjects::Venue venue;
+		if (!StorageService()->VenueDB().GetRecord("subscriber", subscriberId, venue) ||
+			venue.entity.empty()) {
+			return false;
+		}
+
+		scope.entity = venue.entity;
+		scope.venue = venue.info.id;
+		return true;
+	}
+
+	bool ResolveSubscriberDeviceScope(const ProvObjects::SubscriberDevice &device,
+									  TargetScope &scope) {
+		scope = {};
+		if (ResolveInventoryScope(device.serialNumber, scope)) {
+			return true;
+		}
+
+		if (ResolveSubscriberScope(device.subscriberId, scope)) {
+			return true;
+		}
+
+		if (ResolveScopeFromManagementPolicy(device.managementPolicy, scope)) {
+			return true;
+		}
+
+		ProvObjects::Operator op;
+		if (!device.operatorId.empty() &&
+			StorageService()->OperatorDB().GetRecord("id", device.operatorId, op) &&
+			!op.entityId.empty()) {
+			scope.entity = op.entityId;
+			scope.venue.clear();
+			return true;
+		}
+
+		return false;
+	}
+
 	bool HasAccess(RESTAPIHandler &handler, const std::string &resourceType,
 				   const std::string &action, const TargetScope &targetScope) {
 		if (IsRootUser(handler)) {
@@ -891,6 +941,14 @@ namespace OpenWifi::RBAC {
 			CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kRead, targetScope) ||
 			CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kList, targetScope) ||
 			CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kRead, targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriberDevice", kList,
+							   targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriberDevice", kRead,
+							   targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriber", kList,
+							   targetScope) ||
+			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriber", kRead,
+							   targetScope) ||
 			CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementPolicy", kList, targetScope) ||
 			CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementRole", kList, targetScope);
 		poco_debug(handler.Logger(),

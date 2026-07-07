@@ -58,6 +58,8 @@ namespace OpenWifi::RBAC {
 	bool ResolveLocationScope(const std::string &uuid, TargetScope &scope);
 	bool ResolveVariableScope(const std::string &uuid, TargetScope &scope);
 	bool ResolveMapScope(const std::string &uuid, TargetScope &scope);
+	bool ResolveSubscriberScope(const std::string &subscriberId, TargetScope &scope);
+	bool ResolveSubscriberDeviceScope(const ProvObjects::SubscriberDevice &device, TargetScope &scope);
 
 	bool HasAccessForUser(const std::string &userId, const std::string &resourceType,
 						  const std::string &action, const TargetScope &targetScope);
