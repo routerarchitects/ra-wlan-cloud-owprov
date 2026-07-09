@@ -90,7 +90,7 @@ namespace OpenWifi {
 			policy.inUse.clear();
 
 			const auto policyScope = fmt::format(
-				R"({{"type":"entity","entityId":"{}","includeVenues":true,"includeChildEntities":true}})",
+				R"({{"type":"entity","entityId":"{}","includeVenues":true,"includeChildEntities":false}})",
 				createdEntity.info.id);
 
 			const std::vector<std::string> resources{

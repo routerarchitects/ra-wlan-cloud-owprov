@@ -93,6 +93,10 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 		}
 
+		if (NewObject.entries.empty()) {
+			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
 		if (!CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
@@ -169,7 +173,7 @@ namespace OpenWifi {
 			return;
 		}
 
-		if (!NewPolicy.entries.empty())
+		if (RawObject->has("entries"))
 			Existing.entries = NewPolicy.entries;
 
 		if (DB_.UpdateRecord("id", Existing.info.id, Existing)) {

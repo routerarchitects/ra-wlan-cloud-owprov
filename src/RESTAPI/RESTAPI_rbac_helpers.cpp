@@ -1,5 +1,6 @@
 #include "RESTAPI_rbac_helpers.h"
 
+#include "Poco/JSON/Parser.h"
 #include "Poco/String.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
@@ -10,6 +11,16 @@
 namespace OpenWifi::RBAC {
 
 	namespace {
+		struct PolicyScope {
+			bool constrained = false;
+			std::string type;
+			std::string entityId;
+			std::string venueId;
+			bool includeVenues = false;
+			bool includeChildEntities = false;
+			bool allowOperatorBoundaryDelegation = false;
+		};
+
 		bool Contains(const std::vector<std::string> &values, const std::string &target) {
 			return std::find(values.begin(), values.end(), target) != values.end();
 		}
@@ -51,6 +62,39 @@ namespace OpenWifi::RBAC {
 			return false;
 		}
 
+		bool IsEntityInPolicyChildScope(const std::string &targetEntityId,
+										const std::string &ancestorEntityId) {
+			if (targetEntityId.empty() || ancestorEntityId.empty()) {
+				return false;
+			}
+
+			std::string currentEntityId = targetEntityId;
+			bool crossedChildOperator = false;
+			while (!currentEntityId.empty()) {
+				if (currentEntityId == ancestorEntityId) {
+					return true;
+				}
+
+				ProvObjects::Entity entity;
+				if (!StorageService()->EntityDB().GetRecord("id", currentEntityId, entity)) {
+					return false;
+				}
+
+				if (!entity.operatorId.empty()) {
+					if (crossedChildOperator) {
+						poco_debug(Poco::Logger::get("RBAC"), fmt::format(
+																	 "RBAC policy child-scope deny target='{}' ancestor='{}' reason='grandchild operator boundary'",
+																	 targetEntityId, ancestorEntityId));
+						return false;
+					}
+					crossedChildOperator = true;
+				}
+
+				currentEntityId = entity.parent;
+			}
+			return false;
+		}
+
 		bool IsVenueDescendantOf(const std::string &targetVenueId,
 								const std::string &ancestorVenueId) {
 			if (targetVenueId.empty() || ancestorVenueId.empty()) {
@@ -85,6 +129,133 @@ namespace OpenWifi::RBAC {
 			poco_debug(Poco::Logger::get("RBAC"), fmt::format(
 														 "RBAC venue-scope miss target='{}' ancestor='{}'",
 														 targetVenueId, ancestorVenueId));
+			return false;
+		}
+
+		bool ResolveTargetEntityAndVenue(const TargetScope &targetScope,
+										 std::string &targetEntityId,
+										 std::string &targetVenueId) {
+			targetEntityId = targetScope.entity;
+			targetVenueId = targetScope.venue;
+			if (targetEntityId.empty() && !targetVenueId.empty()) {
+				ProvObjects::Venue venue;
+				if (!StorageService()->VenueDB().GetRecord("id", targetVenueId, venue)) {
+					return false;
+				}
+				targetEntityId = venue.entity;
+			}
+			return !targetEntityId.empty();
+		}
+
+		bool ParsePolicyScope(const std::string &policyString, PolicyScope &scope) {
+			scope = {};
+			if (policyString.empty()) {
+				return true;
+			}
+
+			try {
+				Poco::JSON::Parser parser;
+				auto object = parser.parse(policyString).extract<Poco::JSON::Object::Ptr>();
+				scope.constrained = true;
+				if (object->has("type") && !object->isNull("type")) {
+					scope.type = Poco::toLower(object->getValue<std::string>("type"));
+				}
+				if (object->has("entityId") && !object->isNull("entityId")) {
+					scope.entityId = object->getValue<std::string>("entityId");
+				} else if (object->has("entity") && !object->isNull("entity")) {
+					scope.entityId = object->getValue<std::string>("entity");
+				}
+				if (object->has("venueId") && !object->isNull("venueId")) {
+					scope.venueId = object->getValue<std::string>("venueId");
+				} else if (object->has("venue") && !object->isNull("venue")) {
+					scope.venueId = object->getValue<std::string>("venue");
+				}
+				if (object->has("includeVenues") && !object->isNull("includeVenues")) {
+					scope.includeVenues = object->getValue<bool>("includeVenues");
+				}
+				if (object->has("includeChildEntities") &&
+					!object->isNull("includeChildEntities")) {
+					scope.includeChildEntities =
+						object->getValue<bool>("includeChildEntities");
+				}
+				if (object->has("allowOperatorBoundaryDelegation") &&
+					!object->isNull("allowOperatorBoundaryDelegation")) {
+					scope.allowOperatorBoundaryDelegation =
+						object->getValue<bool>("allowOperatorBoundaryDelegation");
+				}
+				return true;
+			} catch (...) {
+				scope = {};
+				return false;
+			}
+		}
+
+		bool PolicyScopeAllowsTarget(const std::string &policyString,
+									 const TargetScope &targetScope) {
+			PolicyScope scope;
+			if (!ParsePolicyScope(policyString, scope) || !scope.constrained) {
+				return true;
+			}
+
+			std::string targetEntityId;
+			std::string targetVenueId;
+			if (!ResolveTargetEntityAndVenue(targetScope, targetEntityId, targetVenueId)) {
+				return false;
+			}
+
+			if (!scope.venueId.empty() || scope.type == "venue") {
+				if (scope.venueId.empty() || targetVenueId.empty()) {
+					return false;
+				}
+				return IsVenueDescendantOf(targetVenueId, scope.venueId);
+			}
+
+			if (!scope.entityId.empty() || scope.type == "entity") {
+				if (scope.entityId.empty()) {
+					return false;
+				}
+				if (targetEntityId == scope.entityId) {
+					return targetVenueId.empty() || scope.includeVenues;
+				}
+				if (!scope.includeChildEntities ||
+					!IsEntityInPolicyChildScope(targetEntityId, scope.entityId)) {
+					return false;
+				}
+				return targetVenueId.empty() || scope.includeVenues;
+			}
+
+			return true;
+		}
+
+		bool PolicyScopeAllowsBoundaryDelegation(const std::string &policyString,
+												 const TargetScope &targetScope) {
+			PolicyScope scope;
+			if (!ParsePolicyScope(policyString, scope) || !scope.constrained ||
+				!scope.allowOperatorBoundaryDelegation) {
+				return false;
+			}
+
+			std::string targetEntityId;
+			std::string targetVenueId;
+			if (!ResolveTargetEntityAndVenue(targetScope, targetEntityId, targetVenueId)) {
+				return false;
+			}
+
+			if (!scope.venueId.empty() || scope.type == "venue") {
+				if (scope.venueId.empty() || targetVenueId.empty()) {
+					return false;
+				}
+				return targetVenueId == scope.venueId;
+			}
+
+			if (!scope.entityId.empty() || scope.type == "entity") {
+				if (scope.entityId.empty() || scope.includeChildEntities ||
+					targetEntityId != scope.entityId) {
+					return false;
+				}
+				return targetVenueId.empty() || scope.includeVenues;
+			}
+
 			return false;
 		}
 
@@ -161,7 +332,9 @@ namespace OpenWifi::RBAC {
 		}
 
 		bool PolicyAllows(const ProvObjects::ManagementPolicy &policy, const std::string &userId,
-						  const std::string &resource, const std::string &action) {
+						  const std::string &resource, const std::string &action,
+						  const TargetScope &targetScope,
+						  bool requireOperatorBoundaryDelegation = false) {
 			for (const auto &entry : policy.entries) {
 				if (!EntryAppliesToUser(entry, userId)) {
 					continue;
@@ -174,6 +347,13 @@ namespace OpenWifi::RBAC {
 					}
 				}
 				if (!resourceAllowed) {
+					continue;
+				}
+				if (!PolicyScopeAllowsTarget(entry.policy, targetScope)) {
+					continue;
+				}
+				if (requireOperatorBoundaryDelegation &&
+					!PolicyScopeAllowsBoundaryDelegation(entry.policy, targetScope)) {
 					continue;
 				}
 				if (AccessMatches(entry.access, action)) {
@@ -260,7 +440,8 @@ namespace OpenWifi::RBAC {
 		}
 
 		bool CanAccessUserScope(const std::string &userId, const std::string &resourceType,
-								const std::string &action, const TargetScope &targetScope) {
+								const std::string &action, const TargetScope &targetScope,
+								bool requireOperatorBoundaryDelegation = false) {
 			ProvObjects::ManagementRoleVec roles;
 			std::string targetEntity = targetScope.entity;
 			if (targetEntity.empty() && !targetScope.venue.empty()) {
@@ -291,11 +472,60 @@ namespace OpenWifi::RBAC {
 					!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, policy)) {
 					continue;
 				}
-				if (PolicyAllows(policy, userId, resourceType, action)) {
+				if (PolicyAllows(policy, userId, resourceType, action, targetScope,
+								 requireOperatorBoundaryDelegation)) {
 					return true;
 				}
 			}
 			return false;
+		}
+
+		bool HasExplicitRoleAccessForUser(const std::string &userId,
+										  const std::string &resourceType,
+										  const std::string &action,
+										  const TargetScope &targetScope,
+										  bool requireOperatorBoundaryDelegation = false) {
+			return CanAccessUserScope(userId, resourceType, action, targetScope,
+									  requireOperatorBoundaryDelegation);
+		}
+
+		bool HasVisibleScopeAccessForUser(const std::string &userId,
+										  const TargetScope &targetScope,
+										  bool requireOperatorBoundaryDelegation = false) {
+			static const std::string kList = "LIST";
+			static const std::string kRead = "READ";
+			return HasExplicitRoleAccessForUser(userId, "entity", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "entity", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "venue", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "venue", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "operator", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "operator", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "inventory", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "inventory", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "subscriberDevice", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "subscriberDevice", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "subscriber", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "subscriber", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "managementPolicy", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "managementPolicy", kRead, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "managementRole", kList, targetScope,
+												requireOperatorBoundaryDelegation) ||
+				   HasExplicitRoleAccessForUser(userId, "managementRole", kRead, targetScope,
+												requireOperatorBoundaryDelegation);
 		}
 
 		bool ResolveTargetEntity(const TargetScope &targetScope, std::string &targetEntityId) {
@@ -342,41 +572,11 @@ namespace OpenWifi::RBAC {
 			return false;
 		}
 
-		bool TargetInsideActorOperatorAccess(const ProvObjects::Operator &actorOperator,
-											 const std::string &targetEntityId) {
-			ProvObjects::Operator targetOperator;
-			if (!ResolveOwningOperatorForEntity(targetEntityId, targetOperator)) {
-				poco_debug(Poco::Logger::get("RBAC"),
-						   fmt::format("RBAC operator-scope deny: cannot resolve target owning operator actorOperator='{}' actorEntity='{}' targetEntity='{}'",
-									   actorOperator.info.id, actorOperator.entityId,
-									   targetEntityId));
-				return false;
-			}
+		bool ResolveUserOperatorBoundary(const SecurityObjects::UserInfo &user,
+										 const TargetScope &targetScope,
+										 bool &insideBoundary) {
+			insideBoundary = false;
 
-			poco_debug(Poco::Logger::get("RBAC"),
-					   fmt::format("RBAC operator-scope check actorOperator='{}' actorEntity='{}' targetEntity='{}' targetOperator='{}' targetParentOperator='{}'",
-								   actorOperator.info.id, actorOperator.entityId, targetEntityId,
-								   targetOperator.info.id, targetOperator.parentOperatorId));
-
-			if (targetOperator.info.id == actorOperator.info.id) {
-				poco_debug(Poco::Logger::get("RBAC"),
-						   "RBAC operator-scope allow: same operator");
-				return true;
-			}
-
-			if (targetOperator.parentOperatorId == actorOperator.info.id) {
-				poco_debug(Poco::Logger::get("RBAC"),
-						   "RBAC operator-scope allow: direct child operator");
-				return true;
-			}
-
-			poco_debug(Poco::Logger::get("RBAC"),
-					   "RBAC operator-scope deny: target operator is not actor or direct child");
-			return false;
-		}
-
-		bool TargetInsideUserOperatorAccess(const SecurityObjects::UserInfo &user,
-										   const TargetScope &targetScope) {
 			ProvObjects::Operator actorOperator;
 			if (!ResolveUserOwnerOperator(user, actorOperator)) {
 				poco_debug(Poco::Logger::get("RBAC"),
@@ -394,7 +594,37 @@ namespace OpenWifi::RBAC {
 				return false;
 			}
 
-			return TargetInsideActorOperatorAccess(actorOperator, targetEntityId);
+			ProvObjects::Operator targetOperator;
+			if (!ResolveOwningOperatorForEntity(targetEntityId, targetOperator)) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   fmt::format("RBAC operator-scope deny: cannot resolve target owning operator actorOperator='{}' actorEntity='{}' targetEntity='{}'",
+									   actorOperator.info.id, actorOperator.entityId,
+									   targetEntityId));
+				return false;
+			}
+
+			poco_debug(Poco::Logger::get("RBAC"),
+					   fmt::format("RBAC operator-scope check actorOperator='{}' actorEntity='{}' targetEntity='{}' targetOperator='{}' targetParentOperator='{}'",
+								   actorOperator.info.id, actorOperator.entityId, targetEntityId,
+								   targetOperator.info.id, targetOperator.parentOperatorId));
+
+			if (targetOperator.info.id == actorOperator.info.id) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   "RBAC operator-scope allow: same operator");
+				insideBoundary = true;
+				return true;
+			}
+
+			if (targetOperator.parentOperatorId == actorOperator.info.id) {
+				poco_debug(Poco::Logger::get("RBAC"),
+						   "RBAC operator-scope allow: direct child operator");
+				insideBoundary = true;
+				return true;
+			}
+
+			poco_debug(Poco::Logger::get("RBAC"),
+					   "RBAC operator-scope outside-boundary: target operator is not actor or direct child");
+			return true;
 		}
 
 		bool ResolveScopeFromVenue(const std::string &venueId, TargetScope &scope) {
@@ -580,13 +810,14 @@ namespace OpenWifi::RBAC {
 					!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, policy)) {
 					return true;
 				}
-				if (PolicyAllows(policy, userId, resourceType, action)) {
+				if (PolicyAllows(policy, userId, resourceType, action,
+								 TargetScope{targetEntity, role.venue})) {
 					entityId = targetEntity;
 					found = true;
 					return false;
 				}
 				return true;
-		});
+			});
 		return found;
 	}
 
@@ -891,20 +1122,32 @@ namespace OpenWifi::RBAC {
 		if (handler.UserInfo_.userinfo.id.empty()) {
 			return false;
 		}
-		if (!TargetInsideUserOperatorAccess(handler.UserInfo_.userinfo, targetScope)) {
+		bool insideOperatorBoundary = false;
+		if (!ResolveUserOperatorBoundary(handler.UserInfo_.userinfo, targetScope,
+										 insideOperatorBoundary)) {
 			poco_debug(handler.Logger(),
-					   fmt::format("RBAC operator-scope deny user='{}' owner='{}' resource='{}' action='{}' entity='{}' venue='{}'",
+					   fmt::format("RBAC operator-scope unresolved deny user='{}' owner='{}' resource='{}' action='{}' entity='{}' venue='{}'",
 								   handler.UserInfo_.userinfo.id,
 								   handler.UserInfo_.userinfo.owner,
 								   resourceType, action, targetScope.entity,
 								   targetScope.venue));
 			return false;
 		}
-		auto allowed = CanAccessUserScope(handler.UserInfo_.userinfo.id, resourceType, action,
-										  targetScope);
+		const bool requireOperatorBoundaryDelegation = !insideOperatorBoundary;
+		auto allowed = HasExplicitRoleAccessForUser(handler.UserInfo_.userinfo.id, resourceType,
+													action, targetScope,
+													requireOperatorBoundaryDelegation);
+		if (allowed) {
+			poco_debug(handler.Logger(),
+					   fmt::format("RBAC explicit access allow user='{}' resource='{}' action='{}' delegated={}",
+								   handler.UserInfo_.userinfo.id, resourceType, action,
+								   requireOperatorBoundaryDelegation));
+			return true;
+		}
 		poco_debug(handler.Logger(),
-				   fmt::format("RBAC has-access result user='{}' resource='{}' action='{}' allowed={}",
-							   handler.UserInfo_.userinfo.id, resourceType, action, allowed));
+				   fmt::format("RBAC has-access result user='{}' resource='{}' action='{}' delegated={} allowed={}",
+							   handler.UserInfo_.userinfo.id, resourceType, action,
+							   requireOperatorBoundaryDelegation, allowed));
 		return allowed;
 	}
 
@@ -924,37 +1167,32 @@ namespace OpenWifi::RBAC {
 		if (handler.UserInfo_.userinfo.id.empty()) {
 			return false;
 		}
-		if (!TargetInsideUserOperatorAccess(handler.UserInfo_.userinfo, targetScope)) {
+		bool insideOperatorBoundary = false;
+		if (!ResolveUserOperatorBoundary(handler.UserInfo_.userinfo, targetScope,
+										 insideOperatorBoundary)) {
 			poco_debug(handler.Logger(),
-					   fmt::format("RBAC operator-scope-visible deny user='{}' owner='{}' entity='{}' venue='{}'",
+					   fmt::format("RBAC operator-scope-visible unresolved deny user='{}' owner='{}' entity='{}' venue='{}'",
 								   handler.UserInfo_.userinfo.id,
 								   handler.UserInfo_.userinfo.owner,
 								   targetScope.entity, targetScope.venue));
 			return false;
 		}
-		static const std::string kList = "LIST";
-		static const std::string kRead = "READ";
+		const bool requireOperatorBoundaryDelegation = !insideOperatorBoundary;
 		const bool allowed =
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "entity", kList, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "entity", kRead, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kList, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "venue", kRead, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kList, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "inventory", kRead, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriberDevice", kList,
-							   targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriberDevice", kRead,
-							   targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriber", kList,
-							   targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "subscriber", kRead,
-							   targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementPolicy", kList, targetScope) ||
-			CanAccessUserScope(handler.UserInfo_.userinfo.id, "managementRole", kList, targetScope);
+			HasVisibleScopeAccessForUser(handler.UserInfo_.userinfo.id, targetScope,
+										 requireOperatorBoundaryDelegation);
+		if (allowed) {
+			poco_debug(handler.Logger(),
+					   fmt::format("RBAC explicit scope-visible allow user='{}' entity='{}' venue='{}' delegated={}",
+								   handler.UserInfo_.userinfo.id, targetScope.entity,
+								   targetScope.venue, requireOperatorBoundaryDelegation));
+			return true;
+		}
 		poco_debug(handler.Logger(),
-				   fmt::format("RBAC scope-allowed result user='{}' entity='{}' venue='{}' allowed={}",
+				   fmt::format("RBAC scope-allowed result user='{}' entity='{}' venue='{}' delegated={} allowed={}",
 							   handler.UserInfo_.userinfo.id, targetScope.entity,
-							   targetScope.venue, allowed));
+							   targetScope.venue, requireOperatorBoundaryDelegation,
+							   allowed));
 		return allowed;
 	}
 
