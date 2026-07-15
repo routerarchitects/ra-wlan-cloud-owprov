@@ -69,6 +69,7 @@ namespace OpenWifi {
 						 Existing.entity, Existing.info.id);
 		RemoveMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
 						 Existing.venue, Existing.info.id);
+		AuthCache::GetInstance()->Clear();
 		return OK();
 	}
 
@@ -139,6 +140,7 @@ namespace OpenWifi {
 			ExistingRole.info.modified = Utils::Now();
 
 			if (DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
+				AuthCache::GetInstance()->Clear();
 				MoveUsage(StorageService()->PolicyDB(), DB_, OldPolicy, NewObject.managementPolicy, ExistingRole.info.id);
 
 				Poco::JSON::Object Answer;
@@ -149,6 +151,7 @@ namespace OpenWifi {
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
+			AuthCache::GetInstance()->Clear();
 			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
 						  NewObject.entity, NewObject.info.id);
 			AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
@@ -218,6 +221,7 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 
 		if (DB_.UpdateRecord("id", UUID, Existing)) {
+			AuthCache::GetInstance()->Clear();
 			MoveUsage(StorageService()->PolicyDB(), DB_, FromPolicy, ToPolicy, Existing.info.id);
 			ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
 							 FromEntity, ToEntity, Existing.info.id);

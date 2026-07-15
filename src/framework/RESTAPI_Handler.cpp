@@ -26,6 +26,20 @@ namespace OpenWifi {
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
+			// Fallback: If target context cannot be resolved and it's a GET request, check if the user has ANY role that permits reading this resource.
+			if (Method == Poco::Net::HTTPRequest::HTTP_GET) {
+				ProvObjects::ManagementRole AnyRole;
+				if (FindAnyRole(UserInfo_.userinfo.id, AnyRole)) {
+					ProvObjects::ManagementPolicy Policy;
+					if (AuthCache::GetInstance()->GetPolicy(AnyRole.managementPolicy, Policy) ||
+						(StorageService()->PolicyDB().GetRecord("id", AnyRole.managementPolicy, Policy) && 
+						 (AuthCache::GetInstance()->SetPolicy(AnyRole.managementPolicy, Policy), true))) {
+						if (PolicyAllows(Policy, Resource, Method)) {
+							return true;
+						}
+					}
+				}
+			}
 			Reason = "Target context could not be resolved.";
 			return false;
 		}
@@ -40,9 +54,12 @@ namespace OpenWifi {
 
 		// 5. Load fixed policy
 		ProvObjects::ManagementPolicy Policy;
-		if (!StorageService()->PolicyDB().GetRecord("id", ActiveRole.managementPolicy, Policy)) {
-			Reason = "Could not load management policy for the active role.";
-			return false;
+		if (!AuthCache::GetInstance()->GetPolicy(ActiveRole.managementPolicy, Policy)) {
+			if (!StorageService()->PolicyDB().GetRecord("id", ActiveRole.managementPolicy, Policy)) {
+				Reason = "Could not load management policy for the active role.";
+				return false;
+			}
+			AuthCache::GetInstance()->SetPolicy(ActiveRole.managementPolicy, Policy);
 		}
 
 		// 6. Check policy permissions
@@ -147,38 +164,143 @@ namespace OpenWifi {
 		return false;
 	}
 
-	bool RESTAPIHandler::FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
-		// Exact match first (entity + venue)
-		if (!venueId.empty()) {
-			ManagementRoleDB::RecordVec Roles;
-			std::string WhereClause = "entity='" + entityId + "' and venue='" + venueId + "'";
-			if (StorageService()->RolesDB().GetRecords(0, 500, Roles, WhereClause)) {
-				for (const auto &role : Roles) {
+	bool AuthCache::GetUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &roles) {
+		std::shared_lock<std::shared_mutex> lock(Mutex_);
+		auto it = Cache_.find(userId);
+		if (it != Cache_.end()) {
+			roles = it->second.roles;
+			return true;
+		}
+		return false;
+	}
+
+	void AuthCache::SetUserRoles(const std::string &userId, const std::vector<ProvObjects::ManagementRole> &roles) {
+		std::unique_lock<std::shared_mutex> lock(Mutex_);
+		Cache_[userId].roles = roles;
+		Cache_[userId].lastFetched = Utils::Now();
+	}
+
+	bool AuthCache::GetPolicy(const std::string &policyId, ProvObjects::ManagementPolicy &policy) {
+		std::shared_lock<std::shared_mutex> lock(Mutex_);
+		auto it = Policies_.find(policyId);
+		if (it != Policies_.end()) {
+			policy = it->second;
+			return true;
+		}
+		return false;
+	}
+
+	void AuthCache::SetPolicy(const std::string &policyId, const ProvObjects::ManagementPolicy &policy) {
+		std::unique_lock<std::shared_mutex> lock(Mutex_);
+		Policies_[policyId] = policy;
+	}
+
+	void AuthCache::InvalidateUser(const std::string &userId) {
+		std::unique_lock<std::shared_mutex> lock(Mutex_);
+		Cache_.erase(userId);
+	}
+
+	void AuthCache::Clear() {
+		std::unique_lock<std::shared_mutex> lock(Mutex_);
+		Cache_.clear();
+		Policies_.clear();
+	}
+
+	bool RESTAPIHandler::FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole) {
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
+			ManagementRoleDB::RecordVec DB_Roles;
+			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
+				for (const auto &role : DB_Roles) {
 					for (const auto &user : role.users) {
 						if (user == userId) {
-							ExistingRole = role;
-							return true;
+							Roles.push_back(role);
 						}
 					}
+				}
+			}
+			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+		}
+
+		if (!Roles.empty()) {
+			AnyRole = Roles.front();
+			return true;
+		}
+		return false;
+	}
+
+	bool RESTAPIHandler::FindAllUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &Roles) {
+		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
+			ManagementRoleDB::RecordVec DB_Roles;
+			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
+				for (const auto &role : DB_Roles) {
+					for (const auto &user : role.users) {
+						if (user == userId) {
+							Roles.push_back(role);
+						}
+					}
+				}
+			}
+			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+		}
+		return !Roles.empty();
+	}
+
+	bool RESTAPIHandler::FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
+			ManagementRoleDB::RecordVec DB_Roles;
+			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
+				for (const auto &role : DB_Roles) {
+					for (const auto &user : role.users) {
+						if (user == userId) {
+							Roles.push_back(role);
+						}
+					}
+				}
+			}
+			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+		}
+
+		// Find exact match first (entity + venue)
+		if (!venueId.empty()) {
+			for (const auto &role : Roles) {
+				if (role.entity == entityId && role.venue == venueId) {
+					ExistingRole = role;
+					return true;
 				}
 			}
 		}
 
 		// Fallback to entity-wide role
-		ManagementRoleDB::RecordVec Roles;
-		std::string WhereClause = "entity='" + entityId + "' and (venue='' or venue is null)";
-		if (StorageService()->RolesDB().GetRecords(0, 500, Roles, WhereClause)) {
-			for (const auto &role : Roles) {
-				for (const auto &user : role.users) {
-					if (user == userId) {
-						ExistingRole = role;
-						return true;
-					}
-				}
+		for (const auto &role : Roles) {
+			if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+				ExistingRole = role;
+				return true;
 			}
 		}
 
 		return false;
+	}
+
+	void RESTAPIHandler::GetDescendantEntities(const std::string &id, std::set<std::string> &descendants) {
+		descendants.insert(id);
+		ProvObjects::Entity E;
+		if (StorageService()->EntityDB().GetRecord("id", id, E)) {
+			for (const auto &child : E.children) {
+				GetDescendantEntities(child, descendants);
+			}
+		}
+	}
+
+	void RESTAPIHandler::GetDescendantVenues(const std::string &id, std::set<std::string> &venues) {
+		venues.insert(id);
+		ProvObjects::Venue V;
+		if (StorageService()->VenueDB().GetRecord("id", id, V)) {
+			for (const auto &child : V.children) {
+				GetDescendantVenues(child, venues);
+			}
+		}
 	}
 
 	std::string RESTAPIHandler::GetResourceName(const std::string &Path) {

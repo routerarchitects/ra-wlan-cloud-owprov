@@ -7,6 +7,9 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <set>
+#include <shared_mutex>
+#include <mutex>
 
 #include "Poco/DeflatingStream.h"
 #include "Poco/JSON/Object.h"
@@ -34,6 +37,36 @@
 using namespace std::chrono_literals;
 
 namespace OpenWifi {
+
+	class AuthCache {
+	  public:
+		static AuthCache* GetInstance() {
+			static AuthCache Instance;
+			return &Instance;
+		}
+
+		struct CachedUser {
+			std::vector<ProvObjects::ManagementRole> roles;
+			uint64_t lastFetched = 0;
+		};
+
+		bool GetUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &roles);
+		void SetUserRoles(const std::string &userId, const std::vector<ProvObjects::ManagementRole> &roles);
+		bool GetPolicy(const std::string &policyId, ProvObjects::ManagementPolicy &policy);
+		void SetPolicy(const std::string &policyId, const ProvObjects::ManagementPolicy &policy);
+		void InvalidateUser(const std::string &userId);
+		void Clear();
+
+	  private:
+		AuthCache() = default;
+		~AuthCache() = default;
+		AuthCache(const AuthCache&) = delete;
+		AuthCache& operator=(const AuthCache&) = delete;
+
+		std::shared_mutex Mutex_;
+		std::map<std::string, CachedUser> Cache_;
+		std::map<std::string, ProvObjects::ManagementPolicy> Policies_;
+	};
 
 	class RESTAPIHandler : public Poco::Net::HTTPRequestHandler {
 	  public:
@@ -99,12 +132,13 @@ namespace OpenWifi {
 						return UnAuthorized(RESTAPI::Errors::SECURITY_SERVICE_UNREACHABLE);
 				}
 
+				ParseParameters();
+
 				std::string Reason;
 				if (!RoleIsAuthorized(RequestIn.getURI(), Request->getMethod(), Reason)) {
 					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 				}
 
-				ParseParameters();
 				if (Request->getMethod() == Poco::Net::HTTPRequest::HTTP_GET)
 					return DoGet();
 				else if (Request->getMethod() == Poco::Net::HTTPRequest::HTTP_POST)
@@ -718,6 +752,10 @@ namespace OpenWifi {
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue);
 		bool PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource, const std::string &Method);
 		bool FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole);
+		bool FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole);
+		bool FindAllUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &Roles);
+		void GetDescendantEntities(const std::string &id, std::set<std::string> &descendants);
+		void GetDescendantVenues(const std::string &id, std::set<std::string> &venues);
 		std::string GetResourceName(const std::string &Path);
 
 	  protected:

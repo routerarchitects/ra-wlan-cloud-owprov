@@ -71,6 +71,7 @@ namespace OpenWifi {
 						 Existing.entity, "", Existing.info.id);
 		ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementPolicies,
 						 Existing.venue, "", Existing.info.id);
+		AuthCache::GetInstance()->Clear();
 		return OK();
 	}
 
@@ -105,6 +106,7 @@ namespace OpenWifi {
 
 		NewObject.inUse.clear();
 		if (DB_.CreateRecord(NewObject)) {
+			AuthCache::GetInstance()->Clear();
 			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementPolicies,
 						  NewObject.entity, NewObject.info.id);
 			AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementPolicies,
@@ -153,6 +155,7 @@ namespace OpenWifi {
 			Existing.entries = NewPolicy.entries;
 
 		if (DB_.UpdateRecord("id", Existing.info.id, Existing)) {
+			AuthCache::GetInstance()->Clear();
 			ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementPolicies,
 							 FromEntity, ToEntity, Existing.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementPolicies,
