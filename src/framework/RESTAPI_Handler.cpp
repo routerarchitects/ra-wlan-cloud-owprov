@@ -94,7 +94,7 @@ namespace OpenWifi {
 		}
 
 		// 3. If ID is provided, figure out the resource type from the Path
-		if (!Id.empty() && TargetEntity.empty() && TargetVenue.empty()) {
+		if (!Id.empty() && Id != "0" && TargetEntity.empty() && TargetVenue.empty()) {
 			if (Path.find("/api/v1/entity") != std::string::npos) {
 				TargetEntity = Id;
 			} else if (Path.find("/api/v1/venue") != std::string::npos) {
@@ -131,6 +131,20 @@ namespace OpenWifi {
 			}
 			if (ParsedBody_->has("venue")) {
 				TargetVenue = ParsedBody_->get("venue").toString();
+			}
+			if (TargetEntity.empty() && TargetVenue.empty() && ParsedBody_->has("parent")) {
+				std::string ParentId = ParsedBody_->get("parent").toString();
+				if (!ParentId.empty()) {
+					if (Path.find("/api/v1/entity") != std::string::npos) {
+						TargetEntity = ParentId;
+					} else if (Path.find("/api/v1/venue") != std::string::npos) {
+						TargetVenue = ParentId;
+						ProvObjects::Venue V;
+						if (StorageService()->VenueDB().GetRecord("id", ParentId, V)) {
+							TargetEntity = V.entity;
+						}
+					}
+				}
 			}
 		}
 
