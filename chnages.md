@@ -171,3 +171,12 @@ The Role-Based Access Control (RBAC) model is split between organizational scopi
 - **Now**:
   - Refactored `RESTAPI_entity_handler::DoDelete` and `RESTAPI_venue_handler::DoDelete` to clean up associated management roles.
   - For every role linked in the resource's `managementRoles` array, the handler deletes the role from the database, corrects policy usage count, cleans up memberships, and invalidates `AuthCache`.
+
+### Issue 6.3: Lack of Hierarchical Role Inheritance for Unrelated Users
+- **Before (Main Branch)**: Standard users assigned to a parent entity role (e.g., `Entity X`) did not inherit permissions on child entities or venues (e.g., `Entity Y`) unless they had an explicit role record mapped to the child in the roles table. This caused other team members who shared parent-level access to get a `403 Forbidden` (`ACCESS_DENIED`) on newly created child resources.
+- **Now**:
+  - Implemented a recursive parent-walk resolution in `RESTAPIHandler::FindExistingRole`.
+  - For venues, the runtime walks up `venue.parent` recursively to check for a user role. If not found, it resolves the venue's host entity and switches to the entity walk.
+  - For entities, the runtime walks up `entity.parent` recursively to check for a user role.
+  - Specific child-level roles automatically act as overrides and take precedence because lookup starts from the most specific resource.
+
