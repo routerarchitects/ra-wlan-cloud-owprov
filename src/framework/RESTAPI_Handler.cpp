@@ -5,6 +5,8 @@
 #include "RESTAPI_Handler.h"
 #include "StorageService.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
+#include "RESTAPI/RESTAPI_db_helpers.h"
+#include "framework/MicroServiceFuncs.h"
 
 namespace OpenWifi {
 
@@ -328,6 +330,53 @@ namespace OpenWifi {
 		if (Path.find("/api/v1/customer") != std::string::npos) return "customer";
 		if (Path.find("/api/v1/user") != std::string::npos) return "user";
 		return "";
+	}
+
+	void RESTAPIHandler::AutoCreateCreatorRole(const std::string &CreatedEntityId, const std::string &CreatedVenueId, const std::string &ParentEntityId, const std::string &ParentVenueId) {
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM) {
+			return;
+		}
+
+		ProvObjects::ManagementRole ParentRole;
+		bool Found = false;
+		if (!ParentVenueId.empty()) {
+			Found = FindExistingRole(UserInfo_.userinfo.id, ParentEntityId, ParentVenueId, ParentRole);
+		}
+		if (!Found && !ParentEntityId.empty()) {
+			Found = FindExistingRole(UserInfo_.userinfo.id, ParentEntityId, "", ParentRole);
+		}
+
+		if (Found) {
+			ProvObjects::ManagementRole NewRole;
+			NewRole.info.id = MicroServiceCreateUUID();
+			NewRole.info.name = "Auto-created role for creator of " + (CreatedVenueId.empty() ? std::string("Entity") : std::string("Venue"));
+			NewRole.info.description = "Grants same access policy as parent role: " + ParentRole.info.name;
+			NewRole.info.created = Utils::Now();
+			NewRole.info.modified = Utils::Now();
+			NewRole.entity = CreatedEntityId;
+			NewRole.venue = CreatedVenueId;
+			NewRole.managementPolicy = ParentRole.managementPolicy;
+			NewRole.users.push_back(UserInfo_.userinfo.id);
+
+			if (StorageService()->RolesDB().CreateRecord(NewRole)) {
+				poco_information(Logger(), fmt::format("AutoCreateCreatorRole: Auto-created role {} for user {} on {} (policy {})",
+					NewRole.info.id, UserInfo_.userinfo.email,
+					CreatedVenueId.empty() ? "entity " + CreatedEntityId : "venue " + CreatedVenueId,
+					NewRole.managementPolicy));
+
+				AuthCache::GetInstance()->Clear();
+
+				if (!CreatedVenueId.empty()) {
+					AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles, CreatedVenueId, NewRole.info.id);
+				} else if (!CreatedEntityId.empty()) {
+					AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles, CreatedEntityId, NewRole.info.id);
+				}
+
+				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), "", NewRole.managementPolicy, NewRole.info.id);
+			} else {
+				poco_error(Logger(), "AutoCreateCreatorRole: Failed to create role record in DB");
+			}
+		}
 	}
 
 } // namespace OpenWifi

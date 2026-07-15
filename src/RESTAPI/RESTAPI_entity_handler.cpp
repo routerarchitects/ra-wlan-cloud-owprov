@@ -74,6 +74,19 @@ namespace OpenWifi {
 
 		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
 				  Existing.info.id);
+
+		for (const auto &roleId : Existing.managementRoles) {
+			ProvObjects::ManagementRole Role;
+			if (StorageService()->RolesDB().GetRecord("id", roleId, Role)) {
+				StorageService()->RolesDB().DeleteRecord("id", roleId);
+				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", roleId);
+				if (!Role.venue.empty()) {
+					RemoveMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles, Role.venue, roleId);
+				}
+			}
+		}
+		AuthCache::GetInstance()->Clear();
+
 		DB_.DeleteRecord("id", UUID);
 		DB_.DeleteChild("id", Existing.parent, UUID);
 		return OK();
@@ -139,6 +152,7 @@ namespace OpenWifi {
 			MoveUsage(StorageService()->PolicyDB(), DB_, "", NewEntity.managementPolicy,
 					  NewEntity.info.id);
 			DB_.AddChild("id", NewEntity.parent, NewEntity.info.id);
+			AutoCreateCreatorRole(NewEntity.info.id, "", NewEntity.parent, "");
 
 			Poco::JSON::Object Answer;
 			NewEntity.to_json(Answer);

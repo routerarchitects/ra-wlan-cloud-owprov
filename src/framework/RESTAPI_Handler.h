@@ -754,6 +754,7 @@ namespace OpenWifi {
 		bool FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole);
 		bool FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole);
 		bool FindAllUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &Roles);
+		void AutoCreateCreatorRole(const std::string &CreatedEntityId, const std::string &CreatedVenueId, const std::string &ParentEntityId, const std::string &ParentVenueId);
 		void GetDescendantEntities(const std::string &id, std::set<std::string> &descendants);
 		void GetDescendantVenues(const std::string &id, std::set<std::string> &venues);
 		std::string GetResourceName(const std::string &Path);
