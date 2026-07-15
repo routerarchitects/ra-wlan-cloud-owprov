@@ -7,7 +7,7 @@
 
 # OpenWiFi Provisioning Service (OWPROV)
 
-## Overview / What is it?
+## Overview
 The OWPROV (OpenWiFi Provisioning Service) is a core service within the Telecom Infra Project (TIP) OpenWiFi CloudSDK (OWSDK) ecosystem.
 
 OWPROV is responsible for:
