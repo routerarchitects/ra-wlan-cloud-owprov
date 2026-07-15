@@ -94,12 +94,12 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
 
-		if (NewObject.entity.empty() ||
+		if (!NewObject.entity.empty() &&
 			!StorageService()->EntityDB().Exists("id", NewObject.entity)) {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		if (NewObject.venue.empty() || !StorageService()->VenueDB().Exists("id", NewObject.venue)) {
+		if (!NewObject.venue.empty() && !StorageService()->VenueDB().Exists("id", NewObject.venue)) {
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
 		}
 
