@@ -52,6 +52,10 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementPolicy_handler::DoDelete() {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+
 		std::string UUID = GetBinding("uuid", "");
 		ProvObjects::ManagementPolicy Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
@@ -71,6 +75,10 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementPolicy_handler::DoPost() {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+
 		std::string UUID = GetBinding("uuid", "");
 		if (UUID.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingUUID);
@@ -111,6 +119,10 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementPolicy_handler::DoPut() {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+
 		std::string UUID = GetBinding("uuid", "");
 		ProvObjects::ManagementPolicy Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {

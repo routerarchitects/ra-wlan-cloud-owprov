@@ -625,6 +625,65 @@ namespace OpenWifi {
 			DefSer.cost = 0.0;
 			ServiceClassDB_->CreateRecord(DefSer);
 		}
+
+		if (!PolicyDB().Exists("name", "Admin")) {
+			ProvObjects::ManagementPolicy P;
+			P.info.id = MicroServiceCreateUUID();
+			P.info.name = "Admin";
+			P.info.description = "Administrative access within the assigned role scope";
+			P.info.created = P.info.modified = Utils::Now();
+
+			ProvObjects::ManagementPolicyEntry E1;
+			E1.resources = {"operator"}; E1.access = {"CREATE", "READ", "UPDATE", "DELETE"}; P.entries.push_back(E1);
+			ProvObjects::ManagementPolicyEntry E2;
+			E2.resources = {"customer", "entity", "venue", "inventory", "configuration", "managementRole", "user", "device"};
+			E2.access = {"FULL"}; P.entries.push_back(E2);
+			ProvObjects::ManagementPolicyEntry E3;
+			E3.resources = {"managementPolicy"}; E3.access = {"READ"}; P.entries.push_back(E3);
+
+			PolicyDB().CreateRecord(P);
+		}
+		if (!PolicyDB().Exists("name", "CSR")) {
+			ProvObjects::ManagementPolicy P;
+			P.info.id = MicroServiceCreateUUID();
+			P.info.name = "CSR";
+			P.info.description = "Customer-support access within the assigned role scope";
+			P.info.created = P.info.modified = Utils::Now();
+
+			ProvObjects::ManagementPolicyEntry E1;
+			E1.resources = {"customer", "entity", "venue", "inventory", "configuration", "device"};
+			E1.access = {"READ"}; P.entries.push_back(E1);
+
+			PolicyDB().CreateRecord(P);
+		}
+		if (!PolicyDB().Exists("name", "NOC")) {
+			ProvObjects::ManagementPolicy P;
+			P.info.id = MicroServiceCreateUUID();
+			P.info.name = "NOC";
+			P.info.description = "Operational and monitoring access within the assigned role scope";
+			P.info.created = P.info.modified = Utils::Now();
+
+			ProvObjects::ManagementPolicyEntry E1;
+			E1.resources = {"entity", "venue", "inventory"}; E1.access = {"READ"}; P.entries.push_back(E1);
+			ProvObjects::ManagementPolicyEntry E2;
+			E2.resources = {"configuration", "device"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
+
+			PolicyDB().CreateRecord(P);
+		}
+		if (!PolicyDB().Exists("name", "Installer")) {
+			ProvObjects::ManagementPolicy P;
+			P.info.id = MicroServiceCreateUUID();
+			P.info.name = "Installer";
+			P.info.description = "Installation access within the assigned role scope";
+			P.info.created = P.info.modified = Utils::Now();
+
+			ProvObjects::ManagementPolicyEntry E1;
+			E1.resources = {"venue", "configuration"}; E1.access = {"READ"}; P.entries.push_back(E1);
+			ProvObjects::ManagementPolicyEntry E2;
+			E2.resources = {"inventory", "device"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
+
+			PolicyDB().CreateRecord(P);
+		}
 	}
 } // namespace OpenWifi
 

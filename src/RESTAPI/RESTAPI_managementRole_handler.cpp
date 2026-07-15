@@ -72,6 +72,22 @@ namespace OpenWifi {
 		return OK();
 	}
 
+	static bool FindExactExistingRole(ManagementRoleDB &DB, const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
+		ManagementRoleDB::RecordVec Roles;
+		std::string WhereClause = "entity='" + entityId + "' and venue='" + venueId + "'";
+		if (DB.GetRecords(0, 500, Roles, WhereClause)) {
+			for (const auto &role : Roles) {
+				for (const auto &user : role.users) {
+					if (user == userId) {
+						ExistingRole = role;
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 	void RESTAPI_managementRole_handler::DoPost() {
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty()) {
@@ -93,9 +109,43 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
+		// Validate system policy exists in DB
 		if (!NewObject.managementPolicy.empty() &&
 			!StorageService()->PolicyDB().Exists("id", NewObject.managementPolicy)) {
 			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+		}
+
+		// Validate venue belongs to entity
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue VenueObj;
+			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, VenueObj)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			if (VenueObj.entity != NewObject.entity) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
+		}
+
+		if (NewObject.users.empty()) {
+			return BadRequest(RESTAPI::Errors::MissingUserID);
+		}
+		std::string UserId = NewObject.users[0];
+
+		// Check for existing role (idempotent upsert)
+		ProvObjects::ManagementRole ExistingRole;
+		if (FindExactExistingRole(DB_, UserId, NewObject.entity, NewObject.venue, ExistingRole)) {
+			std::string OldPolicy = ExistingRole.managementPolicy;
+			ExistingRole.managementPolicy = NewObject.managementPolicy;
+			ExistingRole.info.modified = Utils::Now();
+
+			if (DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
+				MoveUsage(StorageService()->PolicyDB(), DB_, OldPolicy, NewObject.managementPolicy, ExistingRole.info.id);
+
+				Poco::JSON::Object Answer;
+				ExistingRole.to_json(Answer);
+				return ReturnObject(Answer);
+			}
+			return InternalError(RESTAPI::Errors::RecordNotUpdated);
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
@@ -130,6 +180,25 @@ namespace OpenWifi {
 
 		if (!UpdateObjectInfo(RawObject, UserInfo_.userinfo, Existing.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
+		}
+
+		// Validate system policy exists in DB
+		if (RawObject->has("managementPolicy")) {
+			std::string PolicyUUID = RawObject->get("managementPolicy").toString();
+			if (!PolicyUUID.empty() && !StorageService()->PolicyDB().Exists("id", PolicyUUID)) {
+				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+			}
+		}
+
+		// Validate venue belongs to entity
+		if (!NewObject.venue.empty()) {
+			ProvObjects::Venue VenueObj;
+			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, VenueObj)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			if (VenueObj.entity != NewObject.entity) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
 		}
 
 		std::string FromPolicy, ToPolicy;

@@ -19,6 +19,7 @@
 #include "Poco/TemporaryFile.h"
 
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
+#include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "framework/AuthClient.h"
 #include "framework/RESTAPI_GenericServerAccounting.h"
 #include "framework/RESTAPI_RateLimiter.h"
@@ -60,11 +61,9 @@ namespace OpenWifi {
 			  AlwaysAuthorize_(AlwaysAuthorize), Server_(Server), MyRates_(Profile),
 			  TransactionId_(TransactionId) {}
 
-		inline bool RoleIsAuthorized([[maybe_unused]] const std::string &Path,
-									 [[maybe_unused]] const std::string &Method,
-									 [[maybe_unused]] std::string &Reason) {
-			return true;
-		}
+		bool RoleIsAuthorized(const std::string &Path,
+							  const std::string &Method,
+							  std::string &Reason);
 
 		inline void handleRequest(Poco::Net::HTTPServerRequest &RequestIn,
 								  Poco::Net::HTTPServerResponse &ResponseIn) final {
@@ -716,6 +715,10 @@ namespace OpenWifi {
 		SecurityObjects::UserInfoAndPolicy UserInfo_;
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
+		bool ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue);
+		bool PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource, const std::string &Method);
+		bool FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole);
+		std::string GetResourceName(const std::string &Path);
 
 	  protected:
 		BindingMap Bindings_;
