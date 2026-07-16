@@ -32,7 +32,10 @@ The Role-Based Access Control (RBAC) model is split between organizational scopi
 
 ### Issue 2.2: Redundant DB Lookup Bottleneck (Performance Optimization)
 - **Before (Main Branch)**: Every request resolved roles and policies by making multiple synchronous SQL database calls to target tables.
-- **Now**: Introduced `AuthCache` using a thread-safe `std::shared_mutex` to store role lists and policies.
+- **Now**: 
+  - Introduced `AuthCache` using a thread-safe `std::shared_mutex` to store role lists and policies.
+  - Caches roles **user-wise** using a `std::map<std::string, CachedUser>` keyed by `userId` to minimize memory overhead; roles are only lazy-loaded from the database on a user's first request (cache miss).
+  - Uses read/write lock synchronization (concurrent `std::shared_lock` for cache reads, exclusive `std::unique_lock` for writes and cache clearing).
 
 ### Issue 2.3: In-Memory Role Filtering
 - **Before (Main Branch)**: `FindExistingRole` generated SQL queries to filter roles directly on the database on every lookup request:
