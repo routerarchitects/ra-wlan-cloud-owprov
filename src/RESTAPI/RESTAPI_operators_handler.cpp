@@ -26,13 +26,19 @@ namespace OpenWifi {
 		}
 
 		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
-		if (!IsRoot) {
-			std::set<std::string> AllowedOperatorIds;
+		bool AllOperatorsAllowed = IsRoot;
+		std::set<std::string> AllowedOperatorIds;
+
+		if (!AllOperatorsAllowed) {
 			std::vector<ProvObjects::ManagementRole> Roles;
 			if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 				auto &EntityDB = StorageService()->EntityDB();
 				for (const auto &role : Roles) {
 					if (role.entity.empty()) continue;
+					if (role.entity == EntityDB.RootUUID()) {
+						AllOperatorsAllowed = true;
+						break;
+					}
 					std::string currentId = role.entity;
 					std::set<std::string> visited;
 					while (!currentId.empty() && currentId != EntityDB.RootUUID()) {
@@ -52,9 +58,10 @@ namespace OpenWifi {
 					}
 				}
 			}
-			if (AllowedOperatorIds.count(uuid) == 0) {
-				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
-			}
+		}
+
+		if (!AllOperatorsAllowed && AllowedOperatorIds.count(uuid) == 0) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		Poco::JSON::Object Answer;

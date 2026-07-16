@@ -10,12 +10,18 @@ namespace OpenWifi {
 		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
 
 		std::set<std::string> AllowedOperatorIds;
-		if (!IsRoot) {
+		bool AllOperatorsAllowed = IsRoot;
+
+		if (!AllOperatorsAllowed) {
 			std::vector<ProvObjects::ManagementRole> Roles;
 			if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 				auto &EntityDB = StorageService()->EntityDB();
 				for (const auto &role : Roles) {
 					if (role.entity.empty()) continue;
+					if (role.entity == EntityDB.RootUUID()) {
+						AllOperatorsAllowed = true;
+						break;
+					}
 					std::string currentId = role.entity;
 					std::set<std::string> visited;
 					while (!currentId.empty() && currentId != EntityDB.RootUUID()) {
@@ -38,7 +44,7 @@ namespace OpenWifi {
 		}
 
 		if (QB_.CountOnly) {
-			if (IsRoot) {
+			if (AllOperatorsAllowed) {
 				auto Count = DB_.Count();
 				return ReturnCountOnly(Count);
 			} else {
@@ -55,7 +61,7 @@ namespace OpenWifi {
 		}
 
 		if (!QB_.Select.empty()) {
-			if (IsRoot) {
+			if (AllOperatorsAllowed) {
 				return ReturnRecordList<decltype(DB_), ProvObjects::Operator>("operators", DB_, *this);
 			} else {
 				Poco::JSON::Array ObjArr;
@@ -80,7 +86,7 @@ namespace OpenWifi {
 		}
 
 		std::vector<ProvObjects::Operator> Entries;
-		if (IsRoot) {
+		if (AllOperatorsAllowed) {
 			DB_.GetRecords(QB_.Offset, QB_.Limit, Entries);
 		} else {
 			std::vector<ProvObjects::Operator> AllEntries;
