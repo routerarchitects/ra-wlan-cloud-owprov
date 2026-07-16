@@ -20,6 +20,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveContactScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "contact", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		Poco::JSON::Object Answer;
 		std::string Arg;
@@ -56,6 +64,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveContactScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "contact", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		bool Force = false;
 		std::string Arg;
@@ -84,6 +100,20 @@ namespace OpenWifi {
 		ProvObjects::Contact NewObject;
 		if (!NewObject.from_json(Obj)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		RBAC::TargetScope scope;
+		if (!NewObject.entity.empty()) {
+			scope.entity = NewObject.entity;
+		} else if (RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope)) {
+			// scope resolved from the attached policy
+		}
+		if (!scope.entity.empty() || !scope.venue.empty()) {
+			if (!RBAC::RequireAccess(*this, "contact", "CREATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		if (!ProvObjects::CreateObjectInfo(Obj, UserInfo_.userinfo, NewObject.info)) {
@@ -124,6 +154,14 @@ namespace OpenWifi {
 		ProvObjects::Contact Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveContactScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "contact", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		const auto &RawObject = ParsedBody_;

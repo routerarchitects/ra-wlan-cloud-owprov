@@ -165,12 +165,15 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_venue_list_handler.cpp src/RESTAPI/RESTAPI_venue_list_handler.h
         src/RESTAPI/RESTAPI_managementPolicy_list_handler.cpp src/RESTAPI/RESTAPI_managementPolicy_list_handler.h
         src/RESTAPI/RESTAPI_managementRole_handler.cpp src/RESTAPI/RESTAPI_managementRole_handler.h
+        src/RESTAPI/RESTAPI_managementRole_validation.cpp src/RESTAPI/RESTAPI_managementRole_validation.h
         src/RESTAPI/RESTAPI_managementRole_list_handler.cpp src/RESTAPI/RESTAPI_managementRole_list_handler.h
         src/RESTAPI/RESTAPI_configurations_list_handler.cpp src/RESTAPI/RESTAPI_configurations_list_handler.h
         src/RESTAPI/RESTAPI_iptocountry_handler.cpp src/RESTAPI/RESTAPI_iptocountry_handler.h
         src/RESTAPI/RESTAPI_subscriber_handler.h src/RESTAPI/RESTAPI_subscriber_handler.cpp
         src/RESTAPI/RESTAPI_asset_server.cpp src/RESTAPI/RESTAPI_asset_server.h
         src/RESTAPI/RESTAPI_db_helpers.h
+        src/RESTAPI/RESTAPI_rbac_helpers.cpp src/RESTAPI/RESTAPI_rbac_helpers.h
+        src/RESTAPI/RESTAPI_list_helpers.h
         src/RESTAPI/RESTAPI_map_handler.cpp src/RESTAPI/RESTAPI_map_handler.h
         src/RESTAPI/RESTAPI_map_list_handler.cpp src/RESTAPI/RESTAPI_map_list_handler.h
         src/RESTAPI/RESTAPI_variables_handler.cpp src/RESTAPI/RESTAPI_variables_handler.h
@@ -199,6 +202,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_sub_devices_handler.cpp src/RESTAPI/RESTAPI_sub_devices_handler.h
         src/RESTAPI/RESTAPI_service_class_list_handler.cpp src/RESTAPI/RESTAPI_service_class_list_handler.h
         src/RESTAPI/RESTAPI_service_class_handler.cpp src/RESTAPI/RESTAPI_service_class_handler.h
+        src/RESTAPI/RESTAPI_operator_entity_list_handler.cpp src/RESTAPI/RESTAPI_operator_entity_list_handler.h
         src/RESTAPI/RESTAPI_operators_list_handler.cpp src/RESTAPI/RESTAPI_operators_list_handler.h
         src/RESTAPI/RESTAPI_operators_handler.cpp src/RESTAPI/RESTAPI_operators_handler.h
         src/storage/storage_op_contacts.cpp src/storage/storage_op_contacts.h
@@ -243,3 +247,111 @@ target_link_libraries(owprov PUBLIC
         CppKafka::cppkafka
         resolv
         fmt::fmt)
+
+# --- Unit Tests ---
+option(BUILD_TESTS "Build unit tests" OFF)
+if(BUILD_TESTS)
+    set(owprov_rbac_gtest_sources
+        tests/RbacOperatorHierarchyTest.cpp
+        tests/support/OwprovTestSupport.cpp
+        tests/support/OwprovTestSupport.h
+    )
+
+    set(owprov_rbac_gtest_available TRUE)
+    foreach(source_file IN LISTS owprov_rbac_gtest_sources)
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
+            set(owprov_rbac_gtest_available FALSE)
+        endif()
+    endforeach()
+
+    if(owprov_rbac_gtest_available)
+        enable_testing()
+        include(FetchContent)
+        FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        v1.14.0
+        )
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+
+        add_executable(owprov_rbac_tests
+            tests/RbacOperatorHierarchyTest.cpp
+
+            # RBAC helpers under test
+            src/RESTAPI/RESTAPI_rbac_helpers.cpp
+
+            # REST objects (serialisation)
+            src/RESTObjects/RESTAPI_ProvObjects.cpp
+            src/RESTObjects/RESTAPI_SecurityObjects.cpp
+            src/RESTObjects/RESTAPI_GWobjects.cpp
+            src/RESTObjects/RESTAPI_FMSObjects.cpp
+            src/RESTObjects/RESTAPI_CertObjects.cpp
+            src/RESTObjects/RESTAPI_OWLSobjects.cpp
+            src/RESTObjects/RESTAPI_AnalyticsObjects.cpp
+            src/RESTObjects/RESTAPI_SubObjects.cpp
+
+            # Storage service and databases used by RBAC
+            src/StorageService.cpp
+            src/storage/storage_entity.cpp
+            src/storage/storage_policies.cpp
+            src/storage/storage_management_roles.cpp
+            src/storage/storage_venue.cpp
+            src/storage/storage_operataor.cpp
+            src/storage/storage_location.cpp
+            src/storage/storage_contact.cpp
+            src/storage/storage_inventory.cpp
+            src/storage/storage_configurations.cpp
+            src/storage/storage_tags.cpp
+            src/storage/storage_maps.cpp
+            src/storage/storage_signup.cpp
+            src/storage/storage_variables.cpp
+            src/storage/storage_service_class.cpp
+            src/storage/storage_sub_devices.cpp
+            src/storage/storage_op_contacts.cpp
+            src/storage/storage_op_locations.cpp
+            src/storage/storage_overrides.cpp
+            src/storage/storage_glblraccounts.cpp
+            src/storage/storage_glblrcerts.cpp
+            src/storage/storage_orion_accounts.cpp
+            src/storage/storage_radius_endpoints.cpp
+
+            # Framework utilities needed by storage and RBAC
+            src/framework/utils.cpp
+            src/framework/SubSystemServer.cpp
+            src/SerialNumberCache.cpp
+            src/RESTAPI/RESTAPI_managementRole_validation.cpp
+            tests/support/OwprovTestSupport.cpp
+        )
+
+        target_include_directories(owprov_rbac_tests PRIVATE
+            src
+            tests
+            /usr/local/include
+        )
+
+        target_link_libraries(owprov_rbac_tests PRIVATE
+            GTest::gtest_main
+            ${Poco_LIBRARIES}
+            ${MySQL_LIBRARIES}
+            ${ZLIB_LIBRARIES}
+            CppKafka::cppkafka
+            resolv
+            fmt::fmt
+        )
+
+        include(GoogleTest)
+        gtest_discover_tests(owprov_rbac_tests)
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/owprov_rbac_tests.test")
+        message(WARNING "RBAC gtest sources are missing; using prebuilt tests/owprov_rbac_tests.test")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/owprov_rbac_tests.test"
+            "${CMAKE_CURRENT_BINARY_DIR}/owprov_rbac_tests"
+            COPYONLY
+        )
+        add_custom_target(owprov_rbac_tests ALL
+            DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/owprov_rbac_tests")
+    else()
+        message(WARNING "RBAC test sources and prebuilt test binary are missing; skipping owprov_rbac_tests")
+    endif()
+endif()

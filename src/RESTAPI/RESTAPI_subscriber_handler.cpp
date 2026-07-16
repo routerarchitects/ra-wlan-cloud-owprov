@@ -9,6 +9,7 @@
 
 #include "RESTAPI_subscriber_handler.h"
 #include "Poco/String.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "Signup.h"
 #include "StorageService.h"
 #include "framework/MicroServiceFuncs.h"
@@ -17,8 +18,67 @@
 #include "framework/orm.h"
 #include "framework/utils.h"
 #include "sdks/SDK_sec.h"
+#include <algorithm>
 
 namespace OpenWifi {
+	namespace {
+		bool ResolveSignupScope(const ProvObjects::SignupEntry &signup,
+								RBAC::TargetScope &scope) {
+			if (RBAC::ResolveSubscriberScope(signup.userId, scope)) {
+				return true;
+			}
+
+			ProvObjects::Operator op;
+			if (!signup.operatorId.empty() &&
+				StorageService()->OperatorDB().GetRecord("id", signup.operatorId, op) &&
+				!op.entityId.empty()) {
+				scope.entity = op.entityId;
+				scope.venue.clear();
+				return true;
+			}
+
+			return false;
+		}
+
+		bool RequireSignupAccess(RESTAPIHandler &handler,
+								 const ProvObjects::SignupEntry &signup,
+								 const std::string &action) {
+			RBAC::TargetScope scope;
+			if (ResolveSignupScope(signup, scope)) {
+				return RBAC::RequireAccess(handler, "subscriber", action, scope);
+			}
+			if (RBAC::IsRootUser(handler)) {
+				return true;
+			}
+			handler.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			return false;
+		}
+
+		bool RequireSubscriberCreateAccess(RESTAPIHandler &handler,
+										   const ProvObjects::Operator &targetOperator) {
+			if (RBAC::IsRootUser(handler)) {
+				return true;
+			}
+			return RBAC::RequireAccess(handler, "subscriber", "FULL",
+									   RBAC::TargetScope{targetOperator.entityId, ""});
+		}
+
+		void FilterSignupsByAccess(RESTAPIHandler &handler,
+								   SignupDB::RecordVec &signups,
+								   const std::string &action) {
+			signups.erase(
+				std::remove_if(
+					signups.begin(), signups.end(),
+					[&](const ProvObjects::SignupEntry &signup) {
+						RBAC::TargetScope scope;
+						if (!ResolveSignupScope(signup, scope)) {
+							return !RBAC::IsRootUser(handler);
+						}
+						return !RBAC::HasAccess(handler, "subscriber", action, scope);
+					}),
+				signups.end());
+		}
+	} // namespace
 
 	/*
 		1) Record notExists + resend=true/false -> Create new UUID and call Security
@@ -56,6 +116,9 @@ namespace OpenWifi {
 		if (SignupOperator.entityId.empty() ||
 			!StorageService()->EntityDB().Exists("id", SignupOperator.entityId)) {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		}
+		if (!RequireSubscriberCreateAccess(*this, SignupOperator)) {
+			return;
 		}
 
 		// Lookup existing signup entry by email and enforce state-machine semantics.
@@ -287,6 +350,9 @@ namespace OpenWifi {
 			poco_information(
 				Logger(), fmt::format("Looking for signup for {}: Signup {}", EMail, SignupUUID));
 			if (StorageService()->SignupDB().GetRecord("id", SignupUUID, SE)) {
+				if (!RequireSignupAccess(*this, SE, "READ")) {
+					return;
+				}
 				SE.to_json(Answer);
 				return ReturnObject(Answer);
 			}
@@ -296,6 +362,7 @@ namespace OpenWifi {
 			poco_information(
 				Logger(), fmt::format("Looking for signup for {}: Signup {}", EMail, SignupUUID));
 			if (StorageService()->SignupDB().GetRecords(0, 100, SEs, " email='" + EMail + "' ")) {
+				FilterSignupsByAccess(*this, SEs, "READ");
 				return ReturnObject("signups", SEs);
 			}
 			return NotFound();
@@ -305,6 +372,7 @@ namespace OpenWifi {
 							 fmt::format("Looking for signup for {}: Mac {}", EMail, macAddress));
 			if (StorageService()->SignupDB().GetRecords(0, 100, SEs,
 														" macAddress='" + macAddress + "' ")) {
+				FilterSignupsByAccess(*this, SEs, "READ");
 				return ReturnObject("signups", SEs);
 			}
 			return NotFound();
@@ -313,6 +381,7 @@ namespace OpenWifi {
 							 fmt::format("Returning list of signups...", EMail, macAddress));
 			SignupDB::RecordVec SEs;
 			StorageService()->SignupDB().GetRecords(0, 100, SEs);
+			FilterSignupsByAccess(*this, SEs, "READ");
 			return ReturnObject("signups", SEs);
 		}
 		poco_information(Logger(), fmt::format("Bad signup get", EMail, macAddress));
@@ -336,6 +405,10 @@ namespace OpenWifi {
 									 "[SUBSCRIBER_DELETE]: Signup record not found for subscriber [{}].",
 									 subscriberId));
 			return NotFound();
+		}
+
+		if (!RequireSignupAccess(*this, signupRecord, "DELETE")) {
+			return;
 		}
 
 		auto inventoryCount = StorageService()->InventoryDB().Count(

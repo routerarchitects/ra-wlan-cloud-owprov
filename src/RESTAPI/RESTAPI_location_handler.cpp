@@ -21,6 +21,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return BadRequest(RESTAPI::Errors::MissingUUID);
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveLocationScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "location", "READ", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		std::string Arg;
 		Poco::JSON::Object Answer;
@@ -54,6 +62,14 @@ namespace OpenWifi {
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
 		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveLocationScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "location", "DELETE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
 
 		bool Force = false;
 		std::string Arg;
@@ -81,6 +97,20 @@ namespace OpenWifi {
 		ProvObjects::Location NewObject;
 		if (!NewObject.from_json(Obj)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		RBAC::TargetScope scope;
+		if (!NewObject.entity.empty()) {
+			scope.entity = NewObject.entity;
+		} else if (RBAC::ResolveManagementPolicyScope(NewObject.managementPolicy, scope)) {
+			// scope resolved from the attached policy
+		}
+		if (!scope.entity.empty() || !scope.venue.empty()) {
+			if (!RBAC::RequireAccess(*this, "location", "CREATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		if (!ProvObjects::CreateObjectInfo(Obj, UserInfo_.userinfo, NewObject.info)) {
@@ -120,6 +150,14 @@ namespace OpenWifi {
 		ProvObjects::Location Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+		RBAC::TargetScope scope;
+		if (RBAC::ResolveLocationScope(UUID, scope)) {
+			if (!RBAC::RequireAccess(*this, "location", "UPDATE", scope)) {
+				return;
+			}
+		} else if (!RBAC::IsRootUser(*this)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
 		const auto &RawObject = ParsedBody_;

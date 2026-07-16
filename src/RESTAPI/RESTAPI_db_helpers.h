@@ -4,12 +4,17 @@
 
 #pragma once
 
+#include <algorithm>
+#include <type_traits>
 #include <utility>
 
 #include "Poco/StringTokenizer.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
+#include "RESTAPI/RESTAPI_list_helpers.h"
 #include "StorageService.h"
 #include "framework/ConfigurationValidator.h"
+#include "framework/orm.h"
 #include "libs/croncpp.h"
 #include "sdks/SDK_sec.h"
 
@@ -239,6 +244,11 @@ namespace OpenWifi {
 		return true;
 	}
 
+	template <typename T, typename = void> struct HasSubscriberId : std::false_type {};
+	template <typename T>
+	struct HasSubscriberId<T, std::void_t<decltype(std::declval<T>().subscriberId)>>
+		: std::true_type {};
+
 	typedef std::tuple<std::string, std::string, std::string> triplet_t;
 
 	inline void AddLocationTriplet(const std::string &id, std::vector<triplet_t> &IDs) {
@@ -283,31 +293,72 @@ namespace OpenWifi {
 	}
 
 	template <typename DB>
-	void ListHandler(const char *BlockName, DB &DBInstance, RESTAPIHandler &R) {
+	void ListVenueHandler(const char *BlockName, DB &DBInstance, RESTAPIHandler &R) {
 		auto Entity = R.GetParameter("entity", "");
 		auto Venue = R.GetParameter("venue", "");
 
 		typedef typename DB::RecordVec RecVec;
 		typedef typename DB::RecordName RecType;
 
-		if constexpr (std::is_same_v<RecType, ProvObjects::Venue>) {
-			auto LocationsForVenue = R.GetParameter("locationsForVenue", "");
-			if (!LocationsForVenue.empty()) {
-				std::vector<triplet_t> IDs;
-				GetLocationsForVenue(LocationsForVenue, IDs);
-				Poco::JSON::Array A;
-				for (const auto &[name, description, uuid] : IDs) {
-					Poco::JSON::Object O;
-					O.set("name", name);
-					O.set("description", description);
-					O.set("uuid", uuid);
-					A.add(O);
-				}
-				Poco::JSON::Object Answer;
-				Answer.set("locations", A);
-				return R.ReturnObject(Answer);
+		auto filterVisible = [&](RecVec &entries) {
+			if (RBAC::IsRootUser(R)) {
+				return;
 			}
+			entries = RESTAPI::FilterRecords(
+				entries,
+				[&](const auto &entry) {
+					return RBAC::IsVenueVisible(R, entry.info.id);
+				});
+		};
+
+		auto fetchAll = [&](const std::string &where) {
+			RecVec entries;
+			auto total = DBInstance.Count(where);
+			if (total > 0) {
+				DBInstance.GetRecords(0, total, entries, where);
+			}
+			return entries;
+		};
+
+		if (!R.QB_.Select.empty()) {
+			RecVec entries;
+			for (const auto &id : R.SelectedRecords()) {
+				RecType entry;
+				if (DBInstance.GetRecord("id", id, entry)) {
+					entries.push_back(entry);
+				}
+			}
+			filterVisible(entries);
+			if (R.QB_.CountOnly)
+				return R.ReturnCountOnly(entries.size());
+			return MakeJSONObjectArray(BlockName, entries, R);
 		}
+
+		RecVec Entries;
+		if (!Entity.empty()) {
+			Entries = fetchAll(fmt::format(" entity='{}' ", ORM::Escape(Entity)));
+		} else if (!Venue.empty()) {
+			Entries = fetchAll(fmt::format(" venue='{}' ", ORM::Escape(Venue)));
+		} else {
+			Entries = fetchAll("");
+		}
+		filterVisible(Entries);
+		if (R.QB_.CountOnly) {
+			return R.ReturnCountOnly(Entries.size());
+		}
+		return MakeJSONObjectArray(
+			BlockName,
+			RESTAPI::ApplyPagination(Entries, R.QB_.Offset, R.QB_.Limit),
+			R);
+	}
+
+	template <typename DB>
+	void ListHandler(const char *BlockName, DB &DBInstance, RESTAPIHandler &R) {
+		auto Entity = R.GetParameter("entity", "");
+		auto Venue = R.GetParameter("venue", "");
+
+		typedef typename DB::RecordVec RecVec;
+		typedef typename DB::RecordName RecType;
 
 		if (!R.QB_.Select.empty()) {
 			return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);
@@ -354,7 +405,31 @@ namespace OpenWifi {
 		}
 
 		if (!R.QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DB), RecType>(BlockName, DB, R);
+			Poco::JSON::Array ObjArr;
+			for (const auto &i : R.SelectedRecords()) {
+				RecType E;
+				if (!DB.GetRecord("id", i, E)) {
+					return R.BadRequest(RESTAPI::Errors::UnknownId);
+				}
+				if (E.operatorId != OperatorId) {
+					return R.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+				if constexpr (HasSubscriberId<RecType>::value) {
+					if (!subscriberId.empty() && E.subscriberId != subscriberId) {
+						return R.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+					}
+				} else if (!subscriberId.empty()) {
+					return R.UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+				Poco::JSON::Object Obj;
+				E.to_json(Obj);
+				if (R.NeedAdditionalInfo())
+					AddExtendedInfo(E, Obj);
+				ObjArr.add(Obj);
+			}
+			Poco::JSON::Object Answer;
+			Answer.set(BlockName, ObjArr);
+			return R.ReturnObject(Answer);
 		}
 
 		RecVec Entries;

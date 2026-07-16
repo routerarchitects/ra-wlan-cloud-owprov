@@ -34,16 +34,13 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_inventory_list_handler::DoGet() {
-
 		if (GetBoolParameter("orderSpec")) {
 			return ReturnFieldList(DB_, *this);
 		}
 
-		bool SerialOnly = GetBoolParameter("serialOnly");
-
+		const bool SerialOnly = GetBoolParameter("serialOnly");
 		std::string UUID;
-		std::string Arg, Arg2;
-
+		std::string Arg;
 		std::string OrderBy{" ORDER BY serialNumber ASC "};
 		if (HasParameter("orderBy", Arg)) {
 			if (!DB_.PrepareOrderBy(Arg, OrderBy)) {
@@ -51,89 +48,94 @@ namespace OpenWifi {
 			}
 		}
 
+		auto allow = [&](const ProvObjects::InventoryTag &record) {
+			RBAC::TargetScope scope;
+			if (!RBAC::ResolveInventoryScope(record.serialNumber, scope)) {
+				return RBAC::IsRootUser(*this);
+			}
+			return RBAC::HasAccess(*this, "inventory", "LIST", scope) ||
+				   RBAC::HasAccess(*this, "inventory", "READ", scope);
+		};
+
+		auto filterAndSend = [&](ProvObjects::InventoryTagVec tags) {
+			tags.erase(std::remove_if(tags.begin(), tags.end(),
+									  [&](const auto &record) { return !allow(record); }),
+					   tags.end());
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(tags.size());
+			}
+			return SendList(tags, SerialOnly);
+		};
+
 		if (!QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DB_)>("taglist", DB_, *this);
-		} else if (HasParameter("entity", UUID)) {
-			if (QB_.CountOnly) {
-				auto C = DB_.Count(StorageService()->InventoryDB().OP("entity", ORM::EQ, UUID));
-				return ReturnCountOnly(C);
+			ProvObjects::InventoryTagVec tags;
+			for (const auto &id : SelectedRecords()) {
+				ProvObjects::InventoryTag record;
+				if (DB_.GetRecord(is_uuid(id) ? "id" : "serialNumber", id, record) &&
+					allow(record)) {
+					tags.push_back(record);
+				}
 			}
-			ProvObjects::InventoryTagVec Tags;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Tags, DB_.OP("entity", ORM::EQ, UUID), OrderBy);
-			return SendList(Tags, SerialOnly);
-		} else if (HasParameter("venue", UUID)) {
-			if (QB_.CountOnly) {
-				auto C = DB_.Count(DB_.OP("venue", ORM::EQ, UUID));
-				return ReturnCountOnly(C);
-			}
-			ProvObjects::InventoryTagVec Tags;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Tags, DB_.OP("venue", ORM::EQ, UUID), OrderBy);
-			return SendList(Tags, SerialOnly);
-		} else if (GetBoolParameter("subscribersOnly") && GetBoolParameter("unassigned")) {
-			if (QB_.CountOnly) {
-				auto C = DB_.Count(" devClass='subscriber' and subscriber='' ");
-				return ReturnCountOnly(C);
-			}
-			ProvObjects::InventoryTagVec Tags;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Tags, " devClass='subscriber' and subscriber='' ",
+			return filterAndSend(tags);
+		}
+
+		if (HasParameter("entity", UUID)) {
+			ProvObjects::InventoryTagVec tags;
+			DB_.GetRecords(QB_.Offset, QB_.Limit, tags, DB_.OP("entity", ORM::EQ, UUID), OrderBy);
+			return filterAndSend(tags);
+		}
+
+		if (HasParameter("venue", UUID)) {
+			ProvObjects::InventoryTagVec tags;
+			DB_.GetRecords(QB_.Offset, QB_.Limit, tags, DB_.OP("venue", ORM::EQ, UUID), OrderBy);
+			return filterAndSend(tags);
+		}
+
+		if (GetBoolParameter("subscribersOnly") && GetBoolParameter("unassigned")) {
+			ProvObjects::InventoryTagVec tags;
+			DB_.GetRecords(QB_.Offset, QB_.Limit, tags, " devClass='subscriber' and subscriber='' ",
 						   OrderBy);
-			if (QB_.CountOnly) {
-				auto C = DB_.Count(DB_.OP("venue", ORM::EQ, UUID));
-				return ReturnCountOnly(C);
-			}
-			return SendList(Tags, SerialOnly);
-		} else if (GetBoolParameter("subscribersOnly")) {
-			if (QB_.CountOnly) {
-				auto C = DB_.Count(" devClass='subscriber' and subscriber!='' ");
-				return ReturnCountOnly(C);
-			}
-			ProvObjects::InventoryTagVec Tags;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Tags,
+			return filterAndSend(tags);
+		}
+
+		if (GetBoolParameter("subscribersOnly")) {
+			ProvObjects::InventoryTagVec tags;
+			DB_.GetRecords(QB_.Offset, QB_.Limit, tags,
 						   " devClass='subscriber' and subscriber!='' ", OrderBy);
-			return SendList(Tags, SerialOnly);
-		} else if (GetBoolParameter("unassigned")) {
-			if (QB_.CountOnly) {
-				std::string Empty;
-				auto C = DB_.Count(InventoryDB::OP(DB_.OP("venue", ORM::EQ, Empty), ORM::AND,
-												   DB_.OP("entity", ORM::EQ, Empty)));
-				return ReturnCountOnly(C);
-			}
-			ProvObjects::InventoryTagVec Tags;
+			return filterAndSend(tags);
+		}
+
+		if (GetBoolParameter("unassigned")) {
+			ProvObjects::InventoryTagVec tags;
 			std::string Empty;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Tags,
+			DB_.GetRecords(QB_.Offset, QB_.Limit, tags,
 						   InventoryDB::OP(DB_.OP("venue", ORM::EQ, Empty), ORM::AND,
 										   DB_.OP("entity", ORM::EQ, Empty)),
 						   OrderBy);
-			return SendList(Tags, SerialOnly);
-		} else if (HasParameter("subscriber", Arg) && !Arg.empty()) {
-			// looking for device(s) for a specific subscriber...
-			ProvObjects::InventoryTagVec Tags;
-			DB_.GetRecords(0, 100, Tags, " subscriber='" + ORM::Escape(Arg) + "'");
-			if (SerialOnly) {
-				std::vector<std::string> SerialNumbers;
-				std::transform(cbegin(Tags), cend(Tags), std::back_inserter(SerialNumbers),
-							   [](const auto &T) { return T.serialNumber; });
-				return ReturnObject("serialNumbers", SerialNumbers);
-			} else {
-				return MakeJSONObjectArray("taglist", Tags, *this);
-			}
-		} else if (QB_.CountOnly) {
-			auto C = DB_.Count();
-			return ReturnCountOnly(C);
-		} else if (GetBoolParameter("rrmOnly")) {
-			Types::UUIDvec_t DeviceList;
-			DB_.GetRRMDeviceList(DeviceList);
-			if (QB_.CountOnly)
-				return ReturnCountOnly(DeviceList.size());
-			else {
-				return ReturnObject("serialNumbers", DeviceList);
-			}
-		} else {
-			ProvObjects::InventoryTagVec Tags;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Tags, "", OrderBy);
-            return SendList(Tags, SerialOnly);
-
-//			return MakeJSONObjectArray("taglist", Tags, *this);
+			return filterAndSend(tags);
 		}
+
+		if (HasParameter("subscriber", Arg) && !Arg.empty()) {
+			ProvObjects::InventoryTagVec tags;
+			DB_.GetRecords(0, 100, tags, " subscriber='" + ORM::Escape(Arg) + "'");
+			return filterAndSend(std::move(tags));
+		}
+
+		if (GetBoolParameter("rrmOnly")) {
+			Types::UUIDvec_t deviceList;
+			DB_.GetRRMDeviceList(deviceList);
+			ProvObjects::InventoryTagVec tags;
+			for (const auto &serial : deviceList) {
+				ProvObjects::InventoryTag record;
+				if (DB_.GetRecord("serialNumber", serial, record) && allow(record)) {
+					tags.push_back(record);
+				}
+			}
+			return filterAndSend(std::move(tags));
+		}
+
+		ProvObjects::InventoryTagVec tags;
+		DB_.GetRecords(QB_.Offset, QB_.Limit, tags, "", OrderBy);
+		return filterAndSend(tags);
 	}
 } // namespace OpenWifi

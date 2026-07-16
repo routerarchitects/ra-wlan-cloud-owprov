@@ -71,6 +71,7 @@ namespace OpenWifi::ProvObjects {
 		field_to_json(Obj, "entries", entries);
 		field_to_json(Obj, "inUse", inUse);
 		field_to_json(Obj, "entity", entity);
+		field_to_json(Obj, "venue", venue);
 	}
 
 	bool ManagementPolicy::from_json(const Poco::JSON::Object::Ptr &Obj) {
@@ -79,6 +80,7 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "entries", entries);
 			field_from_json(Obj, "inUse", inUse);
 			field_from_json(Obj, "entity", entity);
+			field_from_json(Obj, "venue", venue);
 			return true;
 		} catch (...) {
 		}
@@ -208,6 +210,7 @@ namespace OpenWifi::ProvObjects {
 		field_to_json(Obj, "sourceIP", sourceIP);
 		field_to_json(Obj, "registrationId", registrationId);
 		field_to_json(Obj, "entityId", entityId);
+		field_to_json(Obj, "parentOperatorId", parentOperatorId);
 	}
 
 	bool Operator::from_json(const Poco::JSON::Object::Ptr &Obj) {
@@ -221,6 +224,8 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "sourceIP", sourceIP);
 			field_from_json(Obj, "registrationId", registrationId);
 			field_from_json(Obj, "entityId", entityId);
+			field_from_json(Obj, "parentOperatorId", parentOperatorId);
+			field_from_json(Obj, "parentoperatorId", parentOperatorId);
 			return true;
 		} catch (...) {
 		}

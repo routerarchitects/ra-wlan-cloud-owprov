@@ -98,7 +98,7 @@ namespace OpenWifi {
         }
 
         //  Make sure that nobody is using that index
-        auto where = fmt::format(" index='{}' ", NewRecord.Index);
+        auto where = fmt::format(" radiusindex='{}' ", NewRecord.Index);
         if(DB_.Count(where)!=0) {
             return BadRequest(RESTAPI::Errors::RadiusEndpointIndexInvalid);
         }
