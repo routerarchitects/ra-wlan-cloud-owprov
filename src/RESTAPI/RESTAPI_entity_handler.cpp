@@ -17,26 +17,6 @@
 
 namespace OpenWifi {
 
-	static bool IsInsideOperatorHierarchy(const std::string &entityId, EntityDB &db) {
-		std::string currentId = entityId;
-		std::set<std::string> visited;
-		while (!currentId.empty() && currentId != EntityDB::RootUUID()) {
-			if (visited.count(currentId)) {
-				break;
-			}
-			visited.insert(currentId);
-			ProvObjects::Entity ent;
-			if (!db.GetRecord("id", currentId, ent)) {
-				break;
-			}
-			if (!ent.operatorId.empty()) {
-				return true;
-			}
-			currentId = ent.parent;
-		}
-		return false;
-	}
-
 	void RESTAPI_entity_handler::DoGet() {
 		std::string UUID = GetBinding("uuid", "");
 		ProvObjects::Entity Existing;
@@ -126,7 +106,13 @@ namespace OpenWifi {
 			if (NewEntity.parent.empty() || !DB_.Exists("id", NewEntity.parent)) {
 				return BadRequest(RESTAPI::Errors::ParentUUIDMustExist);
 			}
-			if (NewEntity.parent != EntityDB::RootUUID() && !IsInsideOperatorHierarchy(NewEntity.parent, DB_)) {
+			ProvObjects::Entity ParentEntity;
+			if (!DB_.GetRecord("id", NewEntity.parent, ParentEntity)) {
+				return BadRequest(RESTAPI::Errors::ParentUUIDMustExist);
+			}
+			bool ParentIsRoot = (NewEntity.parent == EntityDB::RootUUID());
+			bool ParentIsOperator = (!ParentEntity.operatorId.empty());
+			if (!ParentIsRoot && !ParentIsOperator) {
 				return BadRequest(RESTAPI::Errors::InvalidEntityType);
 			}
 		}
