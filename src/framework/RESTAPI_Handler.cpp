@@ -278,41 +278,21 @@ namespace OpenWifi {
 			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
 		}
 
-		// 1. If venueId is specified, search venue hierarchy first
+		// Find exact match first (entity + venue)
 		if (!venueId.empty()) {
-			std::string currentVenueId = venueId;
-			while (!currentVenueId.empty()) {
-				for (const auto &role : Roles) {
-					if (role.entity == entityId && role.venue == currentVenueId) {
-						ExistingRole = role;
-						return true;
-					}
-				}
-				// Walk up to parent venue
-				ProvObjects::Venue V;
-				if (StorageService()->VenueDB().GetRecord("id", currentVenueId, V)) {
-					currentVenueId = V.parent;
-				} else {
-					break;
-				}
-			}
-		}
-
-		// 2. Search entity hierarchy (fallback for venue check or direct entity check)
-		std::string currentEntityId = entityId;
-		while (!currentEntityId.empty() && currentEntityId != "0") {
 			for (const auto &role : Roles) {
-				if (role.entity == currentEntityId && (role.venue.empty() || role.venue == "")) {
+				if (role.entity == entityId && role.venue == venueId) {
 					ExistingRole = role;
 					return true;
 				}
 			}
-			// Walk up to parent entity
-			ProvObjects::Entity E;
-			if (StorageService()->EntityDB().GetRecord("id", currentEntityId, E)) {
-				currentEntityId = E.parent;
-			} else {
-				break;
+		}
+
+		// Fallback to entity-wide role
+		for (const auto &role : Roles) {
+			if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+				ExistingRole = role;
+				return true;
 			}
 		}
 
