@@ -278,44 +278,38 @@ namespace OpenWifi {
 			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
 		}
 
-		// 1. If venueId is specified, search venue hierarchy first
-		if (!venueId.empty()) {
-			std::string currentVenueId = venueId;
-			while (!currentVenueId.empty()) {
-				for (const auto &role : Roles) {
-					if (role.entity == entityId && role.venue == currentVenueId) {
-						ExistingRole = role;
-						return true;
-					}
-				}
-				// Walk up to parent venue
-				ProvObjects::Venue V;
-				if (StorageService()->VenueDB().GetRecord("id", currentVenueId, V)) {
-					currentVenueId = V.parent;
-				} else {
-					break;
-				}
+		// 1. If user has top/root entity access, grant access under that policy
+		for (const auto &role : Roles) {
+			if (role.entity == EntityDB::RootUUID()) {
+				ExistingRole = role;
+				return true;
 			}
 		}
 
-		// 2. Search entity hierarchy (fallback for venue check or direct entity check)
-		std::string currentEntityId = entityId;
-		while (!currentEntityId.empty()) {
+		// 2. If venueId is specified, check venue policy first, then entity policy of the venue
+		if (!venueId.empty()) {
+			// Check if entity-venue policy exists
 			for (const auto &role : Roles) {
-				if (role.entity == currentEntityId && (role.venue.empty() || role.venue == "")) {
+				if (role.entity == entityId && role.venue == venueId) {
 					ExistingRole = role;
 					return true;
 				}
 			}
-			if (currentEntityId == EntityDB::RootUUID()) {
-				break;
+			// Check if entity policy of the venue exists
+			for (const auto &role : Roles) {
+				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+					ExistingRole = role;
+					return true;
+				}
 			}
-			// Walk up to parent entity
-			ProvObjects::Entity E;
-			if (StorageService()->EntityDB().GetRecord("id", currentEntityId, E)) {
-				currentEntityId = E.parent;
-			} else {
-				break;
+			return false;
+		}
+
+		// 3. Direct entity check
+		for (const auto &role : Roles) {
+			if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+				ExistingRole = role;
+				return true;
 			}
 		}
 

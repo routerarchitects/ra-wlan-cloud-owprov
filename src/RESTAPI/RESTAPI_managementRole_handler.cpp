@@ -73,6 +73,75 @@ namespace OpenWifi {
 		return OK();
 	}
 
+	static bool CheckOverlap(const std::string &userId, const std::string &entityId, const std::string &venueId, const std::string &currentRoleId, std::string &ErrorDescription) {
+		ManagementRoleDB::RecordVec Roles;
+		if (StorageService()->RolesDB().GetRecords(0, 1000, Roles)) {
+			std::vector<ProvObjects::ManagementRole> userRoles;
+			for (const auto &role : Roles) {
+				if (role.info.id == currentRoleId) continue;
+				for (const auto &u : role.users) {
+					if (u == userId) {
+						userRoles.push_back(role);
+						break;
+					}
+				}
+			}
+
+			if (userRoles.empty()) {
+				return false;
+			}
+
+			auto GetPathToRoot = [](const std::string &eId, const std::string &vId) {
+				std::vector<std::pair<std::string, std::string>> path;
+				if (!vId.empty()) {
+					std::string currentVenueId = vId;
+					while (!currentVenueId.empty()) {
+						path.push_back({eId, currentVenueId});
+						ProvObjects::Venue V;
+						if (StorageService()->VenueDB().GetRecord("id", currentVenueId, V)) {
+							currentVenueId = V.parent;
+						} else {
+							break;
+						}
+					}
+				}
+				std::string currentEntityId = eId;
+				while (!currentEntityId.empty()) {
+					path.push_back({currentEntityId, ""});
+					if (currentEntityId == StorageService()->EntityDB().RootUUID()) {
+						break;
+					}
+					ProvObjects::Entity E;
+					if (StorageService()->EntityDB().GetRecord("id", currentEntityId, E)) {
+						currentEntityId = E.parent;
+					} else {
+						break;
+					}
+				}
+				return path;
+			};
+
+			auto newPath = GetPathToRoot(entityId, venueId);
+
+			for (const auto &existingRole : userRoles) {
+				auto existingPath = GetPathToRoot(existingRole.entity, existingRole.venue);
+				for (const auto &node : newPath) {
+					if (node.first == existingRole.entity && node.second == existingRole.venue) {
+						ErrorDescription = "Overlap detected: user already has a policy on parent/ancestor " + existingRole.entity + (existingRole.venue.empty() ? "" : " (venue: " + existingRole.venue + ")");
+						return true;
+					}
+				}
+				for (const auto &node : existingPath) {
+					if (node.first == entityId && node.second == venueId) {
+						ErrorDescription = "Overlap detected: user already has a policy on child/descendant " + existingRole.entity + (existingRole.venue.empty() ? "" : " (venue: " + existingRole.venue + ")");
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 	static bool FindExactExistingRole(ManagementRoleDB &DB, const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
 		ManagementRoleDB::RecordVec Roles;
 		std::string WhereClause = "entity='" + entityId + "' and venue='" + venueId + "'";
@@ -150,6 +219,11 @@ namespace OpenWifi {
 			return InternalError(RESTAPI::Errors::RecordNotUpdated);
 		}
 
+		std::string ErrorDescription;
+		if (CheckOverlap(UserId, NewObject.entity, NewObject.venue, "", ErrorDescription)) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, ErrorDescription);
+		}
+
 		if (DB_.CreateRecord(NewObject)) {
 			AuthCache::GetInstance()->Clear();
 			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
@@ -219,6 +293,14 @@ namespace OpenWifi {
 		if (!CreateMove(RawObject, "venue", &ManagementRoleDB::RecordName::venue, Existing,
 						FromVenue, ToVenue, StorageService()->VenueDB()))
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
+
+		if (!Existing.users.empty()) {
+			std::string UserId = Existing.users[0];
+			std::string ErrDesc;
+			if (CheckOverlap(UserId, Existing.entity, Existing.venue, Existing.info.id, ErrDesc)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, ErrDesc);
+			}
+		}
 
 		if (DB_.UpdateRecord("id", UUID, Existing)) {
 			AuthCache::GetInstance()->Clear();
