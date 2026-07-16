@@ -28,21 +28,32 @@ namespace OpenWifi {
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
-			// Fallback: If target context cannot be resolved and it's a GET request, check if the user has ANY role that permits reading this resource.
-			if (Method == Poco::Net::HTTPRequest::HTTP_GET) {
-				ProvObjects::ManagementRole AnyRole;
-				if (FindAnyRole(UserInfo_.userinfo.id, AnyRole)) {
-					ProvObjects::ManagementPolicy Policy;
-					if (AuthCache::GetInstance()->GetPolicy(AnyRole.managementPolicy, Policy) ||
-						(StorageService()->PolicyDB().GetRecord("id", AnyRole.managementPolicy, Policy) && 
-						 (AuthCache::GetInstance()->SetPolicy(AnyRole.managementPolicy, Policy), true))) {
-						if (PolicyAllows(Policy, Resource, Method)) {
-							return true;
+			// Check if any of the user's roles permit this resource and method.
+			std::vector<ProvObjects::ManagementRole> UserRoles;
+			if (!AuthCache::GetInstance()->GetUserRoles(UserInfo_.userinfo.id, UserRoles)) {
+				ManagementRoleDB::RecordVec DB_Roles;
+				if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
+					for (const auto &role : DB_Roles) {
+						for (const auto &user : role.users) {
+							if (user == UserInfo_.userinfo.id) {
+								UserRoles.push_back(role);
+							}
 						}
 					}
 				}
+				AuthCache::GetInstance()->SetUserRoles(UserInfo_.userinfo.id, UserRoles);
 			}
-			Reason = "Target context could not be resolved.";
+			for (const auto &role : UserRoles) {
+				ProvObjects::ManagementPolicy Policy;
+				if (AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy) ||
+					(StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy) && 
+					 (AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy), true))) {
+					if (PolicyAllows(Policy, Resource, Method)) {
+						return true;
+					}
+				}
+			}
+			Reason = "No authorized role found for this target resource and operation.";
 			return false;
 		}
 
