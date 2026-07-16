@@ -73,6 +73,68 @@ namespace OpenWifi {
 		return OK();
 	}
 
+	static bool RequesterHasEqualOrStrongerPermission(const std::string &userId, const ProvObjects::ManagementPolicy &TargetPolicy, std::string &ErrorDescription) {
+		ManagementRoleDB::RecordVec Roles;
+		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
+		if (StorageService()->RolesDB().GetRecords(0, 1000, Roles)) {
+			for (const auto &role : Roles) {
+				for (const auto &u : role.users) {
+					if (u == userId) {
+						ProvObjects::ManagementPolicy Policy;
+						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+							requesterPolicies.push_back(Policy);
+						}
+						break;
+					}
+				}
+			}
+		}
+
+		auto CheckAccess = [](const std::vector<ProvObjects::ManagementPolicy> &policies, const std::string &resource, const std::string &accessRequired) {
+			for (const auto &policy : policies) {
+				for (const auto &entry : policy.entries) {
+					bool ResourceMatches = false;
+					for (const auto &res : entry.resources) {
+						if (Poco::icompare(res, resource) == 0 || res == "*") {
+							ResourceMatches = true;
+							break;
+						}
+					}
+					if (!ResourceMatches) continue;
+
+					for (const auto &acc : entry.access) {
+						if (acc == "FULL" || 
+							acc == accessRequired || 
+							(accessRequired == "UPDATE" && acc == "MODIFY") || 
+							(accessRequired == "MODIFY" && acc == "UPDATE")) {
+							return true;
+						}
+					}
+				}
+			}
+			return false;
+		};
+
+		for (const auto &entry : TargetPolicy.entries) {
+			for (const auto &res : entry.resources) {
+				for (const auto &acc : entry.access) {
+					if (acc == "FULL") {
+						if (!CheckAccess(requesterPolicies, res, "FULL")) {
+							ErrorDescription = "Privilege mismatch: requester does not have FULL permission on resource " + res;
+							return false;
+						}
+					} else {
+						if (!CheckAccess(requesterPolicies, res, acc) && !CheckAccess(requesterPolicies, res, "FULL")) {
+							ErrorDescription = "Privilege mismatch: requester does not have " + acc + " permission on resource " + res;
+							return false;
+						}
+					}
+				}
+			}
+		}
+		return true;
+	}
+
 	static bool CheckOverlap(const std::string &userId, const std::string &entityId, const std::string &venueId, const std::string &currentRoleId, std::string &ErrorDescription) {
 		ManagementRoleDB::RecordVec Roles;
 		if (StorageService()->RolesDB().GetRecords(0, 1000, Roles)) {
@@ -180,9 +242,17 @@ namespace OpenWifi {
 		}
 
 		// Validate system policy exists in DB
-		if (!NewObject.managementPolicy.empty() &&
-			!StorageService()->PolicyDB().Exists("id", NewObject.managementPolicy)) {
-			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+		ProvObjects::ManagementPolicy TargetPolicy;
+		if (!NewObject.managementPolicy.empty()) {
+			if (!StorageService()->PolicyDB().GetRecord("id", NewObject.managementPolicy, TargetPolicy)) {
+				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+			}
+			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+				std::string PrivilegeError;
+				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, TargetPolicy, PrivilegeError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
+				}
+			}
 		}
 
 		// Validate venue belongs to entity
@@ -262,8 +332,17 @@ namespace OpenWifi {
 		// Validate system policy exists in DB
 		if (RawObject->has("managementPolicy")) {
 			std::string PolicyUUID = RawObject->get("managementPolicy").toString();
-			if (!PolicyUUID.empty() && !StorageService()->PolicyDB().Exists("id", PolicyUUID)) {
-				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+			ProvObjects::ManagementPolicy TargetPolicy;
+			if (!PolicyUUID.empty()) {
+				if (!StorageService()->PolicyDB().GetRecord("id", PolicyUUID, TargetPolicy)) {
+					return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+				}
+				if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+					std::string PrivilegeError;
+					if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, TargetPolicy, PrivilegeError)) {
+						return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
+					}
+				}
 			}
 		}
 
