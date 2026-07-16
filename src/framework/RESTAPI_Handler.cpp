@@ -300,12 +300,15 @@ namespace OpenWifi {
 
 		// 2. Search entity hierarchy (fallback for venue check or direct entity check)
 		std::string currentEntityId = entityId;
-		while (!currentEntityId.empty() && currentEntityId != EntityDB::RootUUID()) {
+		while (!currentEntityId.empty()) {
 			for (const auto &role : Roles) {
 				if (role.entity == currentEntityId && (role.venue.empty() || role.venue == "")) {
 					ExistingRole = role;
 					return true;
 				}
+			}
+			if (currentEntityId == EntityDB::RootUUID()) {
+				break;
 			}
 			// Walk up to parent entity
 			ProvObjects::Entity E;
