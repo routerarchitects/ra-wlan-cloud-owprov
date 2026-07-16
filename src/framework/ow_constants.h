@@ -457,6 +457,9 @@ namespace OpenWifi::RESTAPI::Errors {
 		1199, "This venue is linked to a subscriber. Add devices only from the Subscriber page."
 	};
 
+	static const struct msg RegistrationIdAlreadyExists {
+		1200, "An operator with this registration-ID already exists."
+	};
     static const struct msg SimulationDoesNotExist {
         7000, "Simulation Instance ID does not exist."
     };
