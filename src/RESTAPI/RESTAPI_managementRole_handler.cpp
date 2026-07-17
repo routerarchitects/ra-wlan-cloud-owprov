@@ -73,11 +73,50 @@ namespace OpenWifi {
 		return OK();
 	}
 
-	static bool RequesterHasEqualOrStrongerPermission(const std::string &userId, const ProvObjects::ManagementPolicy &TargetPolicy, std::string &ErrorDescription) {
+	static bool AccessEntryGrants(const ProvObjects::ManagementPolicyEntry &entry, const std::string &resource, const std::string &accessRequired) {
+		bool ResourceMatches = false;
+		for (const auto &res : entry.resources) {
+			if (Poco::icompare(res, resource) == 0 || res == "*") {
+				ResourceMatches = true;
+				break;
+			}
+		}
+		if (!ResourceMatches) {
+			return false;
+		}
+
+		for (const auto &acc : entry.access) {
+			if (acc == "FULL" ||
+				acc == accessRequired ||
+				(accessRequired == "UPDATE" && acc == "MODIFY") ||
+				(accessRequired == "MODIFY" && acc == "UPDATE")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool PolicyGrants(const ProvObjects::ManagementPolicy &policy, const std::string &resource, const std::string &accessRequired) {
+		for (const auto &entry : policy.entries) {
+			if (AccessEntryGrants(entry, resource, accessRequired)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool RequesterHasEqualOrStrongerPermission(const std::string &userId,
+													  const std::string &entityId,
+													  const std::string &venueId,
+													  const ProvObjects::ManagementPolicy &TargetPolicy,
+													  std::string &ErrorDescription) {
 		ManagementRoleDB::RecordVec Roles;
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
 		if (StorageService()->RolesDB().GetRecords(0, 1000, Roles)) {
 			for (const auto &role : Roles) {
+				if (role.entity != entityId || role.venue != venueId) {
+					continue;
+				}
 				for (const auto &u : role.users) {
 					if (u == userId) {
 						ProvObjects::ManagementPolicy Policy;
@@ -90,44 +129,29 @@ namespace OpenWifi {
 			}
 		}
 
-		auto CheckAccess = [](const std::vector<ProvObjects::ManagementPolicy> &policies, const std::string &resource, const std::string &accessRequired) {
-			for (const auto &policy : policies) {
-				for (const auto &entry : policy.entries) {
-					bool ResourceMatches = false;
-					for (const auto &res : entry.resources) {
-						if (Poco::icompare(res, resource) == 0 || res == "*") {
-							ResourceMatches = true;
-							break;
-						}
-					}
-					if (!ResourceMatches) continue;
-
-					for (const auto &acc : entry.access) {
-						if (acc == "FULL" || 
-							acc == accessRequired || 
-							(accessRequired == "UPDATE" && acc == "MODIFY") || 
-							(accessRequired == "MODIFY" && acc == "UPDATE")) {
-							return true;
-						}
-					}
-				}
-			}
+		if (requesterPolicies.empty()) {
+			ErrorDescription = "Privilege mismatch: requester has no role on the target scope.";
 			return false;
-		};
+		}
 
 		for (const auto &entry : TargetPolicy.entries) {
 			for (const auto &res : entry.resources) {
 				for (const auto &acc : entry.access) {
+					bool Covered = false;
+					for (const auto &policy : requesterPolicies) {
+						if (PolicyGrants(policy, res, acc) || PolicyGrants(policy, res, "FULL")) {
+							Covered = true;
+							break;
+						}
+					}
 					if (acc == "FULL") {
-						if (!CheckAccess(requesterPolicies, res, "FULL")) {
+						if (!Covered) {
 							ErrorDescription = "Privilege mismatch: requester does not have FULL permission on resource " + res;
 							return false;
 						}
-					} else {
-						if (!CheckAccess(requesterPolicies, res, acc) && !CheckAccess(requesterPolicies, res, "FULL")) {
-							ErrorDescription = "Privilege mismatch: requester does not have " + acc + " permission on resource " + res;
-							return false;
-						}
+					} else if (!Covered) {
+						ErrorDescription = "Privilege mismatch: requester does not have " + acc + " permission on resource " + res;
+						return false;
 					}
 				}
 			}
@@ -180,7 +204,7 @@ namespace OpenWifi {
 			}
 			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
 				std::string PrivilegeError;
-				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, TargetPolicy, PrivilegeError)) {
+				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, NewObject.venue, TargetPolicy, PrivilegeError)) {
 					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
 				}
 			}
@@ -255,30 +279,41 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
 
-		// Validate system policy exists in DB
+		std::string EffectivePolicyUUID = Existing.managementPolicy;
 		if (RawObject->has("managementPolicy")) {
-			std::string PolicyUUID = RawObject->get("managementPolicy").toString();
-			ProvObjects::ManagementPolicy TargetPolicy;
-			if (!PolicyUUID.empty()) {
-				if (!StorageService()->PolicyDB().GetRecord("id", PolicyUUID, TargetPolicy)) {
-					return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
-				}
-				if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
-					std::string PrivilegeError;
-					if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, TargetPolicy, PrivilegeError)) {
-						return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
-					}
+			EffectivePolicyUUID = RawObject->get("managementPolicy").toString();
+		}
+
+		std::string EffectiveEntity = Existing.entity;
+		if (RawObject->has("entity")) {
+			EffectiveEntity = RawObject->get("entity").toString();
+		}
+
+		std::string EffectiveVenue = Existing.venue;
+		if (RawObject->has("venue")) {
+			EffectiveVenue = RawObject->get("venue").toString();
+		}
+
+		ProvObjects::ManagementPolicy TargetPolicy;
+		if (!EffectivePolicyUUID.empty()) {
+			if (!StorageService()->PolicyDB().GetRecord("id", EffectivePolicyUUID, TargetPolicy)) {
+				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+			}
+			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+				std::string PrivilegeError;
+				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, EffectiveEntity, EffectiveVenue, TargetPolicy, PrivilegeError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
 				}
 			}
 		}
 
 		// Validate venue belongs to entity
-		if (!NewObject.venue.empty()) {
+		if (!EffectiveVenue.empty()) {
 			ProvObjects::Venue VenueObj;
-			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, VenueObj)) {
+			if (!StorageService()->VenueDB().GetRecord("id", EffectiveVenue, VenueObj)) {
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
-			if (VenueObj.entity != NewObject.entity) {
+			if (VenueObj.entity != EffectiveEntity) {
 				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			}
 		}

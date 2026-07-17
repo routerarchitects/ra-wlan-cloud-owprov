@@ -25,6 +25,21 @@ namespace OpenWifi {
 			return false;
 		}
 
+		if (Resource == "user" &&
+			(Method == Poco::Net::HTTPRequest::HTTP_POST || Method == Poco::Net::HTTPRequest::HTTP_PUT) &&
+			ParsedBody_ && ParsedBody_->has("userRole")) {
+			const auto RequestedUserRole = ParsedBody_->get("userRole").toString();
+			if (Poco::icompare(RequestedUserRole, "root") == 0 &&
+				UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+				Reason = "Only root may assign the root user role.";
+				return false;
+			}
+		}
+
+		if (Resource == "managementPolicy" && Method == Poco::Net::HTTPRequest::HTTP_GET) {
+			return true;
+		}
+
 		std::string UserId = UserInfo_.userinfo.id;
 		std::vector<ProvObjects::ManagementRole> Roles;
 		if (!AuthCache::GetInstance()->GetUserRoles(UserId, Roles)) {
@@ -100,8 +115,13 @@ namespace OpenWifi {
 			}
 		}
 
+		const bool HasBoundObjectId =
+			!Id.empty() &&
+			Id != "0" &&
+			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0);
+
 		// 2. For object routes, always derive scope from the bound object first.
-		if (!Id.empty() && Id != "0") {
+		if (HasBoundObjectId) {
 			if (Path.find("/api/v1/entity") != std::string::npos) {
 				TargetEntity = Id;
 			} else if (Path.find("/api/v1/venue") != std::string::npos) {
