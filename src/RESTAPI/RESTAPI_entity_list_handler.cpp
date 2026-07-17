@@ -34,16 +34,37 @@ namespace OpenWifi {
 
 		// Standard user scope filtering
 		std::vector<ProvObjects::ManagementRole> Roles;
-		std::set<std::string> AssignedEntities;
+		std::set<std::string> AllowedEntities;
+		std::set<std::string> AllowedVenues;
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			for (const auto &role : Roles) {
-				if (!role.entity.empty()) {
-					AssignedEntities.insert(role.entity);
+				if (!role.venue.empty()) {
+					AllowedVenues.insert(role.venue);
+				} else if (!role.entity.empty()) {
+					AllowedEntities.insert(role.entity);
 				}
 			}
 		}
 
-		if (AssignedEntities.empty()) {
+		std::set<std::string> expandedAllowedEntities;
+		for (const auto &entId : AllowedEntities) {
+			GetDescendantEntities(entId, expandedAllowedEntities);
+		}
+
+		std::set<std::string> expandedAllowedVenues;
+		for (const auto &entId : expandedAllowedEntities) {
+			ProvObjects::Entity E;
+			if (StorageService()->EntityDB().GetRecord("id", entId, E)) {
+				for (const auto &vId : E.venues) {
+					GetDescendantVenues(vId, expandedAllowedVenues);
+				}
+			}
+		}
+		for (const auto &vId : AllowedVenues) {
+			GetDescendantVenues(vId, expandedAllowedVenues);
+		}
+
+		if (expandedAllowedEntities.empty() && expandedAllowedVenues.empty()) {
 			if (GetBoolParameter("getTree", false)) {
 				Poco::JSON::Object EmptyTree;
 				return ReturnObject(EmptyTree);
@@ -53,37 +74,72 @@ namespace OpenWifi {
 		}
 
 		if (GetBoolParameter("getTree", false)) {
-			if (AssignedEntities.size() == 1) {
-				Poco::JSON::Object Tree;
-				DB_.BuildTree(Tree, *AssignedEntities.begin());
-				return ReturnObject(Tree);
-			} else {
-				Poco::JSON::Object VirtualRoot;
-				VirtualRoot.set("type", "entity");
-				VirtualRoot.set("name", "Assigned Entities");
-				VirtualRoot.set("uuid", "0000-0000-0000");
-				Poco::JSON::Array Children;
-				for (const auto &entId : AssignedEntities) {
-					Poco::JSON::Object SubTree;
-					DB_.BuildTree(SubTree, entId);
-					Children.add(SubTree);
-				}
-				VirtualRoot.set("children", Children);
-				Poco::JSON::Array Venues;
-				VirtualRoot.set("venues", Venues);
-				return ReturnObject(VirtualRoot);
+			std::vector<ProvObjects::ManagementRole> ScopedRoles;
+			if (!FindAllUserRoles(UserInfo_.userinfo.id, ScopedRoles) || ScopedRoles.empty()) {
+				Poco::JSON::Object EmptyTree;
+				return ReturnObject(EmptyTree);
 			}
-		}
 
-		std::set<std::string> descendants;
-		for (const auto &entId : AssignedEntities) {
-			GetDescendantEntities(entId, descendants);
+			std::set<std::string> AddedScopes;
+			Poco::JSON::Array ScopedEntities;
+			Poco::JSON::Array ScopedVenues;
+			Poco::JSON::Object::Ptr SingleEntityTree;
+			Poco::JSON::Object::Ptr SingleVenueTree;
+			size_t entityCount = 0;
+			size_t venueCount = 0;
+
+			for (const auto &role : ScopedRoles) {
+				if (!role.venue.empty()) {
+					std::string scopeKey = "venue:" + role.venue;
+					if (AddedScopes.insert(scopeKey).second) {
+						Poco::JSON::Object::Ptr VenueTree = new Poco::JSON::Object;
+						DB_.AddVenues(*VenueTree, role.venue);
+						if (VenueTree->has("uuid")) {
+							ScopedVenues.add(VenueTree);
+							SingleVenueTree = VenueTree;
+							++venueCount;
+						}
+					}
+				} else if (!role.entity.empty()) {
+					std::string scopeKey = "entity:" + role.entity;
+					if (AddedScopes.insert(scopeKey).second) {
+						Poco::JSON::Object::Ptr EntityTree = new Poco::JSON::Object;
+						DB_.BuildTree(*EntityTree, role.entity);
+						if (EntityTree->has("uuid")) {
+							ScopedEntities.add(EntityTree);
+							SingleEntityTree = EntityTree;
+							++entityCount;
+						}
+					}
+				}
+			}
+
+			if (ScopedEntities.empty() && ScopedVenues.empty()) {
+				Poco::JSON::Object EmptyTree;
+				return ReturnObject(EmptyTree);
+			}
+
+			if (entityCount == 1 && venueCount == 0 && SingleEntityTree) {
+				return ReturnObject(*SingleEntityTree);
+			}
+
+			if (entityCount == 0 && venueCount == 1 && SingleVenueTree) {
+				return ReturnObject(*SingleVenueTree);
+			}
+
+			Poco::JSON::Object ScopedTree;
+			ScopedTree.set("type", "entity");
+			ScopedTree.set("name", "Assigned Scopes");
+			ScopedTree.set("uuid", "0000-0000-0000");
+			ScopedTree.set("children", ScopedEntities);
+			ScopedTree.set("venues", ScopedVenues);
+			return ReturnObject(ScopedTree);
 		}
 
 		if (!QB_.Select.empty()) {
 			std::vector<std::string> FilteredSelect;
 			for (const auto &id : QB_.Select) {
-				if (descendants.count(id)) {
+				if (expandedAllowedEntities.count(id)) {
 					FilteredSelect.push_back(id);
 				}
 			}
@@ -93,13 +149,13 @@ namespace OpenWifi {
 			QB_.Select = origSelect;
 			return;
 		} else if (QB_.CountOnly) {
-			return ReturnCountOnly(descendants.size());
+			return ReturnCountOnly(expandedAllowedEntities.size());
 		} else {
 			EntityDB::RecordVec AllEntities;
 			DB_.GetRecords(0, 10000, AllEntities);
 			EntityDB::RecordVec FilteredEntities;
 			for (const auto &ent : AllEntities) {
-				if (descendants.count(ent.info.id)) {
+				if (expandedAllowedEntities.count(ent.info.id)) {
 					FilteredEntities.push_back(ent);
 				}
 			}
