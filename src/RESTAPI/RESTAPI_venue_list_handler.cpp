@@ -23,35 +23,28 @@ namespace OpenWifi {
 
 		// Standard user flow:
 		std::vector<ProvObjects::ManagementRole> Roles;
-		std::set<std::string> AssignedEntities;
+		std::set<std::string> VisibleVenues;
+		auto policyAllowsGet = [&](const ProvObjects::ManagementRole &role) -> bool {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			return PolicyAllows(Policy, "venue", Poco::Net::HTTPRequest::HTTP_GET);
+		};
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			for (const auto &role : Roles) {
-				if (!role.entity.empty()) {
-					AssignedEntities.insert(role.entity);
+				if (!role.venue.empty() && policyAllowsGet(role)) {
+					VisibleVenues.insert(role.venue);
 				}
 			}
 		}
 
-		if (AssignedEntities.empty()) {
+		if (VisibleVenues.empty()) {
 			VenueDB::RecordVec Venues;
 			return ReturnObject("venues", Venues);
-		}
-
-		// 1. Get all descendant entities
-		std::set<std::string> descendantEntities;
-		for (const auto &entId : AssignedEntities) {
-			GetDescendantEntities(entId, descendantEntities);
-		}
-
-		// 2. Get all venues associated with these entities
-		std::set<std::string> allowedVenues;
-		for (const auto &entId : descendantEntities) {
-			ProvObjects::Entity E;
-			if (StorageService()->EntityDB().GetRecord("id", entId, E)) {
-				for (const auto &vId : E.venues) {
-					GetDescendantVenues(vId, allowedVenues);
-				}
-			}
 		}
 
 		// 3. Retrieve all venues and filter by allowedVenues
@@ -66,7 +59,7 @@ namespace OpenWifi {
 
 		VenueDB::RecordVec FilteredVenues;
 		for (const auto &v : AllVenues) {
-			if (allowedVenues.count(v.info.id)) {
+			if (VisibleVenues.count(v.info.id)) {
 				FilteredVenues.push_back(v);
 			}
 		}

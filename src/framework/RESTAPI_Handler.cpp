@@ -13,75 +13,78 @@ namespace OpenWifi {
 	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path,
 										  const std::string &Method,
 										  std::string &Reason) {
-		// 1. Bypass check if user is root/system
-		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM) {
+		// 1. Bypass check only if user is root
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 			return true;
 		}
 
 		// 2. Map path to resource
 		std::string Resource = GetResourceName(Path);
 		if (Resource.empty()) {
-			// Allow non-scoped resources by default to maintain existing routing compatibility
-			return true;
+			Reason = "Unknown or prohibited resource path.";
+			return false;
 		}
+
+		std::string UserId = UserInfo_.userinfo.id;
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (!AuthCache::GetInstance()->GetUserRoles(UserId, Roles)) {
+			ManagementRoleDB::RecordVec DB_Roles;
+			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
+				for (const auto &role : DB_Roles) {
+					for (const auto &user : role.users) {
+						if (user == UserId) {
+							Roles.push_back(role);
+						}
+					}
+				}
+			}
+			AuthCache::GetInstance()->SetUserRoles(UserId, Roles);
+		}
+
+		auto CheckRolePolicy = [&](const ProvObjects::ManagementRole &role) -> bool {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			return PolicyAllows(Policy, Resource, Method);
+		};
 
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
 			// Check if any of the user's roles permit this resource and method.
-			std::vector<ProvObjects::ManagementRole> UserRoles;
-			if (!AuthCache::GetInstance()->GetUserRoles(UserInfo_.userinfo.id, UserRoles)) {
-				ManagementRoleDB::RecordVec DB_Roles;
-				if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
-					for (const auto &role : DB_Roles) {
-						for (const auto &user : role.users) {
-							if (user == UserInfo_.userinfo.id) {
-								UserRoles.push_back(role);
-							}
-						}
-					}
-				}
-				AuthCache::GetInstance()->SetUserRoles(UserInfo_.userinfo.id, UserRoles);
-			}
-			for (const auto &role : UserRoles) {
-				ProvObjects::ManagementPolicy Policy;
-				if (AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy) ||
-					(StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy) && 
-					 (AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy), true))) {
-					if (PolicyAllows(Policy, Resource, Method)) {
-						return true;
-					}
+			for (const auto &role : Roles) {
+				if (CheckRolePolicy(role)) {
+					return true;
 				}
 			}
 			Reason = "No authorized role found for this target resource and operation.";
 			return false;
 		}
 
-		// 4. Find most specific role
-		ProvObjects::ManagementRole ActiveRole;
-		std::string UserId = UserInfo_.userinfo.id;
-		if (!FindExistingRole(UserId, TargetEntity, TargetVenue, ActiveRole)) {
-			Reason = "No matching role found for the user-entity-venue scope.";
-			return false;
-		}
-
-		// 5. Load fixed policy
-		ProvObjects::ManagementPolicy Policy;
-		if (!AuthCache::GetInstance()->GetPolicy(ActiveRole.managementPolicy, Policy)) {
-			if (!StorageService()->PolicyDB().GetRecord("id", ActiveRole.managementPolicy, Policy)) {
-				Reason = "Could not load management policy for the active role.";
-				return false;
+		if (!TargetVenue.empty()) {
+			for (const auto &role : Roles) {
+				if (role.entity == TargetEntity && role.venue == TargetVenue) {
+					if (CheckRolePolicy(role)) {
+						return true;
+					}
+				}
 			}
-			AuthCache::GetInstance()->SetPolicy(ActiveRole.managementPolicy, Policy);
+		} else {
+			for (const auto &role : Roles) {
+				if (role.entity == TargetEntity && (role.venue.empty() || role.venue == "")) {
+					if (CheckRolePolicy(role)) {
+						return true;
+					}
+				}
+			}
 		}
 
-		// 6. Check policy permissions
-		if (!PolicyAllows(Policy, Resource, Method)) {
-			Reason = "Policy does not permit this resource and operation.";
-			return false;
-		}
-
-		return true;
+		Reason = "No authorized role matches the required scope and permission.";
+		return false;
 	}
 
 	bool RESTAPIHandler::ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue) {
@@ -289,38 +292,19 @@ namespace OpenWifi {
 			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
 		}
 
-		// 1. If user has top/root entity access, grant access under that policy
-		for (const auto &role : Roles) {
-			if (role.entity == EntityDB::RootUUID()) {
-				ExistingRole = role;
-				return true;
-			}
-		}
-
-		// 2. If venueId is specified, check venue policy first, then entity policy of the venue
 		if (!venueId.empty()) {
-			// Check if entity-venue policy exists
 			for (const auto &role : Roles) {
 				if (role.entity == entityId && role.venue == venueId) {
 					ExistingRole = role;
 					return true;
 				}
 			}
-			// Check if entity policy of the venue exists
+		} else {
 			for (const auto &role : Roles) {
 				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
 					ExistingRole = role;
 					return true;
 				}
-			}
-			return false;
-		}
-
-		// 3. Direct entity check
-		for (const auto &role : Roles) {
-			if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
-				ExistingRole = role;
-				return true;
 			}
 		}
 
@@ -357,6 +341,17 @@ namespace OpenWifi {
 		if (Path.find("/api/v1/operator") != std::string::npos) return "operator";
 		if (Path.find("/api/v1/customer") != std::string::npos) return "customer";
 		if (Path.find("/api/v1/user") != std::string::npos) return "user";
+		if (Path.find("/api/v1/contact") != std::string::npos) return "contact";
+		if (Path.find("/api/v1/location") != std::string::npos) return "location";
+		if (Path.find("/api/v1/map") != std::string::npos) return "map";
+		if (Path.find("/api/v1/variables") != std::string::npos) return "variables";
+		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos) return "radiusEndpoint";
+		if (Path.find("/api/v1/subscriber") != std::string::npos) return "subscriber";
+		if (Path.find("/api/v1/sub_devices") != std::string::npos) return "sub_devices";
+		if (Path.find("/api/v1/openroaming") != std::string::npos) return "openroaming";
+		if (Path.find("/api/v1/serviceClass") != std::string::npos) return "serviceClass";
+		if (Path.find("/api/v1/overrides") != std::string::npos) return "overrides";
+		if (Path.find("/api/v1/iptocountry") != std::string::npos) return "iptocountry";
 		return "";
 	}
 

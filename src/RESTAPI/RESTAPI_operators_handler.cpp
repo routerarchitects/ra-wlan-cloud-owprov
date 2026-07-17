@@ -39,22 +39,12 @@ namespace OpenWifi {
 						AllOperatorsAllowed = true;
 						break;
 					}
-					std::string currentId = role.entity;
-					std::set<std::string> visited;
-					while (!currentId.empty() && currentId != EntityDB.RootUUID()) {
-						if (visited.count(currentId)) {
-							break;
-						}
-						visited.insert(currentId);
-						ProvObjects::Entity ent;
-						if (!EntityDB.GetRecord("id", currentId, ent)) {
-							break;
-						}
-						if (!ent.operatorId.empty()) {
-							AllowedOperatorIds.insert(ent.operatorId);
-							break;
-						}
-						currentId = ent.parent;
+					if (!role.venue.empty()) {
+						continue;
+					}
+					ProvObjects::Entity ent;
+					if (EntityDB.GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
+						AllowedOperatorIds.insert(ent.operatorId);
 					}
 				}
 			}
