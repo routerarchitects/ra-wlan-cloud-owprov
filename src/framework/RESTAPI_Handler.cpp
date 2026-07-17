@@ -100,17 +100,8 @@ namespace OpenWifi {
 			}
 		}
 
-		// 2. Check query parameters
-		for (const auto &[name, value] : Parameters_) {
-			if (name == "entity") {
-				TargetEntity = value;
-			} else if (name == "venue") {
-				TargetVenue = value;
-			}
-		}
-
-		// 3. If ID is provided, figure out the resource type from the Path
-		if (!Id.empty() && Id != "0" && TargetEntity.empty() && TargetVenue.empty()) {
+		// 2. For object routes, always derive scope from the bound object first.
+		if (!Id.empty() && Id != "0") {
 			if (Path.find("/api/v1/entity") != std::string::npos) {
 				TargetEntity = Id;
 			} else if (Path.find("/api/v1/venue") != std::string::npos) {
@@ -137,6 +128,19 @@ namespace OpenWifi {
 					TargetEntity = R.entity;
 					TargetVenue = R.venue;
 				}
+			}
+
+			if (!TargetEntity.empty() || !TargetVenue.empty()) {
+				return true;
+			}
+		}
+
+		// 3. For collection routes, fall back to query parameters.
+		for (const auto &[name, value] : Parameters_) {
+			if (name == "entity") {
+				TargetEntity = value;
+			} else if (name == "venue") {
+				TargetVenue = value;
 			}
 		}
 
