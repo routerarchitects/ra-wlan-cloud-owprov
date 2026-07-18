@@ -7,16 +7,60 @@
 #include "Poco/JSON/Parser.h"
 #include "Poco/StringTokenizer.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
+#include "RESTAPI_managementRole_validation.h"
 
 namespace OpenWifi {
+	namespace {
+		bool ContainsUser(const ProvObjects::ManagementRole &role, const std::string &userId) {
+			return std::find(role.users.begin(), role.users.end(), userId) != role.users.end();
+		}
+
+		bool RoleScopeOverlaps(const ProvObjects::ManagementRole &lhs,
+							   const ProvObjects::ManagementRole &rhs) {
+			if (lhs.entity != rhs.entity || lhs.venue != rhs.venue) {
+				return false;
+			}
+			for (const auto &userId : lhs.users) {
+				if (ContainsUser(rhs, userId)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		bool ManagementRoleExistsForScope(const ProvObjects::ManagementRole &candidate,
+										  const std::string &skipId = {}) {
+			bool found = false;
+			StorageService()->RolesDB().Iterate(
+				[&](const ProvObjects::ManagementRole &existing) {
+					if (!skipId.empty() && existing.info.id == skipId) {
+						return true;
+					}
+					if (RoleScopeOverlaps(candidate, existing)) {
+						found = true;
+						return false;
+					}
+					return true;
+				});
+			return found;
+		}
+
+
+	} // namespace
 
 	void RESTAPI_managementRole_handler::DoGet() {
 		ProvObjects::ManagementRole Existing;
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
 			return NotFound();
+		}
+
+		if (!RBAC::RequireAccess(*this, "managementRole", "READ",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
 		}
 
 		Poco::JSON::Object Answer;
@@ -58,6 +102,11 @@ namespace OpenWifi {
 		if (HasParameter("force", Arg) && Arg == "true")
 			Force = true;
 
+		if (!RBAC::RequireAccess(*this, "managementRole", "DELETE",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		if (!Force && !Existing.inUse.empty()) {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
@@ -93,9 +142,17 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		if (!NewObject.managementPolicy.empty() &&
-			!StorageService()->PolicyDB().Exists("id", NewObject.managementPolicy)) {
-			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+		if (!ValidateManagementPolicyForRole(*this, NewObject.managementPolicy, NewObject)) {
+			return;
+		}
+
+		if (!RBAC::RequireAccess(*this, "managementRole", "CREATE",
+								 RBAC::TargetScope{NewObject.entity, NewObject.venue})) {
+			return;
+		}
+
+		if (ManagementRoleExistsForScope(NewObject)) {
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
@@ -128,32 +185,75 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 		}
 
-		if (!UpdateObjectInfo(RawObject, UserInfo_.userinfo, Existing.info)) {
+		ProvObjects::ManagementRole Candidate = Existing;
+
+		if (!UpdateObjectInfo(RawObject, UserInfo_.userinfo, Candidate.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
 
+		if (!RBAC::RequireAccess(*this, "managementRole", "UPDATE",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		std::string FromPolicy, ToPolicy;
-		if (!CreateMove(RawObject, "managementPolicy",
-						&ManagementRoleDB::RecordName::managementPolicy, Existing, FromPolicy,
-						ToPolicy, StorageService()->PolicyDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (RawObject->has("managementPolicy")) {
+			FromPolicy = Existing.managementPolicy;
+			ToPolicy = RawObject->get("managementPolicy").toString();
+			if (!ToPolicy.empty() && !StorageService()->PolicyDB().Exists("id", ToPolicy)) {
+				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+			}
+			Candidate.managementPolicy = ToPolicy;
+		}
 
 		std::string FromEntity, ToEntity;
-		if (!CreateMove(RawObject, "entity", &ManagementRoleDB::RecordName::entity, Existing,
-						FromEntity, ToEntity, StorageService()->EntityDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (RawObject->has("entity")) {
+			FromEntity = Existing.entity;
+			ToEntity = RawObject->get("entity").toString();
+			if (ToEntity.empty() || !StorageService()->EntityDB().Exists("id", ToEntity)) {
+				return BadRequest(RESTAPI::Errors::EntityMustExist);
+			}
+			Candidate.entity = ToEntity;
+		}
 
 		std::string FromVenue, ToVenue;
-		if (!CreateMove(RawObject, "venue", &ManagementRoleDB::RecordName::venue, Existing,
-						FromVenue, ToVenue, StorageService()->VenueDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (RawObject->has("venue")) {
+			FromVenue = Existing.venue;
+			ToVenue = RawObject->get("venue").toString();
+			if (!ToVenue.empty() && !StorageService()->VenueDB().Exists("id", ToVenue)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			Candidate.venue = ToVenue;
+		}
 
-		if (DB_.UpdateRecord("id", UUID, Existing)) {
-			MoveUsage(StorageService()->PolicyDB(), DB_, FromPolicy, ToPolicy, Existing.info.id);
+		if (RawObject->has("users")) {
+			Types::UUIDvec_t Users;
+			if (!AssignIfPresent(RawObject, "users", Users) || Users.empty()) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
+			Candidate.users = Users;
+		}
+
+		if ((Candidate.entity != Existing.entity || Candidate.venue != Existing.venue) &&
+			!RBAC::RequireAccess(*this, "managementRole", "UPDATE",
+								 RBAC::TargetScope{Candidate.entity, Candidate.venue})) {
+			return;
+		}
+
+		if (!ValidateManagementPolicyForRole(*this, Candidate.managementPolicy, Candidate)) {
+			return;
+		}
+
+		if (ManagementRoleExistsForScope(Candidate, Existing.info.id)) {
+			return BadRequest(RESTAPI::Errors::UserAlreadyExists);
+		}
+
+		if (DB_.UpdateRecord("id", UUID, Candidate)) {
+			MoveUsage(StorageService()->PolicyDB(), DB_, FromPolicy, ToPolicy, Candidate.info.id);
 			ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
-							 FromEntity, ToEntity, Existing.info.id);
+							 FromEntity, ToEntity, Candidate.info.id);
 			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
-							 FromVenue, ToVenue, Existing.info.id);
+							 FromVenue, ToVenue, Candidate.info.id);
 
 			ProvObjects::ManagementRole NewRecord;
 

@@ -10,6 +10,7 @@
 #include "Daemon.h"
 #include "Poco/JSON/Parser.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
 
@@ -20,6 +21,11 @@ namespace OpenWifi {
 		ProvObjects::ManagementPolicy Existing;
 		if (UUID.empty() || !DB_.GetRecord("id", UUID, Existing)) {
 			return NotFound();
+		}
+
+		if (!RBAC::RequireAccess(*this, "managementPolicy", "READ",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
 		}
 
 		std::string Arg;
@@ -58,6 +64,11 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		if (!RBAC::RequireAccess(*this, "managementPolicy", "DELETE",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		if (!Existing.inUse.empty()) {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
@@ -91,8 +102,14 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		if (NewObject.venue.empty() || !StorageService()->VenueDB().Exists("id", NewObject.venue)) {
+		if (!NewObject.venue.empty() &&
+			!StorageService()->VenueDB().Exists("id", NewObject.venue)) {
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
+		}
+
+		if (!RBAC::RequireAccess(*this, "managementPolicy", "CREATE",
+								 RBAC::TargetScope{NewObject.entity, NewObject.venue})) {
+			return;
 		}
 
 		NewObject.inUse.clear();
@@ -117,6 +134,11 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		if (!RBAC::RequireAccess(*this, "managementPolicy", "UPDATE",
+								 RBAC::TargetScope{Existing.entity, Existing.venue})) {
+			return;
+		}
+
 		ProvObjects::ManagementPolicy NewPolicy;
 		const auto &RawObject = ParsedBody_;
 		if (!NewPolicy.from_json(RawObject)) {
@@ -131,11 +153,21 @@ namespace OpenWifi {
 		if (!CreateMove(RawObject, "entity", &PolicyDB::RecordName::entity, Existing, FromEntity,
 						ToEntity, StorageService()->EntityDB()))
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (ToEntity != FromEntity &&
+			!RBAC::RequireAccess(*this, "managementPolicy", "UPDATE",
+								 RBAC::TargetScope{ToEntity, Existing.venue})) {
+			return;
+		}
 
 		std::string FromVenue, ToVenue;
 		if (!CreateMove(RawObject, "venue", &PolicyDB::RecordName::venue, Existing, FromVenue,
 						ToVenue, StorageService()->VenueDB()))
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (ToVenue != FromVenue &&
+			!RBAC::RequireAccess(*this, "managementPolicy", "UPDATE",
+								 RBAC::TargetScope{Existing.entity, ToVenue})) {
+			return;
+		}
 
 		if (!NewPolicy.entries.empty())
 			Existing.entries = NewPolicy.entries;

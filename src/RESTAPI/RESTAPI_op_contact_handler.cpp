@@ -4,6 +4,7 @@
 
 #include "RESTAPI_op_contact_handler.h"
 #include "RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_rbac_helpers.h"
 #include "sdks/SDK_sec.h"
 
 namespace OpenWifi {
@@ -16,6 +17,9 @@ namespace OpenWifi {
 		OpContactDB::RecordName Existing;
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
+		}
+		if (!RBAC::RequireOperatorAccessOrNotFound(*this, Existing.operatorId, "READ")) {
+			return;
 		}
 		Poco::JSON::Object Answer;
 		Existing.to_json(Answer);
@@ -31,6 +35,9 @@ namespace OpenWifi {
 		OpContactDB::RecordName Existing;
 		if (!DB_.GetRecord("id", uuid, Existing)) {
 			return NotFound();
+		}
+		if (!RBAC::RequireOperatorAccessOrNotFound(*this, Existing.operatorId, "DELETE")) {
+			return;
 		}
 
 		// see if anyone is still using this thing
@@ -59,6 +66,10 @@ namespace OpenWifi {
 			!ValidContactType(NewObject.type, *this)) {
 			return;
 		}
+		if (!RBAC::RequireOperatorAccessOrBadRequest(*this, NewObject.operatorId, "CREATE",
+													 RESTAPI::Errors::InvalidOperatorId)) {
+			return;
+		}
 
 		ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info);
 		return ReturnCreatedObject(DB_, NewObject, *this);
@@ -82,6 +93,9 @@ namespace OpenWifi {
 					   RESTAPI::Errors::UnknownManagementPolicyUUID, *this) ||
 			!ValidDbId(UpdateObj.subscriberDeviceId, StorageService()->SubscriberDeviceDB(), true,
 					   RESTAPI::Errors::InvalidSubscriberDeviceId, *this)) {
+			return;
+		}
+		if (!RBAC::RequireOperatorAccessOrNotFound(*this, Existing.operatorId, "MODIFY")) {
 			return;
 		}
 
