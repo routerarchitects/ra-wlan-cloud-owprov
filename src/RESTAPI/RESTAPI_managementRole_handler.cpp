@@ -9,6 +9,7 @@
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
+#include <set>
 
 namespace OpenWifi {
 
@@ -198,6 +199,41 @@ namespace OpenWifi {
 		return true;
 	}
 
+	static std::vector<std::string> ParseVenueIds(const Poco::JSON::Object::Ptr &RawObj,
+												  const std::string &FallbackVenue) {
+		std::vector<std::string> VenueIds;
+		std::set<std::string> Seen;
+
+		if (RawObj && RawObj->isArray("venueIds")) {
+			auto VenueArray = RawObj->getArray("venueIds");
+			for (const auto &value : *VenueArray) {
+				auto VenueId = value.toString();
+				if (!VenueId.empty() && Seen.insert(VenueId).second) {
+					VenueIds.emplace_back(VenueId);
+				}
+			}
+		}
+
+		if (VenueIds.empty() && !FallbackVenue.empty()) {
+			VenueIds.emplace_back(FallbackVenue);
+		}
+
+		return VenueIds;
+	}
+
+	static bool ValidateVenueScope(const std::string &entityId, const std::string &venueId) {
+		if (venueId.empty()) {
+			return true;
+		}
+
+		ProvObjects::Venue VenueObj;
+		if (!StorageService()->VenueDB().GetRecord("id", venueId, VenueObj)) {
+			return false;
+		}
+
+		return VenueObj.entity == entityId;
+	}
+
 	void RESTAPI_managementRole_handler::DoPost() {
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty()) {
@@ -219,28 +255,33 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
+		auto VenueIds = ParseVenueIds(RawObj, NewObject.venue);
+
 		// Validate system policy exists in DB
 		ProvObjects::ManagementPolicy TargetPolicy;
 		if (!NewObject.managementPolicy.empty()) {
 			if (!StorageService()->PolicyDB().GetRecord("id", NewObject.managementPolicy, TargetPolicy)) {
 				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
 			}
-			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
-				std::string PrivilegeError;
-				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, NewObject.venue, TargetPolicy, PrivilegeError)) {
-					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
-				}
+		}
+
+		for (const auto &venueId : VenueIds) {
+			if (!ValidateVenueScope(NewObject.entity, venueId)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
 		}
 
-		// Validate venue belongs to entity
-		if (!NewObject.venue.empty()) {
-			ProvObjects::Venue VenueObj;
-			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, VenueObj)) {
-				return BadRequest(RESTAPI::Errors::VenueMustExist);
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM &&
+			!NewObject.managementPolicy.empty()) {
+			auto Scopes = VenueIds;
+			if (Scopes.empty()) {
+				Scopes.emplace_back("");
 			}
-			if (VenueObj.entity != NewObject.entity) {
-				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			for (const auto &venueId : Scopes) {
+				std::string PrivilegeError;
+				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, venueId, TargetPolicy, PrivilegeError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
+				}
 			}
 		}
 
@@ -253,40 +294,62 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
 		}
 
-		// Check for existing role (idempotent upsert)
-		ProvObjects::ManagementRole ExistingRole;
-		if (FindExactExistingRole(DB_, UserId, NewObject.entity, NewObject.venue, ExistingRole)) {
-			std::string OldPolicy = ExistingRole.managementPolicy;
-			ExistingRole.managementPolicy = NewObject.managementPolicy;
-			ExistingRole.info.modified = Utils::Now();
-
-			if (DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
-				AuthCache::GetInstance()->Clear();
-				MoveUsage(StorageService()->PolicyDB(), DB_, OldPolicy, NewObject.managementPolicy, ExistingRole.info.id);
-
-				Poco::JSON::Object Answer;
-				ExistingRole.to_json(Answer);
-				return ReturnObject(Answer);
-			}
-			return InternalError(RESTAPI::Errors::RecordNotUpdated);
+		std::vector<ProvObjects::ManagementRole> SavedRoles;
+		auto Scopes = VenueIds;
+		if (Scopes.empty()) {
+			Scopes.emplace_back("");
 		}
 
-		if (DB_.CreateRecord(NewObject)) {
-			AuthCache::GetInstance()->Clear();
-			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
-						  NewObject.entity, NewObject.info.id);
-			AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
-						  NewObject.venue, NewObject.info.id);
-			MoveUsage(StorageService()->PolicyDB(), DB_, "", NewObject.managementPolicy,
-					  NewObject.info.id);
+		for (std::size_t idx = 0; idx < Scopes.size(); ++idx) {
+			ProvObjects::ManagementRole RoleForScope = NewObject;
+			RoleForScope.venue = Scopes[idx];
+			if (idx > 0) {
+				RoleForScope.info.id = MicroServiceCreateUUID();
+			}
 
+			ProvObjects::ManagementRole ExistingRole;
+			if (FindExactExistingRole(DB_, UserId, RoleForScope.entity, RoleForScope.venue, ExistingRole)) {
+				std::string OldPolicy = ExistingRole.managementPolicy;
+				ExistingRole.managementPolicy = RoleForScope.managementPolicy;
+				ExistingRole.info.modified = Utils::Now();
+
+				if (!DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
+					return InternalError(RESTAPI::Errors::RecordNotUpdated);
+				}
+				MoveUsage(StorageService()->PolicyDB(), DB_, OldPolicy, RoleForScope.managementPolicy, ExistingRole.info.id);
+				SavedRoles.emplace_back(ExistingRole);
+				continue;
+			}
+
+			if (!DB_.CreateRecord(RoleForScope)) {
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
+			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
+						  RoleForScope.entity, RoleForScope.info.id);
+			AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
+						  RoleForScope.venue, RoleForScope.info.id);
+			MoveUsage(StorageService()->PolicyDB(), DB_, "", RoleForScope.managementPolicy,
+					  RoleForScope.info.id);
+			SavedRoles.emplace_back(RoleForScope);
+		}
+
+		AuthCache::GetInstance()->Clear();
+
+		if (SavedRoles.size() == 1) {
 			Poco::JSON::Object Answer;
-			ProvObjects::ManagementRole Role;
-			DB_.GetRecord("id", NewObject.info.id, Role);
-			Role.to_json(Answer);
+			SavedRoles.front().to_json(Answer);
 			return ReturnObject(Answer);
 		}
-		InternalError(RESTAPI::Errors::RecordNotCreated);
+
+		Poco::JSON::Object Answer;
+		Poco::JSON::Array RolesArray;
+		for (const auto &role : SavedRoles) {
+			Poco::JSON::Object RoleObject;
+			role.to_json(RoleObject);
+			RolesArray.add(RoleObject);
+		}
+		Answer.set("roles", RolesArray);
+		return ReturnObject(Answer);
 	}
 
 	void RESTAPI_managementRole_handler::DoPut() {
