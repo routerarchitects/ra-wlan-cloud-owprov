@@ -390,7 +390,7 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::InvalidDeviceClass);
 		}
 
-		if (!NewObject.deviceType.empty()) {
+		if (!NewObject.deviceType.empty() && NewObject.deviceType != Existing.deviceType) {
 			if (!DeviceTypeCache()->IsAcceptableDeviceType(NewObject.deviceType)) {
 				return BadRequest(RESTAPI::Errors::InvalidDeviceTypes);
 			}
@@ -460,6 +460,11 @@ namespace OpenWifi {
 			Existing.state = NewObject.state;
 		}
 
+		if (RawObject->has("deviceType") && !NewObject.deviceType.empty() &&
+			NewObject.deviceType != Existing.deviceType) {
+			Existing.deviceType = NewObject.deviceType;
+		}
+
 		std::vector<std::string> Errors;
 		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
 		if (!Errors.empty()) {
@@ -509,7 +514,7 @@ namespace OpenWifi {
 			// in DB.
 			poco_information(Logger(), fmt::format("New Venue {} Old Venue {}", NewObject.venue, previous_venue));
 			if (!NewObject.venue.empty() && NewObject.venue != previous_venue) {
-				ComputeAndPushConfig(SerialNumber, NewObject.deviceType, Logger());
+				ComputeAndPushConfig(SerialNumber, Existing.deviceType, Logger());
 			}
 
 			ProvObjects::InventoryTag NewObjectCreated;
