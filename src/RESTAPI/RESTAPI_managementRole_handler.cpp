@@ -175,6 +175,29 @@ namespace OpenWifi {
 		return false;
 	}
 
+	static bool ValidateAssignableUser(RESTAPIHandler *handler,
+									   const std::string &requesterUserId,
+									   SecurityObjects::USER_ROLE requesterRole,
+									   const std::string &targetUserId,
+									   std::string &ErrorDescription) {
+		SecurityObjects::UserInfo TargetUser;
+		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
+			ErrorDescription = "The selected user could not be found.";
+			return false;
+		}
+
+		if (requesterRole == SecurityObjects::ROOT) {
+			return true;
+		}
+
+		if (TargetUser.createdBy.empty() || TargetUser.createdBy != requesterUserId) {
+			ErrorDescription = "You can only assign access to users that you created.";
+			return false;
+		}
+
+		return true;
+	}
+
 	void RESTAPI_managementRole_handler::DoPost() {
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty()) {
@@ -225,6 +248,10 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingUserID);
 		}
 		std::string UserId = NewObject.users[0];
+		std::string UserValidationError;
+		if (!ValidateAssignableUser(this, UserInfo_.userinfo.id, UserInfo_.userinfo.userRole, UserId, UserValidationError)) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
+		}
 
 		// Check for existing role (idempotent upsert)
 		ProvObjects::ManagementRole ExistingRole;

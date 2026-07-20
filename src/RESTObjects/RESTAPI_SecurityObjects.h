@@ -146,6 +146,7 @@ namespace OpenWifi {
 			NoteInfoVec notes;
 			std::string location;
 			std::string owner;
+			std::string createdBy;
 			bool suspended = false;
 			bool blackListed = false;
 			USER_ROLE userRole;

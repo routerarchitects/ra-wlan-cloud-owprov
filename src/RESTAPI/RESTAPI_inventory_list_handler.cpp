@@ -138,38 +138,39 @@ namespace OpenWifi {
 
 		// Standard user flow:
 		std::vector<ProvObjects::ManagementRole> Roles;
-		std::set<std::string> AssignedEntities;
+		std::set<std::string> AllowedEntities;
+		std::set<std::string> AllowedVenues;
+		auto RoleAllowsDeviceRead = [&](const ProvObjects::ManagementRole &role) {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			return PolicyAllows(Policy, "device", Poco::Net::HTTPRequest::HTTP_GET);
+		};
+
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			for (const auto &role : Roles) {
+				if (!RoleAllowsDeviceRead(role)) {
+					continue;
+				}
 				if (!role.entity.empty()) {
-					AssignedEntities.insert(role.entity);
+					AllowedEntities.insert(role.entity);
+				}
+				if (!role.venue.empty()) {
+					AllowedVenues.insert(role.venue);
 				}
 			}
 		}
 
-		if (AssignedEntities.empty()) {
+		if (AllowedEntities.empty() && AllowedVenues.empty()) {
 			ProvObjects::InventoryTagVec Tags;
 			return SendList(Tags, SerialOnly);
 		}
 
-		// 1. Get all descendant entities
-		std::set<std::string> descendantEntities;
-		for (const auto &entId : AssignedEntities) {
-			GetDescendantEntities(entId, descendantEntities);
-		}
-
-		// 2. Get all venues associated with these entities
-		std::set<std::string> allowedVenues;
-		for (const auto &entId : descendantEntities) {
-			ProvObjects::Entity E;
-			if (StorageService()->EntityDB().GetRecord("id", entId, E)) {
-				for (const auto &vId : E.venues) {
-					GetDescendantVenues(vId, allowedVenues);
-				}
-			}
-		}
-
-		// 3. Resolve order parameter
+		// 1. Resolve order parameter
 		std::string OrderBy{" ORDER BY serialNumber ASC "};
 		std::string Arg;
 		if (HasParameter("orderBy", Arg)) {
@@ -178,7 +179,7 @@ namespace OpenWifi {
 			}
 		}
 
-		// 4. Retrieve requested or matching tags
+		// 2. Retrieve requested or matching tags
 		ProvObjects::InventoryTagVec AllTags;
 		std::string paramUUID;
 		if (!QB_.Select.empty()) {
@@ -189,11 +190,11 @@ namespace OpenWifi {
 				}
 			}
 		} else if (HasParameter("entity", paramUUID)) {
-			if (descendantEntities.count(paramUUID)) {
+			if (AllowedEntities.count(paramUUID)) {
 				DB_.GetRecords(0, 10000, AllTags, DB_.OP("entity", ORM::EQ, paramUUID), OrderBy);
 			}
 		} else if (HasParameter("venue", paramUUID)) {
-			if (allowedVenues.count(paramUUID)) {
+			if (AllowedVenues.count(paramUUID)) {
 				DB_.GetRecords(0, 10000, AllTags, DB_.OP("venue", ORM::EQ, paramUUID), OrderBy);
 			}
 		} else {
@@ -201,10 +202,10 @@ namespace OpenWifi {
 			DB_.GetRecords(0, 10000, AllTags, "", OrderBy);
 		}
 
-		// 5. Apply visibility filter
+		// 3. Apply visibility filter
 		ProvObjects::InventoryTagVec FilteredTags;
 		for (const auto &tag : AllTags) {
-			if (descendantEntities.count(tag.entity) || allowedVenues.count(tag.venue)) {
+			if (AllowedEntities.count(tag.entity) || AllowedVenues.count(tag.venue)) {
 				FilteredTags.push_back(tag);
 			}
 		}

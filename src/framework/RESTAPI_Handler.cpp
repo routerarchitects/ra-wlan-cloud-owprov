@@ -112,6 +112,11 @@ namespace OpenWifi {
 			it = Bindings_.find("uuid");
 			if (it != Bindings_.end()) {
 				Id = it->second;
+			} else {
+				it = Bindings_.find(Poco::toLower(std::string(RESTAPI::Protocol::SERIALNUMBER)));
+				if (it != Bindings_.end()) {
+					Id = it->second;
+				}
 			}
 		}
 
@@ -132,7 +137,8 @@ namespace OpenWifi {
 				}
 			} else if (Path.find("/api/v1/inventory") != std::string::npos) {
 				ProvObjects::InventoryTag T;
-				if (StorageService()->InventoryDB().GetRecord("id", Id, T)) {
+				if (StorageService()->InventoryDB().GetRecord("id", Id, T) ||
+					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id, T)) {
 					TargetEntity = T.entity;
 					TargetVenue = T.venue;
 				}
@@ -358,20 +364,18 @@ namespace OpenWifi {
 	std::string RESTAPIHandler::GetResourceName(const std::string &Path) {
 		if (Path.find("/api/v1/entity") != std::string::npos) return "entity";
 		if (Path.find("/api/v1/venue") != std::string::npos) return "venue";
-		if (Path.find("/api/v1/inventory") != std::string::npos) return "inventory";
+		if (Path.find("/api/v1/inventory") != std::string::npos) return "device";
 		if (Path.find("/api/v1/configuration") != std::string::npos) return "configuration";
 		if (Path.find("/api/v1/managementRole") != std::string::npos) return "managementRole";
 		if (Path.find("/api/v1/managementPolicy") != std::string::npos) return "managementPolicy";
 		if (Path.find("/api/v1/operator") != std::string::npos) return "operator";
-		if (Path.find("/api/v1/customer") != std::string::npos) return "customer";
-		if (Path.find("/api/v1/user") != std::string::npos) return "user";
 		if (Path.find("/api/v1/contact") != std::string::npos) return "contact";
 		if (Path.find("/api/v1/location") != std::string::npos) return "location";
 		if (Path.find("/api/v1/map") != std::string::npos) return "map";
 		if (Path.find("/api/v1/variables") != std::string::npos) return "variables";
 		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos) return "radiusEndpoint";
 		if (Path.find("/api/v1/subscriber") != std::string::npos) return "subscriber";
-		if (Path.find("/api/v1/sub_devices") != std::string::npos) return "sub_devices";
+		if (Path.find("/api/v1/sub_devices") != std::string::npos) return "device";
 		if (Path.find("/api/v1/openroaming") != std::string::npos) return "openroaming";
 		if (Path.find("/api/v1/serviceClass") != std::string::npos) return "serviceClass";
 		if (Path.find("/api/v1/overrides") != std::string::npos) return "overrides";
