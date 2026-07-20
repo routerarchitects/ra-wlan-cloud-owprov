@@ -180,14 +180,14 @@ namespace OpenWifi {
 									   SecurityObjects::USER_ROLE requesterRole,
 									   const std::string &targetUserId,
 									   std::string &ErrorDescription) {
+		if (requesterRole == SecurityObjects::ROOT) {
+			return true;
+		}
+
 		SecurityObjects::UserInfo TargetUser;
 		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
 			ErrorDescription = "The selected user could not be found.";
 			return false;
-		}
-
-		if (requesterRole == SecurityObjects::ROOT) {
-			return true;
 		}
 
 		if (TargetUser.createdBy.empty() || TargetUser.createdBy != requesterUserId) {
