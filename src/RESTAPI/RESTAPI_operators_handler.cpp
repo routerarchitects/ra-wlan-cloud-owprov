@@ -25,7 +25,7 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
+		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 		bool AllOperatorsAllowed = IsRoot;
 		std::set<std::string> AllowedOperatorIds;
 

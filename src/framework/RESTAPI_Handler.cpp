@@ -42,19 +42,7 @@ namespace OpenWifi {
 
 		std::string UserId = UserInfo_.userinfo.id;
 		std::vector<ProvObjects::ManagementRole> Roles;
-		if (!AuthCache::GetInstance()->GetUserRoles(UserId, Roles)) {
-			ManagementRoleDB::RecordVec DB_Roles;
-			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
-				for (const auto &role : DB_Roles) {
-					for (const auto &user : role.users) {
-						if (user == UserId) {
-							Roles.push_back(role);
-						}
-					}
-				}
-			}
-			AuthCache::GetInstance()->SetUserRoles(UserId, Roles);
-		}
+		FindAllUserRoles(UserId, Roles);
 
 		auto CheckRolePolicy = [&](const ProvObjects::ManagementRole &role) -> bool {
 			ProvObjects::ManagementPolicy Policy;
@@ -70,7 +58,15 @@ namespace OpenWifi {
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
-			// Check if any of the user's roles permit this resource and method.
+			// If a scope constraint was specified (via path ID, query param, or body)
+			// but could not be resolved against the database, we must fail closed.
+			if (HasScopeConstraint(Resource, Method)) {
+				Reason = "Scope resolution failed for constrained operation; access denied.";
+				return false;
+			}
+			// If no scope constraint was specified (e.g. global/collection operations like
+			// GET /api/v1/entity or GET /api/v1/inventory), we check if any role permits
+			// the operation globally.
 			for (const auto &role : Roles) {
 				if (CheckRolePolicy(role)) {
 					return true;
@@ -103,7 +99,12 @@ namespace OpenWifi {
 	}
 
 	bool RESTAPIHandler::ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue) {
-		// 1. Check bindings for ID
+		// ----------------------------------------------------------------
+		// SOURCE 1: Bound object ID in path bindings (most authoritative).
+		// Always look up the record in the DB — never accept a partial scope.
+		// If an ID is present but the DB lookup fails, return false immediately
+		// rather than falling through to a weaker source.
+		// ----------------------------------------------------------------
 		std::string Id;
 		auto it = Bindings_.find("id");
 		if (it != Bindings_.end()) {
@@ -125,76 +126,269 @@ namespace OpenWifi {
 			Id != "0" &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0);
 
-		// 2. For object routes, always derive scope from the bound object first.
 		if (HasBoundObjectId) {
 			if (Path.find("/api/v1/entity") != std::string::npos) {
-				TargetEntity = Id;
+				ProvObjects::Entity E;
+				if (StorageService()->EntityDB().GetRecord("id", Id, E)) {
+					TargetEntity = Id;
+					return true;
+				}
+				return false;
 			} else if (Path.find("/api/v1/venue") != std::string::npos) {
-				TargetVenue = Id;
 				ProvObjects::Venue V;
 				if (StorageService()->VenueDB().GetRecord("id", Id, V)) {
+					TargetVenue = Id;
 					TargetEntity = V.entity;
+					return true;
 				}
+				return false;
 			} else if (Path.find("/api/v1/inventory") != std::string::npos) {
 				ProvObjects::InventoryTag T;
 				if (StorageService()->InventoryDB().GetRecord("id", Id, T) ||
 					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id, T)) {
 					TargetEntity = T.entity;
 					TargetVenue = T.venue;
+					return true;
 				}
+				return false;
 			} else if (Path.find("/api/v1/configuration") != std::string::npos) {
 				ProvObjects::DeviceConfiguration C;
 				if (StorageService()->ConfigurationDB().GetRecord("id", Id, C)) {
 					TargetEntity = C.entity;
 					TargetVenue = C.venue;
+					return true;
 				}
+				return false;
 			} else if (Path.find("/api/v1/managementRole") != std::string::npos) {
 				ProvObjects::ManagementRole R;
 				if (StorageService()->RolesDB().GetRecord("id", Id, R)) {
 					TargetEntity = R.entity;
 					TargetVenue = R.venue;
+					return true;
 				}
+				return false;
+			} else if (Path.find("/api/v1/contact") != std::string::npos) {
+				ProvObjects::Contact C;
+				if (StorageService()->ContactDB().GetRecord("id", Id, C)) {
+					TargetEntity = C.entity;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/location") != std::string::npos) {
+				ProvObjects::Location L;
+				if (StorageService()->LocationDB().GetRecord("id", Id, L)) {
+					TargetEntity = L.entity;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/managementPolicy") != std::string::npos) {
+				ProvObjects::ManagementPolicy P;
+				if (StorageService()->PolicyDB().GetRecord("id", Id, P)) {
+					TargetEntity = P.entity;
+					TargetVenue = P.venue;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/map") != std::string::npos) {
+				ProvObjects::Map M;
+				if (StorageService()->MapDB().GetRecord("id", Id, M)) {
+					TargetEntity = M.entity;
+					TargetVenue = M.venue;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/variables") != std::string::npos) {
+				ProvObjects::VariableBlock V;
+				if (StorageService()->VariablesDB().GetRecord("id", Id, V)) {
+					TargetEntity = V.entity;
+					TargetVenue = V.venue;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/serviceClass") != std::string::npos) {
+				ProvObjects::ServiceClass S;
+				if (StorageService()->ServiceClassDB().GetRecord("id", Id, S)) {
+					ProvObjects::Operator O;
+					if (StorageService()->OperatorDB().GetRecord("id", S.operatorId, O)) {
+						TargetEntity = O.entityId;
+						return true;
+					}
+				}
+				return false;
+			} else if (Path.find("/api/v1/operator") != std::string::npos) {
+				ProvObjects::Operator O;
+				if (StorageService()->OperatorDB().GetRecord("id", Id, O)) {
+					TargetEntity = O.entityId;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/overrides") != std::string::npos) {
+				ProvObjects::InventoryTag T;
+				if (StorageService()->InventoryDB().GetRecord("id", Id, T) ||
+					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id, T)) {
+					TargetEntity = T.entity;
+					TargetVenue = T.venue;
+					return true;
+				}
+				return false;
+			} else if (Path.find("/api/v1/subscriberDevice") != std::string::npos) {
+				ProvObjects::SubscriberDevice SD;
+				if (StorageService()->SubscriberDeviceDB().GetRecord("id", Id, SD) ||
+					StorageService()->SubscriberDeviceDB().GetRecord("serialNumber", Id, SD)) {
+					ProvObjects::Operator O;
+					if (StorageService()->OperatorDB().GetRecord("id", SD.operatorId, O)) {
+						TargetEntity = O.entityId;
+						return true;
+					}
+				}
+				return false;
+			} else if (Path.find("/api/v1/subscriber") != std::string::npos) {
+				ProvObjects::SignupEntry SE;
+				if (StorageService()->SignupDB().GetRecord("userid", Id, SE) ||
+					StorageService()->SignupDB().GetRecord("id", Id, SE)) {
+					ProvObjects::Operator O;
+					if (StorageService()->OperatorDB().GetRecord("id", SE.operatorId, O)) {
+						TargetEntity = O.entityId;
+						return true;
+					}
+				}
+				return false;
+			} else if (Path.find("/api/v1/op_contact") != std::string::npos) {
+				ProvObjects::OperatorContact OC;
+				if (StorageService()->OpContactDB().GetRecord("id", Id, OC)) {
+					ProvObjects::Operator O;
+					if (StorageService()->OperatorDB().GetRecord("id", OC.operatorId, O)) {
+						TargetEntity = O.entityId;
+						return true;
+					}
+				}
+				return false;
+			} else if (Path.find("/api/v1/op_location") != std::string::npos) {
+				ProvObjects::OperatorLocation OL;
+				if (StorageService()->OpLocationDB().GetRecord("id", Id, OL)) {
+					ProvObjects::Operator O;
+					if (StorageService()->OperatorDB().GetRecord("id", OL.operatorId, O)) {
+						TargetEntity = O.entityId;
+						return true;
+					}
+				}
+				return false;
 			}
-
-			if (!TargetEntity.empty() || !TargetVenue.empty()) {
-				return true;
-			}
+			// Bound ID present but path not recognised as a scoped resource.
+			return false;
 		}
 
-		// 3. For collection routes, fall back to query parameters.
+		// ----------------------------------------------------------------
+		// SOURCE 2: Query parameters (?entity=... / ?venue=...).
+		// Collect candidate IDs first, then validate both against the DB.
+		// If a param is supplied but the ID doesn't exist, return false —
+		// don't silently fall back and treat a bad ID as "no scope".
+		// ----------------------------------------------------------------
+		std::string CandidateEntity, CandidateVenue;
 		for (const auto &[name, value] : Parameters_) {
-			if (name == "entity") {
-				TargetEntity = value;
-			} else if (name == "venue") {
-				TargetVenue = value;
-			}
+			if (name == "entity") CandidateEntity = value;
+			else if (name == "venue") CandidateVenue = value;
 		}
 
-		// 4. Check body if parsed body exists
-		if (TargetEntity.empty() && TargetVenue.empty() && ParsedBody_) {
-			if (ParsedBody_->has("entity")) {
-				TargetEntity = ParsedBody_->get("entity").toString();
-			}
-			if (ParsedBody_->has("venue")) {
-				TargetVenue = ParsedBody_->get("venue").toString();
-			}
-			if (TargetEntity.empty() && TargetVenue.empty() && ParsedBody_->has("parent")) {
+		// ----------------------------------------------------------------
+		// SOURCE 3: Request body (entity / venue / parent fields).
+		// Only consulted when params yielded nothing.
+		// ----------------------------------------------------------------
+		if (CandidateEntity.empty() && CandidateVenue.empty() && ParsedBody_) {
+			if (ParsedBody_->has("entity")) CandidateEntity = ParsedBody_->get("entity").toString();
+			if (ParsedBody_->has("venue"))  CandidateVenue  = ParsedBody_->get("venue").toString();
+
+			if (CandidateEntity.empty() && CandidateVenue.empty() && ParsedBody_->has("parent")) {
 				std::string ParentId = ParsedBody_->get("parent").toString();
 				if (!ParentId.empty()) {
 					if (Path.find("/api/v1/entity") != std::string::npos) {
-						TargetEntity = ParentId;
+						CandidateEntity = ParentId;
 					} else if (Path.find("/api/v1/venue") != std::string::npos) {
-						TargetVenue = ParentId;
-						ProvObjects::Venue V;
-						if (StorageService()->VenueDB().GetRecord("id", ParentId, V)) {
-							TargetEntity = V.entity;
-						}
+						CandidateVenue = ParentId;
 					}
 				}
 			}
 		}
 
-		return !TargetEntity.empty() || !TargetVenue.empty();
+		// ----------------------------------------------------------------
+		// Validate whatever candidates we have against the DB.
+		// Venue takes priority: if present, derive entity from it so the
+		// scope is always (entity, venue) or (entity, "") — never ("", venue).
+		// If a candidate ID was supplied but the DB lookup fails, the scope
+		// is unresolvable — return false rather than silently ignoring it.
+		// ----------------------------------------------------------------
+		if (!CandidateVenue.empty()) {
+			ProvObjects::Venue V;
+			if (StorageService()->VenueDB().GetRecord("id", CandidateVenue, V)) {
+				TargetVenue   = CandidateVenue;
+				TargetEntity  = V.entity;
+				return true;
+			}
+			return false; // Venue ID provided but not found in DB.
+		}
+
+		if (!CandidateEntity.empty()) {
+			ProvObjects::Entity E;
+			if (StorageService()->EntityDB().GetRecord("id", CandidateEntity, E)) {
+				TargetEntity = CandidateEntity;
+				return true;
+			}
+			return false; // Entity ID provided but not found in DB.
+		}
+
+		// No scope information found from any source.
+		return false;
+	}
+
+	bool RESTAPIHandler::HasScopeConstraint(const std::string &Resource, const std::string &Method) {
+		// Only resource types that are associated with an entity or venue can have scope constraints.
+		// Global/unscoped resources (like iptocountry, radiusEndpoint, openroaming) do not.
+		bool IsScoped = (
+			Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
+			Resource == "configuration" || Resource == "managementRole" || Resource == "contact" ||
+			Resource == "location" || Resource == "managementPolicy" || Resource == "map" ||
+			Resource == "variables" || Resource == "serviceClass" || Resource == "operator" ||
+			Resource == "overrides" || Resource == "subscriber" || Resource == "subscriberDevice" ||
+			Resource == "op_contact" || Resource == "op_location"
+		);
+
+		if (!IsScoped) {
+			return false;
+		}
+
+		std::string Id;
+		auto it = Bindings_.find("id");
+		if (it != Bindings_.end()) {
+			Id = it->second;
+		} else {
+			it = Bindings_.find("uuid");
+			if (it != Bindings_.end()) {
+				Id = it->second;
+			} else {
+				it = Bindings_.find(Poco::toLower(std::string(RESTAPI::Protocol::SERIALNUMBER)));
+				if (it != Bindings_.end()) {
+					Id = it->second;
+				}
+			}
+		}
+
+		if (!Id.empty() && Id != "0" && !(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0)) {
+			return true;
+		}
+
+		for (const auto &[name, value] : Parameters_) {
+			if (name == "entity" || name == "venue") {
+				return true;
+			}
+		}
+
+		if (ParsedBody_) {
+			if (ParsedBody_->has("entity") || ParsedBody_->has("venue") || ParsedBody_->has("parent")) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	bool RESTAPIHandler::PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource, const std::string &Method) {
@@ -268,19 +462,7 @@ namespace OpenWifi {
 
 	bool RESTAPIHandler::FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole) {
 		std::vector<ProvObjects::ManagementRole> Roles;
-		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
-			ManagementRoleDB::RecordVec DB_Roles;
-			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
-				for (const auto &role : DB_Roles) {
-					for (const auto &user : role.users) {
-						if (user == userId) {
-							Roles.push_back(role);
-						}
-					}
-				}
-			}
-			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
-		}
+		FindAllUserRoles(userId, Roles);
 
 		if (!Roles.empty()) {
 			AnyRole = Roles.front();
@@ -291,16 +473,15 @@ namespace OpenWifi {
 
 	bool RESTAPIHandler::FindAllUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &Roles) {
 		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
-			ManagementRoleDB::RecordVec DB_Roles;
-			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
-				for (const auto &role : DB_Roles) {
-					for (const auto &user : role.users) {
-						if (user == userId) {
-							Roles.push_back(role);
-						}
+			StorageService()->RolesDB().Iterate([&](const ProvObjects::ManagementRole &role) {
+				for (const auto &user : role.users) {
+					if (user == userId) {
+						Roles.push_back(role);
+						break;
 					}
 				}
-			}
+				return true;
+			});
 			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
 		}
 		return !Roles.empty();
@@ -308,19 +489,7 @@ namespace OpenWifi {
 
 	bool RESTAPIHandler::FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
 		std::vector<ProvObjects::ManagementRole> Roles;
-		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
-			ManagementRoleDB::RecordVec DB_Roles;
-			if (StorageService()->RolesDB().GetRecords(0, 1000, DB_Roles)) {
-				for (const auto &role : DB_Roles) {
-					for (const auto &user : role.users) {
-						if (user == userId) {
-							Roles.push_back(role);
-						}
-					}
-				}
-			}
-			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
-		}
+		FindAllUserRoles(userId, Roles);
 
 		if (!venueId.empty()) {
 			for (const auto &role : Roles) {
@@ -384,7 +553,7 @@ namespace OpenWifi {
 	}
 
 	void RESTAPIHandler::AutoCreateCreatorRole(const std::string &CreatedEntityId, const std::string &CreatedVenueId, const std::string &ParentEntityId, const std::string &ParentVenueId) {
-		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM) {
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 			return;
 		}
 

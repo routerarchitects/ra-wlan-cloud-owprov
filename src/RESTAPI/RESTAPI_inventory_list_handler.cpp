@@ -40,9 +40,9 @@ namespace OpenWifi {
 		}
 
 		bool SerialOnly = GetBoolParameter("serialOnly");
-		bool isRootOrSystem = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
+		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
-		if (isRootOrSystem) {
+		if (isRoot) {
 			std::string UUID;
 			std::string Arg, Arg2;
 

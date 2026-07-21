@@ -111,22 +111,32 @@ namespace OpenWifi {
 													  const std::string &venueId,
 													  const ProvObjects::ManagementPolicy &TargetPolicy,
 													  std::string &ErrorDescription) {
-		ManagementRoleDB::RecordVec Roles;
-		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
-		if (StorageService()->RolesDB().GetRecords(0, 1000, Roles)) {
-			for (const auto &role : Roles) {
-				if (role.entity != entityId || role.venue != venueId) {
-					continue;
-				}
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
+			StorageService()->RolesDB().Iterate([&](const ProvObjects::ManagementRole &role) {
 				for (const auto &u : role.users) {
 					if (u == userId) {
-						ProvObjects::ManagementPolicy Policy;
-						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-							requesterPolicies.push_back(Policy);
-						}
+						Roles.push_back(role);
 						break;
 					}
 				}
+				return true;
+			});
+			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+		}
+
+		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
+		for (const auto &role : Roles) {
+			if (role.entity == entityId && role.venue == venueId) {
+				ProvObjects::ManagementPolicy Policy;
+				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+					if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+						AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+					} else {
+						continue;
+					}
+				}
+				requesterPolicies.push_back(Policy);
 			}
 		}
 
@@ -271,7 +281,7 @@ namespace OpenWifi {
 			}
 		}
 
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM &&
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT &&
 			!NewObject.managementPolicy.empty()) {
 			auto Scopes = VenueIds;
 			if (Scopes.empty()) {
@@ -389,7 +399,7 @@ namespace OpenWifi {
 			if (!StorageService()->PolicyDB().GetRecord("id", EffectivePolicyUUID, TargetPolicy)) {
 				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
 			}
-			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 				std::string PrivilegeError;
 				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, EffectiveEntity, EffectiveVenue, TargetPolicy, PrivilegeError)) {
 					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);

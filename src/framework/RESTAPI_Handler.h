@@ -750,6 +750,7 @@ namespace OpenWifi {
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue);
+		bool HasScopeConstraint(const std::string &Resource, const std::string &Method);
 		bool PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource, const std::string &Method);
 		bool FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole);
 		bool FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole);

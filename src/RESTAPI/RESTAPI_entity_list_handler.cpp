@@ -14,9 +14,9 @@
 namespace OpenWifi {
 
 	void RESTAPI_entity_list_handler::DoGet() {
-		bool isRootOrSystem = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
+		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
-		if (isRootOrSystem) {
+		if (isRoot) {
 			if (!QB_.Select.empty()) {
 				return ReturnRecordList<decltype(DB_), ProvObjects::Entity>("entities", DB_, *this);
 			} else if (QB_.CountOnly) {

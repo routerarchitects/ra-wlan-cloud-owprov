@@ -7,7 +7,7 @@
 
 namespace OpenWifi {
 	void RESTAPI_operators_list_handler::DoGet() {
-		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
+		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
 		std::set<std::string> AllowedOperatorIds;
 		bool AllOperatorsAllowed = IsRoot;

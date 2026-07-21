@@ -8,9 +8,9 @@
 
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
-		bool isRootOrSystem = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT || UserInfo_.userinfo.userRole == SecurityObjects::SYSTEM);
+		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
-		if (isRootOrSystem) {
+		if (isRoot) {
 			auto RRMvendor = GetParameter("RRMvendor","");
 			if(RRMvendor.empty()) {
 				return ListHandler<VenueDB>("venues", DB_, *this);

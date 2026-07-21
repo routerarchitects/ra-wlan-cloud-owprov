@@ -52,7 +52,7 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementPolicy_handler::DoDelete() {
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
@@ -76,7 +76,7 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementPolicy_handler::DoPost() {
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
@@ -121,7 +121,7 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementPolicy_handler::DoPut() {
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT && UserInfo_.userinfo.userRole != SecurityObjects::SYSTEM) {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 		}
 
