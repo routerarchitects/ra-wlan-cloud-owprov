@@ -78,7 +78,7 @@ namespace OpenWifi {
 
 		if (!TargetVenue.empty()) {
 			for (const auto &role : Roles) {
-				if (role.entity == TargetEntity && role.venue == TargetVenue) {
+				if (role.entity == TargetEntity && (role.venue == TargetVenue || role.venue.empty())) {
 					if (CheckRolePolicy(role)) {
 						return true;
 					}
