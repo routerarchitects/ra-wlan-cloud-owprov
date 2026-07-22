@@ -14,15 +14,35 @@ namespace OpenWifi {
 		}
 
 		if (!userParam.empty()) {
-			SecurityObjects::UserInfo TargetUser;
-			if (!SDK::Sec::User::Get(this, userParam, TargetUser)) {
-				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
+
+			std::set<std::string> AllowedEntities;
+			std::set<std::string> AllowedVenues;
+
+			if (!isRoot) {
+				std::vector<ProvObjects::ManagementRole> RequesterRoles;
+				if (FindAllUserRoles(UserInfo_.userinfo.id, RequesterRoles)) {
+					for (const auto &role : RequesterRoles) {
+						if (!role.entity.empty()) {
+							AllowedEntities.insert(role.entity);
+						}
+						if (!role.venue.empty()) {
+							AllowedVenues.insert(role.venue);
+						}
+					}
+				}
+				if (AllowedEntities.empty() && AllowedVenues.empty()) {
+					ProvObjects::ManagementRoleVec EmptyRoles;
+					return MakeJSONObjectArray("roles", EmptyRoles, *this);
+				}
 			}
 
 			ProvObjects::ManagementRoleVec Roles;
 			auto lambda = [&](const ProvObjects::ManagementRole &role) {
 				if (std::find(role.users.begin(), role.users.end(), userParam) != role.users.end()) {
-					Roles.push_back(role);
+					if (isRoot || AllowedEntities.count(role.entity) || AllowedVenues.count(role.venue)) {
+						Roles.push_back(role);
+					}
 				}
 				return true;
 			};
