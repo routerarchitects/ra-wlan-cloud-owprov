@@ -14,11 +14,9 @@ namespace OpenWifi {
 		}
 
 		if (!userParam.empty()) {
-			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
-				SecurityObjects::UserInfo TargetUser;
-				if (!SDK::Sec::User::Get(this, userParam, TargetUser)) {
-					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
-				}
+			SecurityObjects::UserInfo TargetUser;
+			if (!SDK::Sec::User::Get(this, userParam, TargetUser)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 			}
 
 			ProvObjects::ManagementRoleVec Roles;

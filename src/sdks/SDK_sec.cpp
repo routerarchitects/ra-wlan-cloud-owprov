@@ -13,7 +13,8 @@ namespace OpenWifi::SDK::Sec {
 			OpenAPIRequestGet Req(uSERVICE_SECURITY, "/api/v1/user/" + Id, {}, 5000);
 
 			auto CallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto StatusCode = Req.Do(CallResponse);
+			std::string Token = client ? client->UserInfo_.webtoken.token : "";
+			auto StatusCode = Req.Do(CallResponse, Token);
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return true;
 			}
@@ -25,7 +26,8 @@ namespace OpenWifi::SDK::Sec {
 			OpenAPIRequestGet Req(uSERVICE_SECURITY, "/api/v1/user/" + Id, {}, 5000);
 
 			auto CallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto StatusCode = Req.Do(CallResponse);
+			std::string Token = client ? client->UserInfo_.webtoken.token : "";
+			auto StatusCode = Req.Do(CallResponse, Token);
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return UserInfo.from_json(CallResponse);
 			}
@@ -38,7 +40,8 @@ namespace OpenWifi::SDK::Sec {
 			OpenAPIRequestGet Req(uSERVICE_SECURITY, "/api/v1/subuser/" + Id, {}, 5000);
 
 			auto CallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto StatusCode = Req.Do(CallResponse);
+			std::string Token = client ? client->UserInfo_.webtoken.token : "";
+			auto StatusCode = Req.Do(CallResponse, Token);
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return true;
 			}
@@ -50,7 +53,8 @@ namespace OpenWifi::SDK::Sec {
 			OpenAPIRequestGet Req(uSERVICE_SECURITY, "/api/v1/subuser/" + Id, {}, 5000);
 
 			auto CallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto StatusCode = Req.Do(CallResponse);
+			std::string Token = client ? client->UserInfo_.webtoken.token : "";
+			auto StatusCode = Req.Do(CallResponse, Token);
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return UserInfo.from_json(CallResponse);
 			}
@@ -76,7 +80,8 @@ namespace OpenWifi::SDK::Sec {
 				uSERVICE_SECURITY, "/api/v1/subusers",
 				{{"operatorId", OperatorId}, {"nameSearch", Name}, {"emailSearch", EMail}}, 5000);
 			auto CallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto StatusCode = Req.Do(CallResponse);
+			std::string Token = client ? client->UserInfo_.webtoken.token : "";
+			auto StatusCode = Req.Do(CallResponse, Token);
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return Users.from_json(CallResponse);
 			}
