@@ -148,7 +148,7 @@ namespace OpenWifi {
 			Existing.venue = TargetVenue;
 		}
 
-		if (!NewPolicy.entries.empty()) {
+		if (RawObject->has("entries")) {
 			Existing.entries = NewPolicy.entries;
 		}
 
