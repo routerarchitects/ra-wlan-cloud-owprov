@@ -193,27 +193,54 @@ namespace OpenWifi {
 			}
 		}
 
-		// 2. Retrieve requested or matching tags
+		// 2. Retrieve requested or matching tags using parameters
 		ProvObjects::InventoryTagVec AllTags;
 		std::string paramUUID;
-		if (!QB_.Select.empty()) {
-			for (const auto &id : QB_.Select) {
+		std::string Where;
+
+		if (GetBoolParameter("subscribersOnly") && GetBoolParameter("unassigned")) {
+			Where = " devClass='subscriber' and subscriber='' ";
+		} else if (GetBoolParameter("subscribersOnly")) {
+			Where = " devClass='subscriber' and subscriber!='' ";
+		} else if (GetBoolParameter("unassigned")) {
+			std::string Empty;
+			Where = InventoryDB::OP(DB_.OP("venue", ORM::EQ, Empty), ORM::AND, DB_.OP("entity", ORM::EQ, Empty));
+		} else if (HasParameter("subscriber", Arg) && !Arg.empty()) {
+			Where = " subscriber='" + ORM::Escape(Arg) + "'";
+		} else if (HasParameter("entity", paramUUID)) {
+			if (!AllowedEntities.count(paramUUID)) {
+				ProvObjects::InventoryTagVec Tags;
+				return SendList(Tags, SerialOnly);
+			}
+			Where = DB_.OP("entity", ORM::EQ, paramUUID);
+		} else if (HasParameter("venue", paramUUID)) {
+			if (!AllowedVenues.count(paramUUID)) {
+				ProvObjects::InventoryTagVec Tags;
+				return SendList(Tags, SerialOnly);
+			}
+			Where = DB_.OP("venue", ORM::EQ, paramUUID);
+		} else if (GetBoolParameter("rrmOnly")) {
+			Types::UUIDvec_t DeviceList;
+			DB_.GetRRMDeviceList(DeviceList);
+			for (const auto &id : DeviceList) {
 				ProvObjects::InventoryTag tag;
-				if (DB_.GetRecord("id", id, tag)) {
+				if (DB_.GetRecord("id", id, tag) || DB_.GetRecord(RESTAPI::Protocol::SERIALNUMBER, id, tag)) {
 					AllTags.push_back(tag);
 				}
 			}
-		} else if (HasParameter("entity", paramUUID)) {
-			if (AllowedEntities.count(paramUUID)) {
-				DB_.GetRecords(0, 10000, AllTags, DB_.OP("entity", ORM::EQ, paramUUID), OrderBy);
+		}
+
+		if (AllTags.empty() && !GetBoolParameter("rrmOnly")) {
+			if (!QB_.Select.empty()) {
+				for (const auto &id : QB_.Select) {
+					ProvObjects::InventoryTag tag;
+					if (DB_.GetRecord("id", id, tag)) {
+						AllTags.push_back(tag);
+					}
+				}
+			} else {
+				DB_.GetRecords(0, 10000, AllTags, Where, OrderBy);
 			}
-		} else if (HasParameter("venue", paramUUID)) {
-			if (AllowedVenues.count(paramUUID)) {
-				DB_.GetRecords(0, 10000, AllTags, DB_.OP("venue", ORM::EQ, paramUUID), OrderBy);
-			}
-		} else {
-			// Retrieve all tags (up to 10000)
-			DB_.GetRecords(0, 10000, AllTags, "", OrderBy);
 		}
 
 		// 3. Apply visibility filter
