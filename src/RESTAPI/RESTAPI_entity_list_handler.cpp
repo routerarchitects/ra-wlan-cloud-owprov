@@ -1,30 +1,15 @@
-//
-//	License type: BSD 3-Clause License
-//	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
-//
-//	Created by Stephane Bourque on 2021-03-04.
-//	Arilia Wireless Inc.
-//
-
 #include "RESTAPI_entity_list_handler.h"
-#include "RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_db_helpers.h"
 #include "StorageService.h"
-#include <map>
+#include <functional>
 
 namespace OpenWifi {
 
 	void RESTAPI_entity_list_handler::DoGet() {
-		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
-
-		if (isRoot) {
-			if (!QB_.Select.empty()) {
-				return ReturnRecordList<decltype(DB_), ProvObjects::Entity>("entities", DB_, *this);
-			} else if (QB_.CountOnly) {
-				auto C = DB_.Count();
-				return ReturnCountOnly(C);
-			} else if (GetBoolParameter("getTree", false)) {
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
+			if (GetBoolParameter("getTree", false)) {
 				Poco::JSON::Object FullTree;
-				DB_.BuildTree(FullTree);
+				StorageService()->EntityDB().BuildTree(FullTree);
 				return ReturnObject(FullTree);
 			} else {
 				EntityDB::RecordVec Entities;
@@ -36,6 +21,7 @@ namespace OpenWifi {
 		std::vector<ProvObjects::ManagementRole> Roles;
 		std::set<std::string> VisibleEntities;
 		std::set<std::string> VisibleVenues;
+
 		auto policyAllowsGet = [&](const ProvObjects::ManagementRole &role, const std::string &resource) -> bool {
 			ProvObjects::ManagementPolicy Policy;
 			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
@@ -47,14 +33,42 @@ namespace OpenWifi {
 			return PolicyAllows(Policy, resource, Poco::Net::HTTPRequest::HTTP_GET);
 		};
 
+		std::function<void(const std::string &)> addVenueAndDescendants;
+		std::function<void(const std::string &)> addEntityAndDescendants;
+
+		addVenueAndDescendants = [&](const std::string &venueId) {
+			if (VisibleVenues.count(venueId)) return;
+			VisibleVenues.insert(venueId);
+			ProvObjects::Venue ven;
+			if (StorageService()->VenueDB().GetRecord("id", venueId, ven)) {
+				for (const auto &childId : ven.children) {
+					addVenueAndDescendants(childId);
+				}
+			}
+		};
+
+		addEntityAndDescendants = [&](const std::string &entityId) {
+			if (VisibleEntities.count(entityId)) return;
+			VisibleEntities.insert(entityId);
+			ProvObjects::Entity ent;
+			if (StorageService()->EntityDB().GetRecord("id", entityId, ent)) {
+				for (const auto &childId : ent.children) {
+					addEntityAndDescendants(childId);
+				}
+				for (const auto &venueId : ent.venues) {
+					addVenueAndDescendants(venueId);
+				}
+			}
+		};
+
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			for (const auto &role : Roles) {
 				if (!role.venue.empty()) {
 					if (policyAllowsGet(role, "venue")) {
-						VisibleVenues.insert(role.venue);
+						addVenueAndDescendants(role.venue);
 					}
 				} else if (!role.entity.empty() && policyAllowsGet(role, "entity")) {
-					VisibleEntities.insert(role.entity);
+					addEntityAndDescendants(role.entity);
 				}
 			}
 		}
@@ -193,49 +207,14 @@ namespace OpenWifi {
 			return ReturnObject(ScopedTree);
 		}
 
-		if (!QB_.Select.empty()) {
-			std::vector<std::string> FilteredSelect;
-			for (const auto &id : QB_.Select) {
-				if (VisibleEntities.count(id)) {
-					FilteredSelect.push_back(id);
-				}
+		EntityDB::RecordVec FilteredEntities;
+		for (const auto &entityId : VisibleEntities) {
+			ProvObjects::Entity Entity;
+			if (StorageService()->EntityDB().GetRecord("id", entityId, Entity)) {
+				FilteredEntities.push_back(Entity);
 			}
-			auto origSelect = QB_.Select;
-			QB_.Select = FilteredSelect;
-			ReturnRecordList<decltype(DB_), ProvObjects::Entity>("entities", DB_, *this);
-			QB_.Select = origSelect;
-			return;
-		} else if (QB_.CountOnly) {
-			return ReturnCountOnly(VisibleEntities.size());
-		} else {
-			EntityDB::RecordVec AllEntities;
-			DB_.GetRecords(0, 10000, AllEntities);
-			EntityDB::RecordVec FilteredEntities;
-			for (const auto &ent : AllEntities) {
-				if (VisibleEntities.count(ent.info.id)) {
-					FilteredEntities.push_back(ent);
-				}
-			}
-
-			EntityDB::RecordVec PaginatedEntities;
-			uint64_t offset = QB_.Offset;
-			uint64_t limit = QB_.Limit;
-			if (limit == 0) limit = 100;
-			uint64_t count = 0;
-			for (size_t i = offset; i < FilteredEntities.size() && count < limit; ++i) {
-				PaginatedEntities.push_back(FilteredEntities[i]);
-				count++;
-			}
-			return MakeJSONObjectArray("entities", PaginatedEntities, *this);
 		}
+		return MakeJSONObjectArray("entities", FilteredEntities, *this);
 	}
 
-	void RESTAPI_entity_list_handler::DoPost() {
-		if (GetBoolParameter("setTree", false)) {
-			const auto &FullTree = ParsedBody_;
-			DB_.ImportTree(FullTree);
-			return OK();
-		}
-		BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-	}
 } // namespace OpenWifi
