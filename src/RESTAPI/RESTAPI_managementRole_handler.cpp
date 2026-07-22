@@ -54,22 +54,7 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		bool Force = false;
-		std::string Arg;
-		if (HasParameter("force", Arg) && Arg == "true")
-			Force = true;
-
-		if (!Force && !Existing.inUse.empty()) {
-			return BadRequest(RESTAPI::Errors::StillInUse);
-		}
-
 		DB_.DeleteRecord("id", Existing.info.id);
-		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
-				  Existing.info.id);
-		RemoveMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
-						 Existing.entity, Existing.info.id);
-		RemoveMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
-						 Existing.venue, Existing.info.id);
 		AuthCache::GetInstance()->Clear();
 		return OK();
 	}
@@ -171,10 +156,21 @@ namespace OpenWifi {
 	}
 
 	static bool FindExactExistingRole(ManagementRoleDB &DB, const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
-		ManagementRoleDB::RecordVec Roles;
-		std::string WhereClause = "entity='" + entityId + "' and venue='" + venueId + "'";
-		if (DB.GetRecords(0, 500, Roles, WhereClause)) {
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
 			for (const auto &role : Roles) {
+				if (role.entity == entityId && role.venue == venueId) {
+					ExistingRole = role;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		ManagementRoleDB::RecordVec DB_Roles;
+		std::string WhereClause = "entity='" + entityId + "' and venue='" + venueId + "'";
+		if (DB.GetRecords(0, 500, DB_Roles, WhereClause)) {
+			for (const auto &role : DB_Roles) {
 				for (const auto &user : role.users) {
 					if (user == userId) {
 						ExistingRole = role;
@@ -191,18 +187,9 @@ namespace OpenWifi {
 									   SecurityObjects::USER_ROLE requesterRole,
 									   const std::string &targetUserId,
 									   std::string &ErrorDescription) {
-		if (requesterRole == SecurityObjects::ROOT) {
-			return true;
-		}
-
 		SecurityObjects::UserInfo TargetUser;
 		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
 			ErrorDescription = "The selected user could not be found.";
-			return false;
-		}
-
-		if (TargetUser.createdBy.empty() || TargetUser.createdBy != requesterUserId) {
-			ErrorDescription = "You can only assign access to users that you created.";
 			return false;
 		}
 
@@ -265,7 +252,10 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		auto VenueIds = ParseVenueIds(RawObj, NewObject.venue);
+		auto Scopes = ParseVenueIds(RawObj, NewObject.venue);
+		if (Scopes.empty()) {
+			Scopes.emplace_back("");
+		}
 
 		// Validate system policy exists in DB
 		ProvObjects::ManagementPolicy TargetPolicy;
@@ -275,7 +265,7 @@ namespace OpenWifi {
 			}
 		}
 
-		for (const auto &venueId : VenueIds) {
+		for (const auto &venueId : Scopes) {
 			if (!ValidateVenueScope(NewObject.entity, venueId)) {
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
@@ -283,10 +273,6 @@ namespace OpenWifi {
 
 		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT &&
 			!NewObject.managementPolicy.empty()) {
-			auto Scopes = VenueIds;
-			if (Scopes.empty()) {
-				Scopes.emplace_back("");
-			}
 			for (const auto &venueId : Scopes) {
 				std::string PrivilegeError;
 				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, venueId, TargetPolicy, PrivilegeError)) {
@@ -305,10 +291,6 @@ namespace OpenWifi {
 		}
 
 		std::vector<ProvObjects::ManagementRole> SavedRoles;
-		auto Scopes = VenueIds;
-		if (Scopes.empty()) {
-			Scopes.emplace_back("");
-		}
 
 		for (std::size_t idx = 0; idx < Scopes.size(); ++idx) {
 			ProvObjects::ManagementRole RoleForScope = NewObject;
@@ -319,14 +301,12 @@ namespace OpenWifi {
 
 			ProvObjects::ManagementRole ExistingRole;
 			if (FindExactExistingRole(DB_, UserId, RoleForScope.entity, RoleForScope.venue, ExistingRole)) {
-				std::string OldPolicy = ExistingRole.managementPolicy;
 				ExistingRole.managementPolicy = RoleForScope.managementPolicy;
 				ExistingRole.info.modified = Utils::Now();
 
 				if (!DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
 					return InternalError(RESTAPI::Errors::RecordNotUpdated);
 				}
-				MoveUsage(StorageService()->PolicyDB(), DB_, OldPolicy, RoleForScope.managementPolicy, ExistingRole.info.id);
 				SavedRoles.emplace_back(ExistingRole);
 				continue;
 			}
@@ -334,12 +314,6 @@ namespace OpenWifi {
 			if (!DB_.CreateRecord(RoleForScope)) {
 				return InternalError(RESTAPI::Errors::RecordNotCreated);
 			}
-			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
-						  RoleForScope.entity, RoleForScope.info.id);
-			AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
-						  RoleForScope.venue, RoleForScope.info.id);
-			MoveUsage(StorageService()->PolicyDB(), DB_, "", RoleForScope.managementPolicy,
-					  RoleForScope.info.id);
 			SavedRoles.emplace_back(RoleForScope);
 		}
 
@@ -418,32 +392,14 @@ namespace OpenWifi {
 			}
 		}
 
-		std::string FromPolicy, ToPolicy;
-		if (!CreateMove(RawObject, "managementPolicy",
-						&ManagementRoleDB::RecordName::managementPolicy, Existing, FromPolicy,
-						ToPolicy, StorageService()->PolicyDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
-
-		std::string FromEntity, ToEntity;
-		if (!CreateMove(RawObject, "entity", &ManagementRoleDB::RecordName::entity, Existing,
-						FromEntity, ToEntity, StorageService()->EntityDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
-
-		std::string FromVenue, ToVenue;
-		if (!CreateMove(RawObject, "venue", &ManagementRoleDB::RecordName::venue, Existing,
-						FromVenue, ToVenue, StorageService()->VenueDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		Existing.managementPolicy = EffectivePolicyUUID;
+		Existing.entity = EffectiveEntity;
+		Existing.venue = EffectiveVenue;
 
 		if (DB_.UpdateRecord("id", UUID, Existing)) {
 			AuthCache::GetInstance()->Clear();
-			MoveUsage(StorageService()->PolicyDB(), DB_, FromPolicy, ToPolicy, Existing.info.id);
-			ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles,
-							 FromEntity, ToEntity, Existing.info.id);
-			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
-							 FromVenue, ToVenue, Existing.info.id);
 
 			ProvObjects::ManagementRole NewRecord;
-
 			DB_.GetRecord("id", UUID, NewRecord);
 			Poco::JSON::Object Answer;
 			NewRecord.to_json(Answer);

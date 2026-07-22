@@ -5,11 +5,11 @@
 #pragma once
 
 #include <map>
-#include <string>
-#include <vector>
+#include <mutex>
 #include <set>
 #include <shared_mutex>
-#include <mutex>
+#include <string>
+#include <vector>
 
 #include "Poco/DeflatingStream.h"
 #include "Poco/JSON/Object.h"
@@ -21,8 +21,8 @@
 #include "Poco/Net/OAuth20Credentials.h"
 #include "Poco/TemporaryFile.h"
 
-#include "RESTObjects/RESTAPI_SecurityObjects.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
+#include "RESTObjects/RESTAPI_SecurityObjects.h"
 #include "framework/AuthClient.h"
 #include "framework/RESTAPI_GenericServerAccounting.h"
 #include "framework/RESTAPI_RateLimiter.h"
@@ -40,7 +40,7 @@ namespace OpenWifi {
 
 	class AuthCache {
 	  public:
-		static AuthCache* GetInstance() {
+		static AuthCache *GetInstance() {
 			static AuthCache Instance;
 			return &Instance;
 		}
@@ -50,8 +50,10 @@ namespace OpenWifi {
 			uint64_t lastFetched = 0;
 		};
 
-		bool GetUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &roles);
-		void SetUserRoles(const std::string &userId, const std::vector<ProvObjects::ManagementRole> &roles);
+		bool GetUserRoles(const std::string &userId,
+						  std::vector<ProvObjects::ManagementRole> &roles);
+		void SetUserRoles(const std::string &userId,
+						  const std::vector<ProvObjects::ManagementRole> &roles);
 		bool GetPolicy(const std::string &policyId, ProvObjects::ManagementPolicy &policy);
 		void SetPolicy(const std::string &policyId, const ProvObjects::ManagementPolicy &policy);
 		void InvalidateUser(const std::string &userId);
@@ -60,8 +62,8 @@ namespace OpenWifi {
 	  private:
 		AuthCache() = default;
 		~AuthCache() = default;
-		AuthCache(const AuthCache&) = delete;
-		AuthCache& operator=(const AuthCache&) = delete;
+		AuthCache(const AuthCache &) = delete;
+		AuthCache &operator=(const AuthCache &) = delete;
 
 		std::shared_mutex Mutex_;
 		std::map<std::string, CachedUser> Cache_;
@@ -94,8 +96,7 @@ namespace OpenWifi {
 			  AlwaysAuthorize_(AlwaysAuthorize), Server_(Server), MyRates_(Profile),
 			  TransactionId_(TransactionId) {}
 
-		bool RoleIsAuthorized(const std::string &Path,
-							  const std::string &Method,
+		bool RoleIsAuthorized(const std::string &Path, const std::string &Method,
 							  std::string &Reason);
 
 		inline void handleRequest(Poco::Net::HTTPServerRequest &RequestIn,
@@ -525,7 +526,8 @@ namespace OpenWifi {
 			Response->sendFile(TempAvatar.path(), MT.ContentType);
 		}
 
-		inline void SendFileContent(const std::string &Content, [[maybe_unused]] const std::string &Type,
+		inline void SendFileContent(const std::string &Content,
+									[[maybe_unused]] const std::string &Type,
 									const std::string &Name) {
 			Response->setStatus(Poco::Net::HTTPResponse::HTTPStatus::HTTP_OK);
 			SetCommonHeaders();
@@ -607,37 +609,37 @@ namespace OpenWifi {
 			Poco::JSON::Stringifier::stringify(Object, Answer);
 		}
 
-        inline void ReturnObject(const std::vector<std::string> &Strings) {
-            Poco::JSON::Array   Arr;
-            for(const auto &String:Strings) {
-                Arr.add(String);
-            }
-            std::ostringstream os;
-            Arr.stringify(os);
-            return ReturnRawJSON(os.str());
-        }
+		inline void ReturnObject(const std::vector<std::string> &Strings) {
+			Poco::JSON::Array Arr;
+			for (const auto &String : Strings) {
+				Arr.add(String);
+			}
+			std::ostringstream os;
+			Arr.stringify(os);
+			return ReturnRawJSON(os.str());
+		}
 
-        template<class T> void ReturnObject(const std::vector<T> &Objects) {
-            Poco::JSON::Array   Arr;
-            for(const auto &Object:Objects) {
-                Poco::JSON::Object O;
-                Object.to_json(O);
-                Arr.add(O);
-            }
-            std::ostringstream os;
-            Arr.stringify(os);
-            return ReturnRawJSON(os.str());
-        }
+		template <class T> void ReturnObject(const std::vector<T> &Objects) {
+			Poco::JSON::Array Arr;
+			for (const auto &Object : Objects) {
+				Poco::JSON::Object O;
+				Object.to_json(O);
+				Arr.add(O);
+			}
+			std::ostringstream os;
+			Arr.stringify(os);
+			return ReturnRawJSON(os.str());
+		}
 
-        template<class T> void ReturnObject(const T &Object) {
-            Poco::JSON::Object  O;
-            Object.to_json(O);
-            std::ostringstream os;
-            O.stringify(os);
-            return ReturnRawJSON(os.str());
-        }
+		template <class T> void ReturnObject(const T &Object) {
+			Poco::JSON::Object O;
+			Object.to_json(O);
+			std::ostringstream os;
+			O.stringify(os);
+			return ReturnRawJSON(os.str());
+		}
 
-        inline void ReturnRawJSON(const std::string &json_doc) {
+		inline void ReturnRawJSON(const std::string &json_doc) {
 			PrepareResponse();
 			if (Request != nullptr) {
 				//   can we compress ???
@@ -749,13 +751,21 @@ namespace OpenWifi {
 		SecurityObjects::UserInfoAndPolicy UserInfo_;
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
-		bool ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue);
+		bool ResolveTargetContext(const std::string &Path, const std::string &Method,
+								  std::string &TargetEntity, std::string &TargetVenue);
 		bool HasScopeConstraint(const std::string &Resource, const std::string &Method);
-		bool PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource, const std::string &Method);
-		bool FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole);
+		bool PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource,
+						  const std::string &Method);
+		bool FindExistingRole(const std::string &userId, const std::string &entityId,
+							  const std::string &venueId,
+							  ProvObjects::ManagementRole &ExistingRole);
 		bool FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole);
-		bool FindAllUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &Roles);
-		void AutoCreateCreatorRole(const std::string &CreatedEntityId, const std::string &CreatedVenueId, const std::string &ParentEntityId, const std::string &ParentVenueId);
+		bool FindAllUserRoles(const std::string &userId,
+							  std::vector<ProvObjects::ManagementRole> &Roles);
+		void AutoCreateCreatorRole(const std::string &CreatedEntityId,
+								   const std::string &CreatedVenueId,
+								   const std::string &ParentEntityId,
+								   const std::string &ParentVenueId);
 		void GetDescendantEntities(const std::string &id, std::set<std::string> &descendants);
 		void GetDescendantVenues(const std::string &id, std::set<std::string> &venues);
 		std::string GetResourceName(const std::string &Path);
@@ -891,10 +901,10 @@ namespace OpenWifi {
 									  uint64_t TransactionId, bool Internal)
 			: RESTAPIHandler(bindings, L, std::vector<std::string>{}, Server, TransactionId,
 							 Internal) {}
-		inline void DoGet() override{};
-		inline void DoPost() override{};
-		inline void DoPut() override{};
-		inline void DoDelete() override{};
+		inline void DoGet() override {};
+		inline void DoPost() override {};
+		inline void DoPut() override {};
+		inline void DoDelete() override {};
 	};
 
 	template <class T>

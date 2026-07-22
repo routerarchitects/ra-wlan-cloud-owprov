@@ -3,15 +3,14 @@
 //
 
 #include "RESTAPI_Handler.h"
-#include "StorageService.h"
-#include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTObjects/RESTAPI_ProvObjects.h"
+#include "StorageService.h"
 #include "framework/MicroServiceFuncs.h"
 
 namespace OpenWifi {
 
-	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path,
-										  const std::string &Method,
+	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path, const std::string &Method,
 										  std::string &Reason) {
 		// 1. Bypass check only if user is root
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
@@ -26,7 +25,8 @@ namespace OpenWifi {
 		}
 
 		if (Resource == "user" &&
-			(Method == Poco::Net::HTTPRequest::HTTP_POST || Method == Poco::Net::HTTPRequest::HTTP_PUT) &&
+			(Method == Poco::Net::HTTPRequest::HTTP_POST ||
+			 Method == Poco::Net::HTTPRequest::HTTP_PUT) &&
 			ParsedBody_ && ParsedBody_->has("userRole")) {
 			const auto RequestedUserRole = ParsedBody_->get("userRole").toString();
 			if (Poco::icompare(RequestedUserRole, "root") == 0 &&
@@ -98,7 +98,8 @@ namespace OpenWifi {
 		return false;
 	}
 
-	bool RESTAPIHandler::ResolveTargetContext(const std::string &Path, const std::string &Method, std::string &TargetEntity, std::string &TargetVenue) {
+	bool RESTAPIHandler::ResolveTargetContext(const std::string &Path, const std::string &Method,
+											  std::string &TargetEntity, std::string &TargetVenue) {
 		// ----------------------------------------------------------------
 		// SOURCE 1: Bound object ID in path bindings (most authoritative).
 		// Always look up the record in the DB — never accept a partial scope.
@@ -122,8 +123,7 @@ namespace OpenWifi {
 		}
 
 		const bool HasBoundObjectId =
-			!Id.empty() &&
-			Id != "0" &&
+			!Id.empty() && Id != "0" &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0);
 
 		if (HasBoundObjectId) {
@@ -145,7 +145,8 @@ namespace OpenWifi {
 			} else if (Path.find("/api/v1/inventory") != std::string::npos) {
 				ProvObjects::InventoryTag T;
 				if (StorageService()->InventoryDB().GetRecord("id", Id, T) ||
-					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id, T)) {
+					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id,
+															  T)) {
 					TargetEntity = T.entity;
 					TargetVenue = T.venue;
 					return true;
@@ -225,7 +226,8 @@ namespace OpenWifi {
 			} else if (Path.find("/api/v1/overrides") != std::string::npos) {
 				ProvObjects::InventoryTag T;
 				if (StorageService()->InventoryDB().GetRecord("id", Id, T) ||
-					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id, T)) {
+					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id,
+															  T)) {
 					TargetEntity = T.entity;
 					TargetVenue = T.venue;
 					return true;
@@ -286,8 +288,10 @@ namespace OpenWifi {
 		// ----------------------------------------------------------------
 		std::string CandidateEntity, CandidateVenue;
 		for (const auto &[name, value] : Parameters_) {
-			if (name == "entity") CandidateEntity = value;
-			else if (name == "venue") CandidateVenue = value;
+			if (name == "entity")
+				CandidateEntity = value;
+			else if (name == "venue")
+				CandidateVenue = value;
 		}
 
 		// ----------------------------------------------------------------
@@ -295,8 +299,10 @@ namespace OpenWifi {
 		// Only consulted when params yielded nothing.
 		// ----------------------------------------------------------------
 		if (CandidateEntity.empty() && CandidateVenue.empty() && ParsedBody_) {
-			if (ParsedBody_->has("entity")) CandidateEntity = ParsedBody_->get("entity").toString();
-			if (ParsedBody_->has("venue"))  CandidateVenue  = ParsedBody_->get("venue").toString();
+			if (ParsedBody_->has("entity"))
+				CandidateEntity = ParsedBody_->get("entity").toString();
+			if (ParsedBody_->has("venue"))
+				CandidateVenue = ParsedBody_->get("venue").toString();
 
 			if (CandidateEntity.empty() && CandidateVenue.empty() && ParsedBody_->has("parent")) {
 				std::string ParentId = ParsedBody_->get("parent").toString();
@@ -320,8 +326,8 @@ namespace OpenWifi {
 		if (!CandidateVenue.empty()) {
 			ProvObjects::Venue V;
 			if (StorageService()->VenueDB().GetRecord("id", CandidateVenue, V)) {
-				TargetVenue   = CandidateVenue;
-				TargetEntity  = V.entity;
+				TargetVenue = CandidateVenue;
+				TargetEntity = V.entity;
 				return true;
 			}
 			return false; // Venue ID provided but not found in DB.
@@ -340,17 +346,19 @@ namespace OpenWifi {
 		return false;
 	}
 
-	bool RESTAPIHandler::HasScopeConstraint(const std::string &Resource, const std::string &Method) {
-		// Only resource types that are associated with an entity or venue can have scope constraints.
-		// Global/unscoped resources (like iptocountry, radiusEndpoint, openroaming) do not.
-		bool IsScoped = (
-			Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
-			Resource == "configuration" || Resource == "managementRole" || Resource == "contact" ||
-			Resource == "location" || Resource == "managementPolicy" || Resource == "map" ||
-			Resource == "variables" || Resource == "serviceClass" || Resource == "operator" ||
-			Resource == "overrides" || Resource == "subscriber" || Resource == "subscriberDevice" ||
-			Resource == "op_contact" || Resource == "op_location"
-		);
+	bool RESTAPIHandler::HasScopeConstraint(const std::string &Resource,
+											const std::string &Method) {
+		// Only resource types that are associated with an entity or venue can have scope
+		// constraints. Global/unscoped resources (like iptocountry, radiusEndpoint, openroaming) do
+		// not.
+		bool IsScoped =
+			(Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
+			 Resource == "configuration" || Resource == "managementRole" || Resource == "contact" ||
+			 Resource == "location" || Resource == "managementPolicy" || Resource == "map" ||
+			 Resource == "variables" || Resource == "serviceClass" || Resource == "operator" ||
+			 Resource == "overrides" || Resource == "subscriber" ||
+			 Resource == "subscriberDevice" || Resource == "op_contact" ||
+			 Resource == "op_location");
 
 		if (!IsScoped) {
 			return false;
@@ -372,7 +380,8 @@ namespace OpenWifi {
 			}
 		}
 
-		if (!Id.empty() && Id != "0" && !(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0)) {
+		if (!Id.empty() && Id != "0" &&
+			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0)) {
 			return true;
 		}
 
@@ -383,7 +392,8 @@ namespace OpenWifi {
 		}
 
 		if (ParsedBody_) {
-			if (ParsedBody_->has("entity") || ParsedBody_->has("venue") || ParsedBody_->has("parent")) {
+			if (ParsedBody_->has("entity") || ParsedBody_->has("venue") ||
+				ParsedBody_->has("parent")) {
 				return true;
 			}
 		}
@@ -391,13 +401,19 @@ namespace OpenWifi {
 		return false;
 	}
 
-	bool RESTAPIHandler::PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource, const std::string &Method) {
+	bool RESTAPIHandler::PolicyAllows(const ProvObjects::ManagementPolicy &Policy,
+									  const std::string &Resource, const std::string &Method) {
 		std::string AccessRequired;
-		if (Method == Poco::Net::HTTPRequest::HTTP_GET) AccessRequired = "READ";
-		else if (Method == Poco::Net::HTTPRequest::HTTP_POST) AccessRequired = "CREATE";
-		else if (Method == Poco::Net::HTTPRequest::HTTP_PUT) AccessRequired = "UPDATE";
-		else if (Method == Poco::Net::HTTPRequest::HTTP_DELETE) AccessRequired = "DELETE";
-		else return false;
+		if (Method == Poco::Net::HTTPRequest::HTTP_GET)
+			AccessRequired = "READ";
+		else if (Method == Poco::Net::HTTPRequest::HTTP_POST)
+			AccessRequired = "CREATE";
+		else if (Method == Poco::Net::HTTPRequest::HTTP_PUT)
+			AccessRequired = "UPDATE";
+		else if (Method == Poco::Net::HTTPRequest::HTTP_DELETE)
+			AccessRequired = "DELETE";
+		else
+			return false;
 
 		for (const auto &entry : Policy.entries) {
 			bool ResourceMatches = false;
@@ -407,10 +423,12 @@ namespace OpenWifi {
 					break;
 				}
 			}
-			if (!ResourceMatches) continue;
+			if (!ResourceMatches)
+				continue;
 
 			for (const auto &acc : entry.access) {
-				if (acc == "FULL" || acc == AccessRequired || (AccessRequired == "UPDATE" && acc == "MODIFY")) {
+				if (acc == "FULL" || acc == AccessRequired ||
+					(AccessRequired == "UPDATE" && acc == "MODIFY")) {
 					return true;
 				}
 			}
@@ -418,7 +436,8 @@ namespace OpenWifi {
 		return false;
 	}
 
-	bool AuthCache::GetUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &roles) {
+	bool AuthCache::GetUserRoles(const std::string &userId,
+								 std::vector<ProvObjects::ManagementRole> &roles) {
 		std::shared_lock<std::shared_mutex> lock(Mutex_);
 		auto it = Cache_.find(userId);
 		if (it != Cache_.end()) {
@@ -428,7 +447,8 @@ namespace OpenWifi {
 		return false;
 	}
 
-	void AuthCache::SetUserRoles(const std::string &userId, const std::vector<ProvObjects::ManagementRole> &roles) {
+	void AuthCache::SetUserRoles(const std::string &userId,
+								 const std::vector<ProvObjects::ManagementRole> &roles) {
 		std::unique_lock<std::shared_mutex> lock(Mutex_);
 		Cache_[userId].roles = roles;
 		Cache_[userId].lastFetched = Utils::Now();
@@ -444,7 +464,8 @@ namespace OpenWifi {
 		return false;
 	}
 
-	void AuthCache::SetPolicy(const std::string &policyId, const ProvObjects::ManagementPolicy &policy) {
+	void AuthCache::SetPolicy(const std::string &policyId,
+							  const ProvObjects::ManagementPolicy &policy) {
 		std::unique_lock<std::shared_mutex> lock(Mutex_);
 		Policies_[policyId] = policy;
 	}
@@ -460,7 +481,8 @@ namespace OpenWifi {
 		Policies_.clear();
 	}
 
-	bool RESTAPIHandler::FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole) {
+	bool RESTAPIHandler::FindAnyRole(const std::string &userId,
+									 ProvObjects::ManagementRole &AnyRole) {
 		std::vector<ProvObjects::ManagementRole> Roles;
 		FindAllUserRoles(userId, Roles);
 
@@ -471,7 +493,8 @@ namespace OpenWifi {
 		return false;
 	}
 
-	bool RESTAPIHandler::FindAllUserRoles(const std::string &userId, std::vector<ProvObjects::ManagementRole> &Roles) {
+	bool RESTAPIHandler::FindAllUserRoles(const std::string &userId,
+										  std::vector<ProvObjects::ManagementRole> &Roles) {
 		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
 			StorageService()->RolesDB().Iterate([&](const ProvObjects::ManagementRole &role) {
 				for (const auto &user : role.users) {
@@ -487,7 +510,9 @@ namespace OpenWifi {
 		return !Roles.empty();
 	}
 
-	bool RESTAPIHandler::FindExistingRole(const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
+	bool RESTAPIHandler::FindExistingRole(const std::string &userId, const std::string &entityId,
+										  const std::string &venueId,
+										  ProvObjects::ManagementRole &ExistingRole) {
 		std::vector<ProvObjects::ManagementRole> Roles;
 		FindAllUserRoles(userId, Roles);
 
@@ -510,7 +535,8 @@ namespace OpenWifi {
 		return false;
 	}
 
-	void RESTAPIHandler::GetDescendantEntities(const std::string &id, std::set<std::string> &descendants) {
+	void RESTAPIHandler::GetDescendantEntities(const std::string &id,
+											   std::set<std::string> &descendants) {
 		descendants.insert(id);
 		ProvObjects::Entity E;
 		if (StorageService()->EntityDB().GetRecord("id", id, E)) {
@@ -531,28 +557,49 @@ namespace OpenWifi {
 	}
 
 	std::string RESTAPIHandler::GetResourceName(const std::string &Path) {
-		if (Path.find("/api/v1/entity") != std::string::npos) return "entity";
-		if (Path.find("/api/v1/venue") != std::string::npos) return "venue";
-		if (Path.find("/api/v1/inventory") != std::string::npos) return "device";
-		if (Path.find("/api/v1/configuration") != std::string::npos) return "configuration";
-		if (Path.find("/api/v1/managementRole") != std::string::npos) return "managementRole";
-		if (Path.find("/api/v1/managementPolicy") != std::string::npos) return "managementPolicy";
-		if (Path.find("/api/v1/operator") != std::string::npos) return "operator";
-		if (Path.find("/api/v1/contact") != std::string::npos) return "contact";
-		if (Path.find("/api/v1/location") != std::string::npos) return "location";
-		if (Path.find("/api/v1/map") != std::string::npos) return "map";
-		if (Path.find("/api/v1/variables") != std::string::npos) return "variables";
-		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos) return "radiusEndpoint";
-		if (Path.find("/api/v1/subscriber") != std::string::npos) return "subscriber";
-		if (Path.find("/api/v1/sub_devices") != std::string::npos) return "device";
-		if (Path.find("/api/v1/openroaming") != std::string::npos) return "openroaming";
-		if (Path.find("/api/v1/serviceClass") != std::string::npos) return "serviceClass";
-		if (Path.find("/api/v1/overrides") != std::string::npos) return "overrides";
-		if (Path.find("/api/v1/iptocountry") != std::string::npos) return "iptocountry";
+		if (Path.find("/api/v1/entity") != std::string::npos)
+			return "entity";
+		if (Path.find("/api/v1/venue") != std::string::npos)
+			return "venue";
+		if (Path.find("/api/v1/inventory") != std::string::npos)
+			return "device";
+		if (Path.find("/api/v1/configuration") != std::string::npos)
+			return "configuration";
+		if (Path.find("/api/v1/managementRole") != std::string::npos)
+			return "managementRole";
+		if (Path.find("/api/v1/managementPolicy") != std::string::npos)
+			return "managementPolicy";
+		if (Path.find("/api/v1/operator") != std::string::npos)
+			return "operator";
+		if (Path.find("/api/v1/contact") != std::string::npos)
+			return "contact";
+		if (Path.find("/api/v1/location") != std::string::npos)
+			return "location";
+		if (Path.find("/api/v1/map") != std::string::npos)
+			return "map";
+		if (Path.find("/api/v1/variables") != std::string::npos)
+			return "variables";
+		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos)
+			return "radiusEndpoint";
+		if (Path.find("/api/v1/subscriber") != std::string::npos)
+			return "subscriber";
+		if (Path.find("/api/v1/sub_devices") != std::string::npos)
+			return "device";
+		if (Path.find("/api/v1/openroaming") != std::string::npos)
+			return "openroaming";
+		if (Path.find("/api/v1/serviceClass") != std::string::npos)
+			return "serviceClass";
+		if (Path.find("/api/v1/overrides") != std::string::npos)
+			return "overrides";
+		if (Path.find("/api/v1/iptocountry") != std::string::npos)
+			return "iptocountry";
 		return "";
 	}
 
-	void RESTAPIHandler::AutoCreateCreatorRole(const std::string &CreatedEntityId, const std::string &CreatedVenueId, const std::string &ParentEntityId, const std::string &ParentVenueId) {
+	void RESTAPIHandler::AutoCreateCreatorRole(const std::string &CreatedEntityId,
+											   const std::string &CreatedVenueId,
+											   const std::string &ParentEntityId,
+											   const std::string &ParentVenueId) {
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 			return;
 		}
@@ -560,7 +607,8 @@ namespace OpenWifi {
 		ProvObjects::ManagementRole ParentRole;
 		bool Found = false;
 		if (!ParentVenueId.empty()) {
-			Found = FindExistingRole(UserInfo_.userinfo.id, ParentEntityId, ParentVenueId, ParentRole);
+			Found =
+				FindExistingRole(UserInfo_.userinfo.id, ParentEntityId, ParentVenueId, ParentRole);
 		}
 		if (!Found && !ParentEntityId.empty()) {
 			Found = FindExistingRole(UserInfo_.userinfo.id, ParentEntityId, "", ParentRole);
@@ -569,8 +617,11 @@ namespace OpenWifi {
 		if (Found) {
 			ProvObjects::ManagementRole NewRole;
 			NewRole.info.id = MicroServiceCreateUUID();
-			NewRole.info.name = "Auto-created role for creator of " + (CreatedVenueId.empty() ? std::string("Entity") : std::string("Venue"));
-			NewRole.info.description = "Grants same access policy as parent role: " + ParentRole.info.name;
+			NewRole.info.name =
+				"Auto-created role for creator of " +
+				(CreatedVenueId.empty() ? std::string("Entity") : std::string("Venue"));
+			NewRole.info.description =
+				"Grants same access policy as parent role: " + ParentRole.info.name;
 			NewRole.info.created = Utils::Now();
 			NewRole.info.modified = Utils::Now();
 			NewRole.entity = CreatedEntityId;
@@ -579,20 +630,28 @@ namespace OpenWifi {
 			NewRole.users.push_back(UserInfo_.userinfo.id);
 
 			if (StorageService()->RolesDB().CreateRecord(NewRole)) {
-				poco_information(Logger(), fmt::format("AutoCreateCreatorRole: Auto-created role {} for user {} on {} (policy {})",
-					NewRole.info.id, UserInfo_.userinfo.email,
-					CreatedVenueId.empty() ? "entity " + CreatedEntityId : "venue " + CreatedVenueId,
-					NewRole.managementPolicy));
+				poco_information(
+					Logger(),
+					fmt::format(
+						"AutoCreateCreatorRole: Auto-created role {} for user {} on {} (policy {})",
+						NewRole.info.id, UserInfo_.userinfo.email,
+						CreatedVenueId.empty() ? "entity " + CreatedEntityId
+											   : "venue " + CreatedVenueId,
+						NewRole.managementPolicy));
 
 				AuthCache::GetInstance()->Clear();
 
 				if (!CreatedVenueId.empty()) {
-					AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles, CreatedVenueId, NewRole.info.id);
+					AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementRoles,
+								  CreatedVenueId, NewRole.info.id);
 				} else if (!CreatedEntityId.empty()) {
-					AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementRoles, CreatedEntityId, NewRole.info.id);
+					AddMembership(StorageService()->EntityDB(),
+								  &ProvObjects::Entity::managementRoles, CreatedEntityId,
+								  NewRole.info.id);
 				}
 
-				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), "", NewRole.managementPolicy, NewRole.info.id);
+				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), "",
+						  NewRole.managementPolicy, NewRole.info.id);
 			} else {
 				poco_error(Logger(), "AutoCreateCreatorRole: Failed to create role record in DB");
 			}

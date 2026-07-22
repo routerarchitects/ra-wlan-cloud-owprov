@@ -14,13 +14,9 @@ namespace OpenWifi {
 		}
 
 		if (!userParam.empty()) {
-			SecurityObjects::UserInfo TargetUser;
-			if (!SDK::Sec::User::Get(this, userParam, TargetUser)) {
-				return BadRequest(RESTAPI::Errors::UnknownId);
-			}
-
 			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
-				if (TargetUser.createdBy.empty() || TargetUser.createdBy != UserInfo_.userinfo.id) {
+				SecurityObjects::UserInfo TargetUser;
+				if (!SDK::Sec::User::Get(this, userParam, TargetUser)) {
 					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 				}
 			}
