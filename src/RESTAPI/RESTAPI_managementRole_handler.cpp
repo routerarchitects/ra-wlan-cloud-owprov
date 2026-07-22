@@ -54,7 +54,9 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		DB_.DeleteRecord("id", Existing.info.id);
+		if (!DB_.DeleteRecord("id", Existing.info.id)) {
+			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+		}
 		AuthCache::GetInstance()->Clear();
 		return OK();
 	}

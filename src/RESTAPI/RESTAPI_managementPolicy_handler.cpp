@@ -62,15 +62,10 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		if (!Existing.inUse.empty()) {
-			return BadRequest(RESTAPI::Errors::StillInUse);
+		if (!StorageService()->PolicyDB().DeleteRecord("id", UUID)) {
+			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
 		}
 
-		StorageService()->PolicyDB().DeleteRecord("id", UUID);
-		ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementPolicies,
-						 Existing.entity, "", Existing.info.id);
-		ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementPolicies,
-						 Existing.venue, "", Existing.info.id);
 		AuthCache::GetInstance()->Clear();
 		return OK();
 	}
@@ -107,10 +102,6 @@ namespace OpenWifi {
 		NewObject.inUse.clear();
 		if (DB_.CreateRecord(NewObject)) {
 			AuthCache::GetInstance()->Clear();
-			AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementPolicies,
-						  NewObject.entity, NewObject.info.id);
-			AddMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementPolicies,
-						  NewObject.venue, NewObject.info.id);
 			PolicyDB::RecordName AddedObject;
 			DB_.GetRecord("id", NewObject.info.id, AddedObject);
 			Poco::JSON::Object Answer;
@@ -141,26 +132,28 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}
 
-		std::string FromEntity, ToEntity;
-		if (!CreateMove(RawObject, "entity", &PolicyDB::RecordName::entity, Existing, FromEntity,
-						ToEntity, StorageService()->EntityDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (RawObject->has("entity")) {
+			std::string TargetEntity = RawObject->get("entity").toString();
+			if (!TargetEntity.empty() && !StorageService()->EntityDB().Exists("id", TargetEntity)) {
+				return BadRequest(RESTAPI::Errors::EntityMustExist);
+			}
+			Existing.entity = TargetEntity;
+		}
 
-		std::string FromVenue, ToVenue;
-		if (!CreateMove(RawObject, "venue", &PolicyDB::RecordName::venue, Existing, FromVenue,
-						ToVenue, StorageService()->VenueDB()))
-			return BadRequest(RESTAPI::Errors::EntityMustExist);
+		if (RawObject->has("venue")) {
+			std::string TargetVenue = RawObject->get("venue").toString();
+			if (!TargetVenue.empty() && !StorageService()->VenueDB().Exists("id", TargetVenue)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			Existing.venue = TargetVenue;
+		}
 
-		if (!NewPolicy.entries.empty())
+		if (!NewPolicy.entries.empty()) {
 			Existing.entries = NewPolicy.entries;
+		}
 
 		if (DB_.UpdateRecord("id", Existing.info.id, Existing)) {
 			AuthCache::GetInstance()->Clear();
-			ManageMembership(StorageService()->EntityDB(), &ProvObjects::Entity::managementPolicies,
-							 FromEntity, ToEntity, Existing.info.id);
-			ManageMembership(StorageService()->VenueDB(), &ProvObjects::Venue::managementPolicies,
-							 FromVenue, ToVenue, Existing.info.id);
-
 			ProvObjects::ManagementPolicy P;
 			DB_.GetRecord("id", Existing.info.id, P);
 			Poco::JSON::Object Answer;
