@@ -18,6 +18,18 @@ namespace OpenWifi::SDK::Sec {
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return true;
 			}
+			if (!Token.empty()) {
+				StatusCode = Req.Do(CallResponse, "");
+				if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
+					return true;
+				}
+			}
+			OpenAPIRequestGet SubReq(uSERVICE_SECURITY, "/api/v1/subuser/" + Id, {}, 5000);
+			auto SubCallResponse = Poco::makeShared<Poco::JSON::Object>();
+			auto SubStatusCode = SubReq.Do(SubCallResponse, Token);
+			if (SubStatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
+				return true;
+			}
 			return false;
 		}
 
@@ -30,6 +42,18 @@ namespace OpenWifi::SDK::Sec {
 			auto StatusCode = Req.Do(CallResponse, Token);
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return UserInfo.from_json(CallResponse);
+			}
+			if (!Token.empty()) {
+				StatusCode = Req.Do(CallResponse, "");
+				if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
+					return UserInfo.from_json(CallResponse);
+				}
+			}
+			OpenAPIRequestGet SubReq(uSERVICE_SECURITY, "/api/v1/subuser/" + Id, {}, 5000);
+			auto SubCallResponse = Poco::makeShared<Poco::JSON::Object>();
+			auto SubStatusCode = SubReq.Do(SubCallResponse, Token);
+			if (SubStatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
+				return UserInfo.from_json(SubCallResponse);
 			}
 			return false;
 		}

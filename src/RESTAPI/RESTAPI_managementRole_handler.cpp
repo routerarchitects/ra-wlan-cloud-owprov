@@ -189,13 +189,11 @@ namespace OpenWifi {
 									   SecurityObjects::USER_ROLE requesterRole,
 									   const std::string &targetUserId,
 									   std::string &ErrorDescription) {
-		if (targetUserId.empty()) {
-			ErrorDescription = "Target user ID cannot be empty.";
+		SecurityObjects::UserInfo TargetUser;
+		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
+			ErrorDescription = "The selected user could not be found.";
 			return false;
 		}
-
-		SecurityObjects::UserInfo TargetUser;
-		SDK::Sec::User::Get(handler, targetUserId, TargetUser);
 
 		return true;
 	}
