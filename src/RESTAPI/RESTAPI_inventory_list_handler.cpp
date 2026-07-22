@@ -156,11 +156,20 @@ namespace OpenWifi {
 				if (!RoleAllowsDeviceRead(role)) {
 					continue;
 				}
-				if (!role.entity.empty()) {
-					AllowedEntities.insert(role.entity);
-				}
 				if (!role.venue.empty()) {
-					AllowedVenues.insert(role.venue);
+					GetDescendantVenues(role.venue, AllowedVenues);
+				} else if (!role.entity.empty()) {
+					std::set<std::string> EntSet;
+					GetDescendantEntities(role.entity, EntSet);
+					for (const auto &entId : EntSet) {
+						AllowedEntities.insert(entId);
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", entId, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								GetDescendantVenues(vId, AllowedVenues);
+							}
+						}
+					}
 				}
 			}
 		}

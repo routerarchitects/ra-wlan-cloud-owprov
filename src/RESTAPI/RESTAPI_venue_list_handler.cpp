@@ -36,8 +36,22 @@ namespace OpenWifi {
 		};
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			for (const auto &role : Roles) {
-				if (!role.venue.empty() && policyAllowsGet(role)) {
-					VisibleVenues.insert(role.venue);
+				if (!policyAllowsGet(role)) {
+					continue;
+				}
+				if (!role.venue.empty()) {
+					GetDescendantVenues(role.venue, VisibleVenues);
+				} else if (!role.entity.empty()) {
+					std::set<std::string> EntSet;
+					GetDescendantEntities(role.entity, EntSet);
+					for (const auto &entId : EntSet) {
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", entId, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								GetDescendantVenues(vId, VisibleVenues);
+							}
+						}
+					}
 				}
 			}
 		}

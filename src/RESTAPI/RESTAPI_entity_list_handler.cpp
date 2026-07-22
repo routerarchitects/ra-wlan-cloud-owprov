@@ -113,10 +113,15 @@ namespace OpenWifi {
 						Children.add(ChildNode);
 					}
 				}
+				Poco::JSON::Array Devices;
+				for (const auto &devId : venueIt->second.devices) {
+					Devices.add(devId);
+				}
 				Node->set("type", "venue");
 				Node->set("name", venueIt->second.info.name);
 				Node->set("uuid", venueIt->second.info.id);
 				Node->set("children", Children);
+				Node->set("devices", Devices);
 				return Node;
 			};
 
@@ -144,11 +149,16 @@ namespace OpenWifi {
 						}
 					}
 				}
+				Poco::JSON::Array Devices;
+				for (const auto &devId : entityIt->second.devices) {
+					Devices.add(devId);
+				}
 				Node->set("type", "entity");
 				Node->set("name", entityIt->second.info.name);
 				Node->set("uuid", entityIt->second.info.id);
 				Node->set("children", Children);
 				Node->set("venues", Venues);
+				Node->set("devices", Devices);
 				return Node;
 			};
 
