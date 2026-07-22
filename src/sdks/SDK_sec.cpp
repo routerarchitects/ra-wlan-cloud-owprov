@@ -29,14 +29,6 @@ namespace OpenWifi::SDK::Sec {
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return UserInfo.from_json(CallResponse);
 			}
-
-			OpenAPIRequestGet SubReq(uSERVICE_SECURITY, "/api/v1/subuser/" + Id, {}, 5000);
-			auto SubCallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto SubStatusCode = SubReq.Do(SubCallResponse);
-			if (SubStatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
-				return UserInfo.from_json(SubCallResponse);
-			}
-
 			return false;
 		}
 	} // namespace User
