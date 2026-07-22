@@ -52,6 +52,9 @@ namespace OpenWifi {
 			VisibleEntities.insert(entityId);
 			ProvObjects::Entity ent;
 			if (StorageService()->EntityDB().GetRecord("id", entityId, ent)) {
+				if (!ent.operatorId.empty()) {
+					return;
+				}
 				for (const auto &childId : ent.children) {
 					addEntityAndDescendants(childId);
 				}

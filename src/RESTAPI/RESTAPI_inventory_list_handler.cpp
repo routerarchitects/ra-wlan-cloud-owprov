@@ -159,6 +159,11 @@ namespace OpenWifi {
 				if (!role.venue.empty()) {
 					GetDescendantVenues(role.venue, AllowedVenues);
 				} else if (!role.entity.empty()) {
+					ProvObjects::Entity ent;
+					if (StorageService()->EntityDB().GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
+						AllowedEntities.insert(role.entity);
+						continue;
+					}
 					std::set<std::string> EntSet;
 					GetDescendantEntities(role.entity, EntSet);
 					for (const auto &entId : EntSet) {
