@@ -217,4 +217,13 @@ namespace OpenWifi {
 		return MakeJSONObjectArray("entities", FilteredEntities, *this);
 	}
 
+	void RESTAPI_entity_list_handler::DoPost() {
+		if (GetBoolParameter("setTree", false)) {
+			const auto &FullTree = ParsedBody_;
+			DB_.ImportTree(FullTree);
+			return OK();
+		}
+		BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+	}
+
 } // namespace OpenWifi
