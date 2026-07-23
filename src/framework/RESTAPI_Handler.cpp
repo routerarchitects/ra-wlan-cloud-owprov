@@ -353,10 +353,10 @@ namespace OpenWifi {
 		// not.
 		bool IsScoped =
 			(Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
-			 Resource == "configuration" || Resource == "managementRole" || Resource == "contact" ||
-			 Resource == "location" || Resource == "managementPolicy" || Resource == "map" ||
-			 Resource == "variables" || Resource == "serviceClass" || Resource == "operator" ||
-			 Resource == "overrides" || Resource == "subscriber" ||
+			 Resource == "device" || Resource == "configuration" || Resource == "managementRole" ||
+			 Resource == "contact" || Resource == "location" || Resource == "managementPolicy" ||
+			 Resource == "map" || Resource == "variables" || Resource == "serviceClass" ||
+			 Resource == "operator" || Resource == "overrides" || Resource == "subscriber" ||
 			 Resource == "subscriberDevice" || Resource == "op_contact" ||
 			 Resource == "op_location");
 
