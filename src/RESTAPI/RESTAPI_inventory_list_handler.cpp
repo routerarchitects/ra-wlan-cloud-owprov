@@ -216,6 +216,24 @@ namespace OpenWifi {
 				return SendList(Tags, SerialOnly);
 			}
 			Where = DB_.OP("entity", ORM::EQ, paramUUID);
+		} else if (HasParameter("operatorId", paramUUID) || HasParameter("operator", paramUUID)) {
+			std::string TargetEntId = paramUUID;
+			ProvObjects::Entity E;
+			if (StorageService()->EntityDB().GetRecord("operatorId", paramUUID, E)) {
+				TargetEntId = E.info.id;
+			} else if (StorageService()->EntityDB().GetRecord("id", paramUUID, E)) {
+				TargetEntId = E.info.id;
+			} else {
+				ProvObjects::Operator O;
+				if (StorageService()->OperatorDB().GetRecord("id", paramUUID, O) && !O.entityId.empty()) {
+					TargetEntId = O.entityId;
+				}
+			}
+			if (!AllowedEntities.count(TargetEntId)) {
+				ProvObjects::InventoryTagVec Tags;
+				return SendList(Tags, SerialOnly);
+			}
+			Where = DB_.OP("entity", ORM::EQ, TargetEntId);
 		} else if (HasParameter("venue", paramUUID)) {
 			if (!AllowedVenues.count(paramUUID)) {
 				ProvObjects::InventoryTagVec Tags;
