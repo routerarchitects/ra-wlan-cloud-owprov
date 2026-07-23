@@ -443,7 +443,11 @@ namespace OpenWifi {
 		for (const auto &entry : Policy.entries) {
 			bool ResourceMatches = false;
 			for (const auto &res : entry.resources) {
-				if (Poco::icompare(res, Resource) == 0 || res == "*") {
+				if (Poco::icompare(res, Resource) == 0 || res == "*" ||
+					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
+					(Resource == "subscriberDevice" && Poco::icompare(res, "device") == 0) ||
+					(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
+					(Resource == "op_location" && Poco::icompare(res, "location") == 0)) {
 					ResourceMatches = true;
 					break;
 				}
@@ -588,6 +592,11 @@ namespace OpenWifi {
 			return "venue";
 		if (Path.find("/api/v1/inventory") != std::string::npos)
 			return "device";
+		if (Path.find("/api/v1/subscriberDevice") != std::string::npos ||
+			Path.find("/api/v1/sub_devices") != std::string::npos)
+			return "device";
+		if (Path.find("/api/v1/subscriber") != std::string::npos)
+			return "subscriber";
 		if (Path.find("/api/v1/configuration") != std::string::npos)
 			return "configuration";
 		if (Path.find("/api/v1/managementRole") != std::string::npos)
@@ -596,9 +605,9 @@ namespace OpenWifi {
 			return "managementPolicy";
 		if (Path.find("/api/v1/operator") != std::string::npos)
 			return "operator";
-		if (Path.find("/api/v1/contact") != std::string::npos)
+		if (Path.find("/api/v1/contact") != std::string::npos || Path.find("/api/v1/op_contact") != std::string::npos)
 			return "contact";
-		if (Path.find("/api/v1/location") != std::string::npos)
+		if (Path.find("/api/v1/location") != std::string::npos || Path.find("/api/v1/op_location") != std::string::npos)
 			return "location";
 		if (Path.find("/api/v1/map") != std::string::npos)
 			return "map";
@@ -606,10 +615,6 @@ namespace OpenWifi {
 			return "variables";
 		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos)
 			return "radiusEndpoint";
-		if (Path.find("/api/v1/subscriber") != std::string::npos)
-			return "subscriber";
-		if (Path.find("/api/v1/sub_devices") != std::string::npos)
-			return "device";
 		if (Path.find("/api/v1/openroaming") != std::string::npos)
 			return "openroaming";
 		if (Path.find("/api/v1/serviceClass") != std::string::npos)
