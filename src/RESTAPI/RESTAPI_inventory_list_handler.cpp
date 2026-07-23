@@ -162,6 +162,9 @@ namespace OpenWifi {
 					ProvObjects::Entity ent;
 					if (StorageService()->EntityDB().GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
 						AllowedEntities.insert(role.entity);
+						for (const auto &vId : ent.venues) {
+							GetDescendantVenues(vId, AllowedVenues);
+						}
 						continue;
 					}
 					std::set<std::string> EntSet;
