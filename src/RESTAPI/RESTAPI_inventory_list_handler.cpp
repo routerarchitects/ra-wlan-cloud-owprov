@@ -230,41 +230,81 @@ namespace OpenWifi {
 			}
 		}
 
-		if (AllTags.empty() && !GetBoolParameter("rrmOnly")) {
-			if (!QB_.Select.empty()) {
-				for (const auto &id : QB_.Select) {
-					ProvObjects::InventoryTag tag;
-					if (DB_.GetRecord("id", id, tag)) {
-						AllTags.push_back(tag);
-					}
-				}
-			} else {
-				DB_.GetRecords(0, 10000, AllTags, Where, OrderBy);
+		// Build SQL scope condition for non-ROOT users
+		auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+			if (ids.empty()) return "";
+			std::string res = field + " IN (";
+			bool first = true;
+			for (const auto &id : ids) {
+				if (!first) res += ",";
+				res += "'" + ORM::Escape(id) + "'";
+				first = false;
 			}
+			res += ")";
+			return res;
+		};
+
+		std::string entClause = makeInClause("entity", AllowedEntities);
+		std::string venClause = makeInClause("venue", AllowedVenues);
+		std::string scopeWhere;
+		if (!entClause.empty() && !venClause.empty()) {
+			scopeWhere = "(" + entClause + " OR " + venClause + ")";
+		} else if (!entClause.empty()) {
+			scopeWhere = entClause;
+		} else if (!venClause.empty()) {
+			scopeWhere = venClause;
 		}
 
-		// 3. Apply visibility filter
-		ProvObjects::InventoryTagVec FilteredTags;
-		for (const auto &tag : AllTags) {
-			if (AllowedEntities.count(tag.entity) || AllowedVenues.count(tag.venue)) {
-				FilteredTags.push_back(tag);
+		std::string FinalWhere;
+		if (!Where.empty() && !scopeWhere.empty()) {
+			FinalWhere = "(" + Where + ") AND " + scopeWhere;
+		} else if (!scopeWhere.empty()) {
+			FinalWhere = scopeWhere;
+		} else {
+			FinalWhere = Where;
+		}
+
+		if (!QB_.Select.empty()) {
+			ProvObjects::InventoryTagVec SelectedTags;
+			for (const auto &id : QB_.Select) {
+				ProvObjects::InventoryTag tag;
+				if (DB_.GetRecord("id", id, tag)) {
+					if (AllowedEntities.count(tag.entity) || AllowedVenues.count(tag.venue)) {
+						SelectedTags.push_back(tag);
+					}
+				}
 			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(SelectedTags.size());
+			}
+			return SendList(SelectedTags, SerialOnly);
+		}
+
+		if (GetBoolParameter("rrmOnly")) {
+			Types::UUIDvec_t DeviceList;
+			DB_.GetRRMDeviceList(DeviceList);
+			ProvObjects::InventoryTagVec RRMTags;
+			for (const auto &id : DeviceList) {
+				ProvObjects::InventoryTag tag;
+				if (DB_.GetRecord("id", id, tag) || DB_.GetRecord(RESTAPI::Protocol::SERIALNUMBER, id, tag)) {
+					if (AllowedEntities.count(tag.entity) || AllowedVenues.count(tag.venue)) {
+						RRMTags.push_back(tag);
+					}
+				}
+			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(RRMTags.size());
+			}
+			return SendList(RRMTags, SerialOnly);
 		}
 
 		if (QB_.CountOnly) {
-			return ReturnCountOnly(FilteredTags.size());
+			auto count = DB_.Count(FinalWhere);
+			return ReturnCountOnly(count);
 		}
 
-		// 6. Apply manual offset/limit pagination
-		ProvObjects::InventoryTagVec PaginatedTags;
-		uint64_t offset = QB_.Offset;
-		uint64_t limit = QB_.Limit;
-		if (limit == 0) limit = 100;
-		uint64_t count = 0;
-		for (size_t i = offset; i < FilteredTags.size() && count < limit; ++i) {
-			PaginatedTags.push_back(FilteredTags[i]);
-			count++;
-		}
-		return SendList(PaginatedTags, SerialOnly);
+		ProvObjects::InventoryTagVec Tags;
+		DB_.GetRecords(QB_.Offset, QB_.Limit, Tags, FinalWhere, OrderBy);
+		return SendList(Tags, SerialOnly);
 	}
 } // namespace OpenWifi
