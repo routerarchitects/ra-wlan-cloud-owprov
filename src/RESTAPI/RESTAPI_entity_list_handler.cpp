@@ -7,14 +7,21 @@ namespace OpenWifi {
 
 	void RESTAPI_entity_list_handler::DoGet() {
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
-			if (GetBoolParameter("getTree", false)) {
-				Poco::JSON::Object FullTree;
-				StorageService()->EntityDB().BuildTree(FullTree);
-				return ReturnObject(FullTree);
+			if (QB_.Select.empty()) {
+				if (GetBoolParameter("getTree", false)) {
+					Poco::JSON::Object FullTree;
+					StorageService()->EntityDB().BuildTree(FullTree);
+					return ReturnObject(FullTree);
+				} else if (QB_.CountOnly) {
+					auto C = DB_.Count();
+					return ReturnCountOnly(C);
+				} else {
+					EntityDB::RecordVec Entities;
+					DB_.GetRecords(QB_.Offset, QB_.Limit, Entities);
+					return MakeJSONObjectArray("entities", Entities, *this);
+				}
 			} else {
-				EntityDB::RecordVec Entities;
-				DB_.GetRecords(QB_.Offset, QB_.Limit, Entities);
-				return MakeJSONObjectArray("entities", Entities, *this);
+				return ReturnRecordList<EntityDB, ProvObjects::Entity>("entities", DB_, *this);
 			}
 		}
 
@@ -76,12 +83,35 @@ namespace OpenWifi {
 		}
 
 		if (VisibleEntities.empty() && VisibleVenues.empty()) {
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(0);
+			}
 			if (GetBoolParameter("getTree", false)) {
 				Poco::JSON::Object EmptyTree;
 				return ReturnObject(EmptyTree);
 			}
 			EntityDB::RecordVec Entities;
 			return MakeJSONObjectArray("entities", Entities, *this);
+		}
+
+		if (!QB_.Select.empty()) {
+			EntityDB::RecordVec SelectedEntities;
+			for (const auto &id : QB_.Select) {
+				ProvObjects::Entity E;
+				if (DB_.GetRecord("id", id, E)) {
+					if (VisibleEntities.count(E.info.id)) {
+						SelectedEntities.push_back(E);
+					}
+				}
+			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(SelectedEntities.size());
+			}
+			return MakeJSONObjectArray("entities", SelectedEntities, *this);
+		}
+
+		if (QB_.CountOnly) {
+			return ReturnCountOnly(VisibleEntities.size());
 		}
 
 		if (GetBoolParameter("getTree", false)) {
