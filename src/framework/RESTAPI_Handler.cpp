@@ -286,25 +286,31 @@ namespace OpenWifi {
 		// If a param is supplied but the ID doesn't exist, return false —
 		// don't silently fall back and treat a bad ID as "no scope".
 		// ----------------------------------------------------------------
-		std::string CandidateEntity, CandidateVenue;
+		std::string CandidateEntity, CandidateVenue, CandidateOperator;
 		for (const auto &[name, value] : Parameters_) {
 			if (name == "entity")
 				CandidateEntity = value;
 			else if (name == "venue")
 				CandidateVenue = value;
+			else if (name == "operatorId" || name == "operator")
+				CandidateOperator = value;
 		}
 
 		// ----------------------------------------------------------------
-		// SOURCE 3: Request body (entity / venue / parent fields).
+		// SOURCE 3: Request body (entity / venue / operator / parent fields).
 		// Only consulted when params yielded nothing.
 		// ----------------------------------------------------------------
-		if (CandidateEntity.empty() && CandidateVenue.empty() && ParsedBody_) {
+		if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_) {
 			if (ParsedBody_->has("entity"))
 				CandidateEntity = ParsedBody_->get("entity").toString();
 			if (ParsedBody_->has("venue"))
 				CandidateVenue = ParsedBody_->get("venue").toString();
+			if (ParsedBody_->has("operatorId"))
+				CandidateOperator = ParsedBody_->get("operatorId").toString();
+			else if (ParsedBody_->has("operator"))
+				CandidateOperator = ParsedBody_->get("operator").toString();
 
-			if (CandidateEntity.empty() && CandidateVenue.empty() && ParsedBody_->has("parent")) {
+			if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_->has("parent")) {
 				std::string ParentId = ParsedBody_->get("parent").toString();
 				if (!ParentId.empty()) {
 					if (Path.find("/api/v1/entity") != std::string::npos) {
@@ -340,6 +346,20 @@ namespace OpenWifi {
 				return true;
 			}
 			return false; // Entity ID provided but not found in DB.
+		}
+
+		if (!CandidateOperator.empty()) {
+			ProvObjects::Entity E;
+			if (StorageService()->EntityDB().GetRecord("id", CandidateOperator, E)) {
+				TargetEntity = CandidateOperator;
+				return true;
+			}
+			ProvObjects::Operator O;
+			if (StorageService()->OperatorDB().GetRecord("id", CandidateOperator, O)) {
+				TargetEntity = O.entityId.empty() ? CandidateOperator : O.entityId;
+				return true;
+			}
+			return false; // Operator ID provided but not found in DB.
 		}
 
 		// No scope information found from any source.
@@ -386,13 +406,14 @@ namespace OpenWifi {
 		}
 
 		for (const auto &[name, value] : Parameters_) {
-			if (name == "entity" || name == "venue") {
+			if (name == "entity" || name == "venue" || name == "operatorId" || name == "operator") {
 				return true;
 			}
 		}
 
 		if (ParsedBody_) {
 			if (ParsedBody_->has("entity") || ParsedBody_->has("venue") ||
+				ParsedBody_->has("operatorId") || ParsedBody_->has("operator") ||
 				ParsedBody_->has("parent")) {
 				return true;
 			}
