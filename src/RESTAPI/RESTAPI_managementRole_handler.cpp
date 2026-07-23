@@ -170,8 +170,8 @@ namespace OpenWifi {
 		}
 
 		ManagementRoleDB::RecordVec DB_Roles;
-		std::string WhereClause = "entity='" + entityId + "' and venue='" + venueId + "'";
-		if (DB.GetRecords(0, 500, DB_Roles, WhereClause)) {
+		std::string WhereClause = "entity='" + ORM::Escape(entityId) + "' and venue='" + ORM::Escape(venueId) + "' and users LIKE '%" + ORM::Escape(userId) + "%'";
+		if (DB.GetRecords(0, 100, DB_Roles, WhereClause)) {
 			for (const auto &role : DB_Roles) {
 				for (const auto &user : role.users) {
 					if (user == userId) {
