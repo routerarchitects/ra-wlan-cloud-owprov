@@ -38,22 +38,9 @@ namespace OpenWifi::SDK::Sec {
 			OpenAPIRequestGet Req(uSERVICE_SECURITY, "/api/v1/user/" + Id, {}, 5000);
 
 			auto CallResponse = Poco::makeShared<Poco::JSON::Object>();
-			std::string Token = client ? client->UserInfo_.webtoken.access_token_ : "";
-			auto StatusCode = Req.Do(CallResponse, Token);
+			auto StatusCode = Req.Do(CallResponse, "");
 			if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
 				return UserInfo.from_json(CallResponse);
-			}
-			if (!Token.empty()) {
-				StatusCode = Req.Do(CallResponse, "");
-				if (StatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
-					return UserInfo.from_json(CallResponse);
-				}
-			}
-			OpenAPIRequestGet SubReq(uSERVICE_SECURITY, "/api/v1/subuser/" + Id, {}, 5000);
-			auto SubCallResponse = Poco::makeShared<Poco::JSON::Object>();
-			auto SubStatusCode = SubReq.Do(SubCallResponse, Token);
-			if (SubStatusCode == Poco::Net::HTTPResponse::HTTP_OK) {
-				return UserInfo.from_json(SubCallResponse);
 			}
 			return false;
 		}
