@@ -350,8 +350,12 @@ namespace OpenWifi {
 
 		if (!CandidateOperator.empty()) {
 			ProvObjects::Entity E;
+			if (StorageService()->EntityDB().GetRecord("operatorId", CandidateOperator, E)) {
+				TargetEntity = E.info.id;
+				return true;
+			}
 			if (StorageService()->EntityDB().GetRecord("id", CandidateOperator, E)) {
-				TargetEntity = CandidateOperator;
+				TargetEntity = E.info.id;
 				return true;
 			}
 			ProvObjects::Operator O;
