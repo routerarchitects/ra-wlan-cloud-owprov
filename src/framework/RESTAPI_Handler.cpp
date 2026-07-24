@@ -312,7 +312,9 @@ namespace OpenWifi {
 				return false;
 			}
 			// Bound ID present but path not recognised as a scoped resource.
-			return false;
+			if (Method != Poco::Net::HTTPRequest::HTTP_POST) {
+				return false;
+			}
 		}
 
 		// ----------------------------------------------------------------
