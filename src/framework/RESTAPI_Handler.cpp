@@ -36,7 +36,7 @@ namespace OpenWifi {
 			}
 		}
 
-		if (Resource == "managementPolicy" && Method == Poco::Net::HTTPRequest::HTTP_GET) {
+		if ((Resource == "managementPolicy" || Resource == "systemConfiguration") && Method == Poco::Net::HTTPRequest::HTTP_GET) {
 			return true;
 		}
 
@@ -623,6 +623,8 @@ namespace OpenWifi {
 			return "overrides";
 		if (Path.find("/api/v1/iptocountry") != std::string::npos)
 			return "iptocountry";
+		if (Path.find("/api/v1/systemConfiguration") != std::string::npos)
+			return "systemConfiguration";
 		return "";
 	}
 
