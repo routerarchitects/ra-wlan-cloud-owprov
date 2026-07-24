@@ -460,6 +460,8 @@ namespace OpenWifi {
 			bool ResourceMatches = false;
 			for (const auto &res : entry.resources) {
 				if (Poco::icompare(res, Resource) == 0 || res == "*" ||
+					((Resource == "managementRole" || Resource == "managementPolicy") &&
+					 (Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "subscriberDevice" && Poco::icompare(res, "device") == 0) ||
 					(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
@@ -473,7 +475,9 @@ namespace OpenWifi {
 
 			for (const auto &acc : entry.access) {
 				if (acc == "FULL" || acc == AccessRequired ||
-					(AccessRequired == "UPDATE" && acc == "MODIFY")) {
+					(AccessRequired == "CREATE" && (acc == "MODIFY" || acc == "UPDATE" || acc == "READWRITE")) ||
+					(AccessRequired == "UPDATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+					(AccessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY"))) {
 					return true;
 				}
 			}
