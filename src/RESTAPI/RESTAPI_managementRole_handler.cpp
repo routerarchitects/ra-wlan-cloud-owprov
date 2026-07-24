@@ -146,7 +146,9 @@ namespace OpenWifi {
 				}
 				return true;
 			});
-			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+			if (!Roles.empty()) {
+				AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+			}
 		}
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;

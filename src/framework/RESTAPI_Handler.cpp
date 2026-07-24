@@ -489,7 +489,7 @@ namespace OpenWifi {
 								 std::vector<ProvObjects::ManagementRole> &roles) {
 		std::shared_lock<std::shared_mutex> lock(Mutex_);
 		auto it = Cache_.find(userId);
-		if (it != Cache_.end()) {
+		if (it != Cache_.end() && !it->second.roles.empty()) {
 			roles = it->second.roles;
 			return true;
 		}
@@ -554,7 +554,9 @@ namespace OpenWifi {
 				}
 				return true;
 			});
-			AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+			if (!Roles.empty()) {
+				AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+			}
 		}
 		return !Roles.empty();
 	}
