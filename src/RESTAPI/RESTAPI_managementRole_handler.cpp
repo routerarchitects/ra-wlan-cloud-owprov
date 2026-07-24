@@ -309,7 +309,9 @@ namespace OpenWifi {
 		}
 
 		std::vector<ProvObjects::ManagementRole> SavedRoles;
+		std::vector<ProvObjects::ManagementRole> NewlyCreatedRoles;
 
+		bool BatchFailed = false;
 		for (std::size_t idx = 0; idx < Scopes.size(); ++idx) {
 			ProvObjects::ManagementRole RoleForScope = NewObject;
 			RoleForScope.venue = Scopes[idx];
@@ -323,16 +325,26 @@ namespace OpenWifi {
 				ExistingRole.info.modified = Utils::Now();
 
 				if (!DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
-					return InternalError(RESTAPI::Errors::RecordNotUpdated);
+					BatchFailed = true;
+					break;
 				}
 				SavedRoles.emplace_back(ExistingRole);
 				continue;
 			}
 
 			if (!DB_.CreateRecord(RoleForScope)) {
-				return InternalError(RESTAPI::Errors::RecordNotCreated);
+				BatchFailed = true;
+				break;
 			}
+			NewlyCreatedRoles.emplace_back(RoleForScope);
 			SavedRoles.emplace_back(RoleForScope);
+		}
+
+		if (BatchFailed) {
+			for (const auto &role : NewlyCreatedRoles) {
+				DB_.DeleteRecord("id", role.info.id);
+			}
+			return InternalError(RESTAPI::Errors::RecordNotCreated);
 		}
 
 		AuthCache::GetInstance()->Clear();
