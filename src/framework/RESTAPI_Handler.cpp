@@ -169,7 +169,9 @@ namespace OpenWifi {
 					TargetVenue = R.venue;
 					return true;
 				}
-				return false;
+				if (Method != Poco::Net::HTTPRequest::HTTP_POST) {
+					return false;
+				}
 			} else if (Path.find("/api/v1/contact") != std::string::npos) {
 				ProvObjects::Contact C;
 				if (StorageService()->ContactDB().GetRecord("id", Id, C)) {
@@ -191,7 +193,9 @@ namespace OpenWifi {
 					TargetVenue = P.venue;
 					return true;
 				}
-				return false;
+				if (Method != Poco::Net::HTTPRequest::HTTP_POST) {
+					return false;
+				}
 			} else if (Path.find("/api/v1/map") != std::string::npos) {
 				ProvObjects::Map M;
 				if (StorageService()->MapDB().GetRecord("id", Id, M)) {
