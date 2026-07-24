@@ -80,7 +80,9 @@ namespace OpenWifi {
 
 		if (!TargetVenue.empty()) {
 			for (const auto &role : Roles) {
-				if (role.entity == TargetEntity && (role.venue == TargetVenue || role.venue.empty())) {
+				std::set<std::string> AllowedEntities;
+				GetDescendantEntities(role.entity, AllowedEntities);
+				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue == TargetVenue || role.venue.empty())) {
 					if (CheckRolePolicy(role)) {
 						return true;
 					}
@@ -88,7 +90,9 @@ namespace OpenWifi {
 			}
 		} else {
 			for (const auto &role : Roles) {
-				if (role.entity == TargetEntity && (role.venue.empty() || role.venue == "")) {
+				std::set<std::string> AllowedEntities;
+				GetDescendantEntities(role.entity, AllowedEntities);
+				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue.empty() || role.venue == "")) {
 					if (CheckRolePolicy(role)) {
 						return true;
 					}
@@ -311,6 +315,12 @@ namespace OpenWifi {
 				CandidateEntity = ParsedBody_->get("entity").toString();
 			if (ParsedBody_->has("venue"))
 				CandidateVenue = ParsedBody_->get("venue").toString();
+			if (CandidateVenue.empty() && ParsedBody_->isArray("venueIds")) {
+				auto Array = ParsedBody_->getArray("venueIds");
+				if (Array && Array->size() > 0) {
+					CandidateVenue = Array->get(0).toString();
+				}
+			}
 			if (ParsedBody_->has("operatorId"))
 				CandidateOperator = ParsedBody_->get("operatorId").toString();
 			else if (ParsedBody_->has("operator"))
