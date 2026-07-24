@@ -13,6 +13,27 @@
 
 namespace OpenWifi {
 
+	static bool ValidateAssignableUser(RESTAPIHandler *handler,
+									   const std::string &requesterUserId,
+									   SecurityObjects::USER_ROLE requesterRole,
+									   const std::string &targetUserId,
+									   std::string &ErrorDescription) {
+		SecurityObjects::UserInfo TargetUser;
+		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
+			ErrorDescription = "The selected user could not be found.";
+			return false;
+		}
+
+		if (requesterRole != SecurityObjects::ROOT) {
+			if (TargetUser.createdBy != requesterUserId && TargetUser.id != requesterUserId) {
+				ErrorDescription = "You are not authorized to assign or modify roles for users you did not create.";
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	void RESTAPI_managementRole_handler::DoGet() {
 		ProvObjects::ManagementRole Existing;
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
@@ -191,27 +212,6 @@ namespace OpenWifi {
 			}
 		}
 		return false;
-	}
-
-	static bool ValidateAssignableUser(RESTAPIHandler *handler,
-									   const std::string &requesterUserId,
-									   SecurityObjects::USER_ROLE requesterRole,
-									   const std::string &targetUserId,
-									   std::string &ErrorDescription) {
-		SecurityObjects::UserInfo TargetUser;
-		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
-			ErrorDescription = "The selected user could not be found.";
-			return false;
-		}
-
-		if (requesterRole != SecurityObjects::ROOT) {
-			if (TargetUser.createdBy != requesterUserId && TargetUser.id != requesterUserId) {
-				ErrorDescription = "You are not authorized to assign or modify roles for users you did not create.";
-				return false;
-			}
-		}
-
-		return true;
 	}
 
 	static std::vector<std::string> ParseVenueIds(const Poco::JSON::Object::Ptr &RawObj,
