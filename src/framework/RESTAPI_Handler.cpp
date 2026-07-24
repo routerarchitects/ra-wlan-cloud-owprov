@@ -12,21 +12,15 @@ namespace OpenWifi {
 
 	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path, const std::string &Method,
 										  std::string &Reason) {
-		std::cout << "[AUTH_DEBUG] RoleIsAuthorized CALLED - Path: " << Path << ", Method: " << Method
-				  << ", UserId: " << UserInfo_.userinfo.id << ", UserRole: " << UserInfo_.userinfo.userRole << std::endl;
-
 		// 1. Bypass check only if user is root
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
-			std::cout << "[AUTH_DEBUG] RoleIsAuthorized: Bypassed for ROOT user." << std::endl;
 			return true;
 		}
 
 		// 2. Map path to resource
 		std::string Resource = GetResourceName(Path);
-		std::cout << "[AUTH_DEBUG] RoleIsAuthorized: Mapped Resource: '" << Resource << "'" << std::endl;
 		if (Resource.empty()) {
 			Reason = "Unknown or prohibited resource path.";
-			std::cout << "[AUTH_DEBUG] RoleIsAuthorized: DENIED - Resource.empty()" << std::endl;
 			return false;
 		}
 
@@ -38,7 +32,6 @@ namespace OpenWifi {
 			if (Poco::icompare(RequestedUserRole, "root") == 0 &&
 				UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 				Reason = "Only root may assign the root user role.";
-				std::cout << "[AUTH_DEBUG] RoleIsAuthorized: DENIED - Assigning root role requires root." << std::endl;
 				return false;
 			}
 		}
@@ -46,50 +39,42 @@ namespace OpenWifi {
 		if ((Resource == "managementPolicy" || Resource == "systemConfiguration" ||
 			 Resource == "radiusEndpoint" || Resource == "openroaming" ||
 			 Resource == "iptocountry") && Method == Poco::Net::HTTPRequest::HTTP_GET) {
-			std::cout << "[AUTH_DEBUG] RoleIsAuthorized: ALLOWED - Unscoped GET lookup." << std::endl;
 			return true;
 		}
 
 		std::string UserId = UserInfo_.userinfo.id;
 		std::vector<ProvObjects::ManagementRole> Roles;
 		FindAllUserRoles(UserId, Roles);
-		std::cout << "[AUTH_DEBUG] RoleIsAuthorized: Found " << Roles.size() << " roles in DB/Cache for userId: " << UserId << std::endl;
 
 		auto CheckRolePolicy = [&](const ProvObjects::ManagementRole &role) -> bool {
 			ProvObjects::ManagementPolicy Policy;
 			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
 				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-					std::cout << "[AUTH_DEBUG] CheckRolePolicy: PolicyDB lookup failed for policy ID: " << role.managementPolicy << std::endl;
 					return false;
 				}
 				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
 			}
-			bool Allowed = PolicyAllows(Policy, Resource, Method);
-			std::cout << "[AUTH_DEBUG] CheckRolePolicy: Policy '" << Policy.info.name << "' (" << role.managementPolicy
-					  << ") PolicyAllows(res='" << Resource << "', method='" << Method << "') -> " << (Allowed ? "TRUE" : "FALSE") << std::endl;
-			return Allowed;
+			return PolicyAllows(Policy, Resource, Method);
 		};
 
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
-		bool Resolved = ResolveTargetContext(Path, Method, TargetEntity, TargetVenue);
-		std::cout << "[AUTH_DEBUG] RoleIsAuthorized: ResolveTargetContext -> Resolved=" << (Resolved ? "TRUE" : "FALSE")
-				  << ", TargetEntity='" << TargetEntity << "', TargetVenue='" << TargetVenue << "'" << std::endl;
-
-		if (!Resolved) {
+		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
+			// If a scope constraint was specified (via path ID, query param, or body)
+			// but could not be resolved against the database, we must fail closed.
 			if (HasScopeConstraint(Resource, Method)) {
 				Reason = "Scope resolution failed for constrained operation; access denied.";
-				std::cout << "[AUTH_DEBUG] RoleIsAuthorized: DENIED - Scope resolution failed for constrained operation." << std::endl;
 				return false;
 			}
+			// If no scope constraint was specified (e.g. global/collection operations like
+			// GET /api/v1/entity or GET /api/v1/inventory), we check if any role permits
+			// the operation globally.
 			for (const auto &role : Roles) {
 				if (CheckRolePolicy(role)) {
-					std::cout << "[AUTH_DEBUG] RoleIsAuthorized: ALLOWED - Unconstrained role policy check passed." << std::endl;
 					return true;
 				}
 			}
 			Reason = "No authorized role found for this target resource and operation.";
-			std::cout << "[AUTH_DEBUG] RoleIsAuthorized: DENIED - Unconstrained role policy check failed." << std::endl;
 			return false;
 		}
 
@@ -97,12 +82,8 @@ namespace OpenWifi {
 			for (const auto &role : Roles) {
 				std::set<std::string> AllowedEntities;
 				GetDescendantEntities(role.entity, AllowedEntities);
-				bool ScopeMatch = (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue == TargetVenue || role.venue.empty()));
-				std::cout << "[AUTH_DEBUG] RoleIsAuthorized: Venue target check - Role entity: '" << role.entity
-						  << "', role venue: '" << role.venue << "' -> ScopeMatch=" << (ScopeMatch ? "TRUE" : "FALSE") << std::endl;
-				if (ScopeMatch) {
+				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue == TargetVenue || role.venue.empty())) {
 					if (CheckRolePolicy(role)) {
-						std::cout << "[AUTH_DEBUG] RoleIsAuthorized: ALLOWED - Venue target role check passed!" << std::endl;
 						return true;
 					}
 				}
@@ -111,12 +92,8 @@ namespace OpenWifi {
 			for (const auto &role : Roles) {
 				std::set<std::string> AllowedEntities;
 				GetDescendantEntities(role.entity, AllowedEntities);
-				bool ScopeMatch = (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue.empty() || role.venue == ""));
-				std::cout << "[AUTH_DEBUG] RoleIsAuthorized: Entity target check - Role entity: '" << role.entity
-						  << "', role venue: '" << role.venue << "' -> ScopeMatch=" << (ScopeMatch ? "TRUE" : "FALSE") << std::endl;
-				if (ScopeMatch) {
+				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue.empty() || role.venue == "")) {
 					if (CheckRolePolicy(role)) {
-						std::cout << "[AUTH_DEBUG] RoleIsAuthorized: ALLOWED - Entity target role check passed!" << std::endl;
 						return true;
 					}
 				}
@@ -124,8 +101,6 @@ namespace OpenWifi {
 		}
 
 		Reason = "No authorized role matches the required scope and permission.";
-		std::cout << "[AUTH_DEBUG] RoleIsAuthorized: DENIED - No matching role/policy for scope (TargetEntity='"
-				  << TargetEntity << "', TargetVenue='" << TargetVenue << "')." << std::endl;
 		return false;
 	}
 

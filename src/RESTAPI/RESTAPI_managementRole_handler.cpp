@@ -135,13 +135,8 @@ namespace OpenWifi {
 													  const std::string &venueId,
 													  const ProvObjects::ManagementPolicy &TargetPolicy,
 													  std::string &ErrorDescription) {
-		std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission CALLED for userId: " << userId
-				  << ", target entityId: '" << entityId << "', target venueId: '" << venueId
-				  << "', target policy: '" << TargetPolicy.info.name << "' (" << TargetPolicy.info.id << ")" << std::endl;
-
 		std::vector<ProvObjects::ManagementRole> Roles;
 		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
-			std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: AuthCache miss for userId " << userId << ", scanning RolesDB..." << std::endl;
 			StorageService()->RolesDB().Iterate([&](const ProvObjects::ManagementRole &role) {
 				for (const auto &u : role.users) {
 					if (u == userId) {
@@ -155,24 +150,17 @@ namespace OpenWifi {
 				AuthCache::GetInstance()->SetUserRoles(userId, Roles);
 			}
 		}
-		std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: Found " << Roles.size() << " roles for requester userId: " << userId << std::endl;
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
 		for (const auto &role : Roles) {
 			std::set<std::string> AllowedEntities;
 			RESTAPIHandler::GetDescendantEntities(role.entity, AllowedEntities);
-			bool ScopeMatch = (AllowedEntities.find(entityId) != AllowedEntities.end() && (role.venue == venueId || role.venue.empty()));
-			std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: Role ID: " << role.info.id
-					  << ", Role Entity: '" << role.entity << "', Role Venue: '" << role.venue
-					  << "', PolicyId: '" << role.managementPolicy << "' -> ScopeMatch=" << (ScopeMatch ? "TRUE" : "FALSE") << std::endl;
-
-			if (ScopeMatch) {
+			if (AllowedEntities.find(entityId) != AllowedEntities.end() && (role.venue == venueId || role.venue.empty())) {
 				ProvObjects::ManagementPolicy Policy;
 				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
 					if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
 						AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
 					} else {
-						std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: PolicyDB GetRecord FAILED for policy ID: " << role.managementPolicy << std::endl;
 						continue;
 					}
 				}
@@ -182,7 +170,6 @@ namespace OpenWifi {
 
 		if (requesterPolicies.empty()) {
 			ErrorDescription = "Privilege mismatch: requester has no role on the target scope.";
-			std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: FAILED - requesterPolicies.empty()!" << std::endl;
 			return false;
 		}
 
@@ -196,22 +183,18 @@ namespace OpenWifi {
 							break;
 						}
 					}
-					std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: Checking target entry (res='" << res << "', acc='" << acc << "') -> Covered=" << (Covered ? "TRUE" : "FALSE") << std::endl;
 					if (acc == "FULL") {
 						if (!Covered) {
 							ErrorDescription = "Privilege mismatch: requester does not have FULL permission on resource " + res;
-							std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: FAILED - " << ErrorDescription << std::endl;
 							return false;
 						}
 					} else if (!Covered) {
 						ErrorDescription = "Privilege mismatch: requester does not have " + acc + " permission on resource " + res;
-						std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: FAILED - " << ErrorDescription << std::endl;
 						return false;
 					}
 				}
 			}
 		}
-		std::cout << "[AUTH_DEBUG] RequesterHasEqualOrStrongerPermission: PASSED - All permissions covered!" << std::endl;
 		return true;
 	}
 
@@ -278,9 +261,6 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_managementRole_handler::DoPost() {
-		std::cout << "[AUTH_DEBUG] RESTAPI_managementRole_handler::DoPost CALLED - Requester: "
-				  << UserInfo_.userinfo.id << " (" << UserInfo_.userinfo.email << "), UserRole: " << UserInfo_.userinfo.userRole << std::endl;
-
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingUUID);
@@ -298,7 +278,6 @@ namespace OpenWifi {
 
 		if (NewObject.entity.empty() ||
 			!StorageService()->EntityDB().Exists("id", NewObject.entity)) {
-			std::cout << "[AUTH_DEBUG] DoPost: Entity empty or missing in DB: '" << NewObject.entity << "'" << std::endl;
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
@@ -307,21 +286,16 @@ namespace OpenWifi {
 			Scopes.emplace_back("");
 		}
 
-		std::cout << "[AUTH_DEBUG] DoPost: Target entity='" << NewObject.entity << "', managementPolicy='" << NewObject.managementPolicy
-				  << "', users count=" << NewObject.users.size() << ", Scopes count=" << Scopes.size() << std::endl;
-
 		// Validate system policy exists in DB
 		ProvObjects::ManagementPolicy TargetPolicy;
 		if (!NewObject.managementPolicy.empty()) {
 			if (!StorageService()->PolicyDB().GetRecord("id", NewObject.managementPolicy, TargetPolicy)) {
-				std::cout << "[AUTH_DEBUG] DoPost: PolicyDB GetRecord FAILED for managementPolicy ID: '" << NewObject.managementPolicy << "'" << std::endl;
 				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
 			}
 		}
 
 		for (const auto &venueId : Scopes) {
 			if (!ValidateVenueScope(NewObject.entity, venueId)) {
-				std::cout << "[AUTH_DEBUG] DoPost: ValidateVenueScope FAILED for entity='" << NewObject.entity << "', venueId='" << venueId << "'" << std::endl;
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
 		}
@@ -331,8 +305,6 @@ namespace OpenWifi {
 			for (const auto &venueId : Scopes) {
 				std::string PrivilegeError;
 				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, venueId, TargetPolicy, PrivilegeError)) {
-					std::cout << "[AUTH_DEBUG] DoPost: RequesterHasEqualOrStrongerPermission FAILED for venueId='" << venueId
-							  << "', Error='" << PrivilegeError << "'" << std::endl;
 					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
 				}
 			}
@@ -344,8 +316,6 @@ namespace OpenWifi {
 		std::string UserId = NewObject.users[0];
 		std::string UserValidationError;
 		if (!ValidateAssignableUser(this, UserInfo_.userinfo.id, UserInfo_.userinfo.userRole, UserId, UserValidationError)) {
-			std::cout << "[AUTH_DEBUG] DoPost: ValidateAssignableUser FAILED for targetUserId='" << UserId
-					  << "', Error='" << UserValidationError << "'" << std::endl;
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
 		}
 
