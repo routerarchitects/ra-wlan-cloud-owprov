@@ -54,6 +54,15 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			for (const auto &userId : Existing.users) {
+				std::string UserValidationError;
+				if (!ValidateAssignableUser(this, UserInfo_.userinfo.id, UserInfo_.userinfo.userRole, userId, UserValidationError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
+				}
+			}
+		}
+
 		if (!DB_.DeleteRecord("id", Existing.info.id)) {
 			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
 		}
@@ -193,6 +202,13 @@ namespace OpenWifi {
 		if (!SDK::Sec::User::Get(handler, targetUserId, TargetUser)) {
 			ErrorDescription = "The selected user could not be found.";
 			return false;
+		}
+
+		if (requesterRole != SecurityObjects::ROOT) {
+			if (TargetUser.createdBy != requesterUserId && TargetUser.id != requesterUserId) {
+				ErrorDescription = "You are not authorized to assign or modify roles for users you did not create.";
+				return false;
+			}
 		}
 
 		return true;
@@ -353,6 +369,15 @@ namespace OpenWifi {
 
 		if (!UpdateObjectInfo(RawObject, UserInfo_.userinfo, Existing.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
+		}
+
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			for (const auto &userId : Existing.users) {
+				std::string UserValidationError;
+				if (!ValidateAssignableUser(this, UserInfo_.userinfo.id, UserInfo_.userinfo.userRole, userId, UserValidationError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
+				}
+			}
 		}
 
 		std::string EffectivePolicyUUID = Existing.managementPolicy;
