@@ -308,6 +308,7 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
 		}
 
+		// TODO: Upgrade to native SQL transactions later (requires ORM update in orm.h to support session-bound transactions)
 		std::vector<ProvObjects::ManagementRole> SavedRoles;
 		std::vector<ProvObjects::ManagementRole> NewlyCreatedRoles;
 
