@@ -112,6 +112,17 @@ namespace OpenWifi {
 			StorageService()->VenueDB().DeleteChild("id", Existing.parent, UUID);
 		if (!Existing.entity.empty())
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
+
+		ManagementRoleDB::RecordVec MatchingVenueRoles;
+		std::string WhereVenueRoles = "venue='" + ORM::Escape(UUID) + "'";
+		if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingVenueRoles, WhereVenueRoles)) {
+			for (const auto &Role : MatchingVenueRoles) {
+				StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
+				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
+			}
+		}
+		AuthCache::GetInstance()->Clear();
+
 		DB_.DeleteRecord("id", UUID);
 
 		UpdateKafkaProvisioningObject(ProvisioningOperation::removal, Existing);
@@ -147,8 +158,12 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::NotBoth);
 		}
 
-		if (!NewObject.parent.empty() && !DB_.Exists("id", NewObject.parent)) {
-			return BadRequest(RESTAPI::Errors::VenueMustExist);
+		if (!NewObject.parent.empty()) {
+			ProvObjects::Venue ParentVenue;
+			if (!DB_.GetRecord("id", NewObject.parent, ParentVenue)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
+			NewObject.entity = ParentVenue.entity;
 		}
 
 		if (NewObject.entity == EntityDB::RootUUID()) {
@@ -216,6 +231,7 @@ namespace OpenWifi {
 							 NewObject.parent, NewObject.info.id);
 			MoveUsage(StorageService()->ConfigurationDB(), DB_, {}, NewObject.deviceConfiguration,
 					  NewObject.info.id);
+			AutoCreateCreatorRole(NewObject.entity, NewObject.info.id, NewObject.entity, NewObject.parent);
 
 			ProvObjects::Venue NewRecord;
 			DB_.GetRecord("id", NewObject.info.id, NewRecord);

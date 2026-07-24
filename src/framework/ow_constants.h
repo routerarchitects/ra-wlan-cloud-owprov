@@ -162,7 +162,9 @@ namespace OpenWifi::RESTAPI::Errors {
 	static const struct msg UserAlreadyExists { 1061, "Username already exists." };
 	static const struct msg NotImplemented { 1062, "Function not implemented." };
 	static const struct msg VariableMustExist { 1063, "Specified variable does not exist." };
-	static const struct msg InvalidEntityType { 1064, "Invalid entity type." };
+	static const struct msg InvalidEntityType {
+		1064, "An entity can only be created under the Root Entity or under an Operator Entity. Deep nesting of normal entities is not allowed."
+	};
 	static const struct msg CannotDeleteSubEntity {
 		1065, "Cannot delete the default subscriber entity."
 	};

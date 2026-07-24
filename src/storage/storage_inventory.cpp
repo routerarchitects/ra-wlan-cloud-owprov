@@ -262,13 +262,11 @@ namespace OpenWifi {
 
     bool InventoryDB::GetDevicesForVenue(const std::string &venue_uuid, std::vector<std::string> &devices) {
         try {
-            std::vector<ProvObjects::InventoryTag> device_list;
-            if(GetRecords(0, 1000, device_list, fmt::format(" venue='{}' ", venue_uuid))) {
-                for(auto &i:device_list) {
-                    devices.push_back(i.serialNumber);
-                }
+            Iterate([&](const ProvObjects::InventoryTag &tag) {
+                devices.push_back(tag.serialNumber);
                 return true;
-            }
+            }, fmt::format(" venue='{}' ", venue_uuid));
+            return true;
         } catch(const Poco::Exception &E) {
             Logger().log(E);
             return false;
@@ -284,13 +282,11 @@ namespace OpenWifi {
 
     bool InventoryDB::GetDevicesUUIDForVenue(const std::string &venue_uuid, std::vector<std::string> &devices) {
         try {
-            std::vector<ProvObjects::InventoryTag> device_list;
-            if(GetRecords(0, 1000, device_list, fmt::format(" venue='{}' ", venue_uuid))) {
-                for(auto &i:device_list) {
-                    devices.push_back(i.info.id);
-                }
+            Iterate([&](const ProvObjects::InventoryTag &tag) {
+                devices.push_back(tag.info.id);
                 return true;
-            }
+            }, fmt::format(" venue='{}' ", venue_uuid));
+            return true;
         } catch(const Poco::Exception &E) {
             Logger().log(E);
             return false;
@@ -306,7 +302,11 @@ namespace OpenWifi {
 
     bool InventoryDB::GetDevicesForVenue(const std::string &venue_uuid, std::vector<ProvObjects::InventoryTag> &devices) {
         try {
-            return GetRecords(0, 1000, devices, fmt::format(" venue='{}' ", venue_uuid));
+            Iterate([&](const ProvObjects::InventoryTag &tag) {
+                devices.push_back(tag);
+                return true;
+            }, fmt::format(" venue='{}' ", venue_uuid));
+            return true;
         } catch(const Poco::Exception &E) {
             Logger().log(E);
             return false;

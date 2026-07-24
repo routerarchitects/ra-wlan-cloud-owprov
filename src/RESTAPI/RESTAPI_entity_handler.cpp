@@ -54,6 +54,17 @@ namespace OpenWifi {
 
 		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
 				  Existing.info.id);
+
+		ManagementRoleDB::RecordVec MatchingRoles;
+		std::string WhereRoles = "entity='" + ORM::Escape(UUID) + "'";
+		if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingRoles, WhereRoles)) {
+			for (const auto &Role : MatchingRoles) {
+				StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
+				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
+			}
+		}
+		AuthCache::GetInstance()->Clear();
+
 		DB_.DeleteRecord("id", UUID);
 		DB_.DeleteChild("id", Existing.parent, UUID);
 		return OK();
@@ -89,8 +100,19 @@ namespace OpenWifi {
 
 		if (UUID == EntityDB::RootUUID()) {
 			NewEntity.parent = "";
-		} else if (NewEntity.parent.empty() || !DB_.Exists("id", NewEntity.parent)) {
-			return BadRequest(RESTAPI::Errors::ParentUUIDMustExist);
+		} else {
+			if (NewEntity.parent.empty() || !DB_.Exists("id", NewEntity.parent)) {
+				return BadRequest(RESTAPI::Errors::ParentUUIDMustExist);
+			}
+			ProvObjects::Entity ParentEntity;
+			if (!DB_.GetRecord("id", NewEntity.parent, ParentEntity)) {
+				return BadRequest(RESTAPI::Errors::ParentUUIDMustExist);
+			}
+			bool ParentIsRoot = (NewEntity.parent == EntityDB::RootUUID());
+			bool ParentIsOperator = (!ParentEntity.operatorId.empty());
+			if (!ParentIsRoot && !ParentIsOperator) {
+				return BadRequest(RESTAPI::Errors::InvalidEntityType);
+			}
 		}
 
 		if (!NewEntity.managementPolicy.empty() &&
@@ -114,6 +136,7 @@ namespace OpenWifi {
 			MoveUsage(StorageService()->PolicyDB(), DB_, "", NewEntity.managementPolicy,
 					  NewEntity.info.id);
 			DB_.AddChild("id", NewEntity.parent, NewEntity.info.id);
+			AutoCreateCreatorRole(NewEntity.info.id, "", NewEntity.parent, "");
 
 			Poco::JSON::Object Answer;
 			NewEntity.to_json(Answer);

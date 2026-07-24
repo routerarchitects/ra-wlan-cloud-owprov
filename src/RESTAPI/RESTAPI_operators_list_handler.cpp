@@ -7,18 +7,90 @@
 
 namespace OpenWifi {
 	void RESTAPI_operators_list_handler::DoGet() {
+		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
+
+		std::set<std::string> AllowedOperatorIds;
+		bool AllOperatorsAllowed = IsRoot;
+
+		if (!AllOperatorsAllowed) {
+			std::vector<ProvObjects::ManagementRole> Roles;
+			if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
+				auto &EntityDB = StorageService()->EntityDB();
+				for (const auto &role : Roles) {
+					if (role.entity.empty()) continue;
+					if (role.entity == EntityDB.RootUUID()) {
+						AllOperatorsAllowed = true;
+						break;
+					}
+					if (!role.venue.empty()) {
+						continue;
+					}
+					ProvObjects::Entity ent;
+					if (EntityDB.GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
+						AllowedOperatorIds.insert(ent.operatorId);
+					}
+				}
+			}
+		}
 
 		if (QB_.CountOnly) {
-			auto Count = DB_.Count();
-			return ReturnCountOnly(Count);
+			if (AllOperatorsAllowed) {
+				auto Count = DB_.Count();
+				return ReturnCountOnly(Count);
+			} else {
+				std::vector<ProvObjects::Operator> AllEntries;
+				DB_.GetRecords(0, 100000, AllEntries);
+				uint64_t Count = 0;
+				for (const auto &op : AllEntries) {
+					if (AllowedOperatorIds.count(op.info.id)) {
+						Count++;
+					}
+				}
+				return ReturnCountOnly(Count);
+			}
 		}
 
 		if (!QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DB_), ProvObjects::Operator>("operators", DB_, *this);
+			if (AllOperatorsAllowed) {
+				return ReturnRecordList<decltype(DB_), ProvObjects::Operator>("operators", DB_, *this);
+			} else {
+				Poco::JSON::Array ObjArr;
+				for (const auto &i : SelectedRecords()) {
+					ProvObjects::Operator E;
+					if (DB_.GetRecord("id", i, E)) {
+						if (AllowedOperatorIds.count(E.info.id)) {
+							Poco::JSON::Object Obj;
+							E.to_json(Obj);
+							if (NeedAdditionalInfo())
+								AddExtendedInfo(E, Obj);
+							ObjArr.add(Obj);
+						}
+					} else {
+						return BadRequest(RESTAPI::Errors::UnknownId);
+					}
+				}
+				Poco::JSON::Object Answer;
+				Answer.set("operators", ObjArr);
+				return ReturnObject(Answer);
+			}
 		}
 
 		std::vector<ProvObjects::Operator> Entries;
-		DB_.GetRecords(QB_.Offset, QB_.Limit, Entries);
+		if (AllOperatorsAllowed) {
+			DB_.GetRecords(QB_.Offset, QB_.Limit, Entries);
+		} else {
+			std::vector<ProvObjects::Operator> AllEntries;
+			DB_.GetRecords(0, 100000, AllEntries);
+			std::vector<ProvObjects::Operator> FilteredEntries;
+			for (const auto &op : AllEntries) {
+				if (AllowedOperatorIds.count(op.info.id)) {
+					FilteredEntries.push_back(op);
+				}
+			}
+			for (size_t i = QB_.Offset; i < FilteredEntries.size() && Entries.size() < QB_.Limit; ++i) {
+				Entries.push_back(FilteredEntries[i]);
+			}
+		}
 		return MakeJSONObjectArray("operators", Entries, *this);
 	}
 } // namespace OpenWifi

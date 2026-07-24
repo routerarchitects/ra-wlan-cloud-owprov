@@ -25,6 +25,35 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
+		bool IsRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
+		bool AllOperatorsAllowed = IsRoot;
+		std::set<std::string> AllowedOperatorIds;
+
+		if (!AllOperatorsAllowed) {
+			std::vector<ProvObjects::ManagementRole> Roles;
+			if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
+				auto &EntityDB = StorageService()->EntityDB();
+				for (const auto &role : Roles) {
+					if (role.entity.empty()) continue;
+					if (role.entity == EntityDB.RootUUID()) {
+						AllOperatorsAllowed = true;
+						break;
+					}
+					if (!role.venue.empty()) {
+						continue;
+					}
+					ProvObjects::Entity ent;
+					if (EntityDB.GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
+						AllowedOperatorIds.insert(ent.operatorId);
+					}
+				}
+			}
+		}
+
+		if (!AllOperatorsAllowed && AllowedOperatorIds.count(uuid) == 0) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+
 		Poco::JSON::Object Answer;
 		Existing.to_json(Answer);
 		return ReturnObject(Answer);
