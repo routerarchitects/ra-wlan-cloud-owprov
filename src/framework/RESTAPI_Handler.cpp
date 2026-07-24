@@ -588,45 +588,45 @@ namespace OpenWifi {
 	}
 
 	std::string RESTAPIHandler::GetResourceName(const std::string &Path) {
-		std::string LowerPath = Poco::toLower(Path);
-		if (LowerPath.find("/api/v1/entity") != std::string::npos)
+		if (Path.find("/api/v1/entity") != std::string::npos)
 			return "entity";
-		if (LowerPath.find("/api/v1/venue") != std::string::npos)
+		if (Path.find("/api/v1/venue") != std::string::npos)
 			return "venue";
-		if (LowerPath.find("/api/v1/inventory") != std::string::npos)
+		if (Path.find("/api/v1/inventory") != std::string::npos)
 			return "device";
-		if (LowerPath.find("/api/v1/subscriberdevice") != std::string::npos ||
-			LowerPath.find("/api/v1/sub_devices") != std::string::npos)
+		if (Path.find("/api/v1/subscriberDevice") != std::string::npos ||
+			Path.find("/api/v1/sub_devices") != std::string::npos)
 			return "device";
-		if (LowerPath.find("/api/v1/subscriber") != std::string::npos)
+		if (Path.find("/api/v1/subscriber") != std::string::npos)
 			return "subscriber";
-		if (LowerPath.find("/api/v1/configuration") != std::string::npos)
+		if (Path.find("/api/v1/configuration") != std::string::npos)
 			return "configuration";
-		if (LowerPath.find("/api/v1/managementrole") != std::string::npos)
+		if (Path.find("/api/v1/managementRole") != std::string::npos)
 			return "managementRole";
-		if (LowerPath.find("/api/v1/managementpolicy") != std::string::npos)
+		if (Path.find("/api/v1/managementPolicy") != std::string::npos)
 			return "managementPolicy";
-		if (LowerPath.find("/api/v1/operator") != std::string::npos)
+		if (Path.find("/api/v1/operator") != std::string::npos)
 			return "operator";
-		if (LowerPath.find("/api/v1/contact") != std::string::npos || LowerPath.find("/api/v1/op_contact") != std::string::npos)
+		if (Path.find("/api/v1/contact") != std::string::npos || Path.find("/api/v1/op_contact") != std::string::npos)
 			return "contact";
-		if (LowerPath.find("/api/v1/location") != std::string::npos || LowerPath.find("/api/v1/op_location") != std::string::npos)
+		if (Path.find("/api/v1/location") != std::string::npos || Path.find("/api/v1/op_location") != std::string::npos)
 			return "location";
-		if (LowerPath.find("/api/v1/map") != std::string::npos)
+		if (Path.find("/api/v1/map") != std::string::npos)
 			return "map";
-		if (LowerPath.find("/api/v1/variables") != std::string::npos)
+		if (Path.find("/api/v1/variables") != std::string::npos)
 			return "variables";
-		if (LowerPath.find("/api/v1/radiusendpoint") != std::string::npos)
+		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos ||
+			Path.find("/api/v1/RADIUSEndPoints") != std::string::npos)
 			return "radiusEndpoint";
-		if (LowerPath.find("/api/v1/openroaming") != std::string::npos)
+		if (Path.find("/api/v1/openroaming") != std::string::npos)
 			return "openroaming";
-		if (LowerPath.find("/api/v1/serviceclass") != std::string::npos)
+		if (Path.find("/api/v1/serviceClass") != std::string::npos)
 			return "serviceClass";
-		if (LowerPath.find("/api/v1/overrides") != std::string::npos)
+		if (Path.find("/api/v1/overrides") != std::string::npos)
 			return "overrides";
-		if (LowerPath.find("/api/v1/iptocountry") != std::string::npos)
+		if (Path.find("/api/v1/iptocountry") != std::string::npos)
 			return "iptocountry";
-		if (LowerPath.find("/api/v1/systemconfiguration") != std::string::npos)
+		if (Path.find("/api/v1/systemConfiguration") != std::string::npos)
 			return "systemConfiguration";
 		return "";
 	}
