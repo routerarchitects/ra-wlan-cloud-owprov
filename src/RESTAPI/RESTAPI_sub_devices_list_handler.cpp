@@ -24,57 +24,12 @@ namespace OpenWifi {
 				operatorEntityId = E.info.id;
 			}
 
-			std::set<std::string> SubscriberIds;
-			std::set<std::string> VenueDeviceSerials;
-
-			std::string VenueWhere = "subscriber!='' and (entity='" + operatorEntityId + "' or entity='" + operatorId + "')";
-			VenueDB::RecordVec SubVenues;
-			if (StorageService()->VenueDB().GetRecords(0, 10000, SubVenues, VenueWhere)) {
-				for (const auto &v : SubVenues) {
-					if (!v.subscriber.empty()) {
-						SubscriberIds.insert(v.subscriber);
-					}
-					for (const auto &dev : v.devices) {
-						VenueDeviceSerials.insert(dev);
-					}
-				}
-			}
-
-			std::string AllVenueWhere = "subscriber!=''";
-			VenueDB::RecordVec AllSubVenues;
-			if (StorageService()->VenueDB().GetRecords(0, 10000, AllSubVenues, AllVenueWhere)) {
-				for (const auto &v : AllSubVenues) {
-					if (v.entity == operatorEntityId || v.entity == operatorId) {
-						if (!v.subscriber.empty()) {
-							SubscriberIds.insert(v.subscriber);
-						}
-						for (const auto &dev : v.devices) {
-							VenueDeviceSerials.insert(dev);
-						}
-					}
-				}
-			}
-
-			std::vector<std::string> Conditions;
-			Conditions.push_back(fmt::format("operatorId='{}'", operatorId));
-			Conditions.push_back(fmt::format("operatorId='{}'", operatorEntityId));
-
-			for (const auto &subId : SubscriberIds) {
-				Conditions.push_back(fmt::format("subscriberId='{}'", subId));
-			}
-			for (const auto &devSerial : VenueDeviceSerials) {
-				Conditions.push_back(fmt::format("serialNumber='{}'", devSerial));
-				Conditions.push_back(fmt::format("id='{}'", devSerial));
-			}
-
-			std::string FinalWhere;
-			for (size_t i = 0; i < Conditions.size(); ++i) {
-				if (i > 0) FinalWhere += " or ";
-				FinalWhere += "(" + Conditions[i] + ")";
-			}
+			std::string WhereClause = fmt::format(
+				" operatorId='{}' or operatorId='{}' or subscriberId in (select subscriber from venues where subscriber!='' and (entity='{}' or entity='{}')) ",
+				operatorId, operatorEntityId, operatorEntityId, operatorId);
 
 			if (QB_.CountOnly) {
-				auto Count = DB_.Count(FinalWhere);
+				auto Count = DB_.Count(WhereClause);
 				return ReturnCountOnly(Count);
 			}
 
@@ -83,7 +38,7 @@ namespace OpenWifi {
 			}
 
 			SubscriberDeviceDB::RecordVec Entries;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Entries, FinalWhere);
+			DB_.GetRecords(QB_.Offset, QB_.Limit, Entries, WhereClause);
 			return MakeJSONObjectArray("subscriberDevices", Entries, *this);
 		}
 
