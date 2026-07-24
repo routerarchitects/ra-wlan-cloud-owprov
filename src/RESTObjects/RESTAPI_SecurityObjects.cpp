@@ -299,6 +299,7 @@ namespace OpenWifi::SecurityObjects {
 			field_from_json(Obj, "notes", notes);
 			field_from_json(Obj, "location", location);
 			field_from_json(Obj, "owner", owner);
+			field_from_json(Obj, "createdBy", createdBy);
 			field_from_json<USER_ROLE>(Obj, "userRole", userRole, UserTypeFromString);
 			field_from_json(Obj, "securityPolicy", securityPolicy);
 			field_from_json(Obj, "userTypeProprietaryInfo", userTypeProprietaryInfo);
