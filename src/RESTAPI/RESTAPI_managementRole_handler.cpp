@@ -94,7 +94,12 @@ namespace OpenWifi {
 	static bool AccessEntryGrants(const ProvObjects::ManagementPolicyEntry &entry, const std::string &resource, const std::string &accessRequired) {
 		bool ResourceMatches = false;
 		for (const auto &res : entry.resources) {
-			if (Poco::icompare(res, resource) == 0 || res == "*") {
+			if (Poco::icompare(res, resource) == 0 || res == "*" ||
+				Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0 ||
+				(Poco::icompare(res, "venue") == 0 && (resource == "venue" || resource == "device" || resource == "configuration" || resource == "variables" || resource == "map")) ||
+				(resource == "subscriberDevice" && Poco::icompare(res, "device") == 0) ||
+				(resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
+				(resource == "op_location" && Poco::icompare(res, "location") == 0)) {
 				ResourceMatches = true;
 				break;
 			}
@@ -106,8 +111,10 @@ namespace OpenWifi {
 		for (const auto &acc : entry.access) {
 			if (acc == "FULL" ||
 				acc == accessRequired ||
-				(accessRequired == "UPDATE" && acc == "MODIFY") ||
-				(accessRequired == "MODIFY" && acc == "UPDATE")) {
+				(accessRequired == "CREATE" && (acc == "MODIFY" || acc == "UPDATE" || acc == "READWRITE")) ||
+				(accessRequired == "UPDATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+				(accessRequired == "MODIFY" && (acc == "UPDATE" || acc == "READWRITE")) ||
+				(accessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY"))) {
 				return true;
 			}
 		}
