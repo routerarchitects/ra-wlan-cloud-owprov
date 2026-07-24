@@ -766,8 +766,8 @@ namespace OpenWifi {
 								   const std::string &CreatedVenueId,
 								   const std::string &ParentEntityId,
 								   const std::string &ParentVenueId);
-		void GetDescendantEntities(const std::string &id, std::set<std::string> &descendants);
-		void GetDescendantVenues(const std::string &id, std::set<std::string> &venues);
+		static void GetDescendantEntities(const std::string &id, std::set<std::string> &descendants);
+		static void GetDescendantVenues(const std::string &id, std::set<std::string> &venues);
 		std::string GetResourceName(const std::string &Path);
 
 	  protected:
