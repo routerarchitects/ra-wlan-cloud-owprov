@@ -153,22 +153,35 @@ namespace OpenWifi {
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
 		for (const auto &role : Roles) {
-			std::set<std::string> AllowedEntities;
-			if (!venueId.empty()) {
-				RESTAPIHandler::GetDescendantEntities(role.entity, AllowedEntities);
-			} else {
-				AllowedEntities.insert(role.entity);
-			}
-			if (AllowedEntities.find(entityId) != AllowedEntities.end() && (role.venue == venueId || role.venue.empty())) {
-				ProvObjects::ManagementPolicy Policy;
-				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
-					if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-						AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			if (role.entity == entityId) {
+				bool ScopeMatch = false;
+				if (!venueId.empty()) {
+					std::set<std::string> AllowedVenues;
+					if (!role.venue.empty()) {
+						RESTAPIHandler::GetDescendantVenues(role.venue, AllowedVenues);
 					} else {
-						continue;
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								RESTAPIHandler::GetDescendantVenues(vId, AllowedVenues);
+							}
+						}
 					}
+					ScopeMatch = (AllowedVenues.find(venueId) != AllowedVenues.end());
+				} else {
+					ScopeMatch = (role.venue.empty() || role.venue == "");
 				}
-				requesterPolicies.push_back(Policy);
+				if (ScopeMatch) {
+					ProvObjects::ManagementPolicy Policy;
+					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+							AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+						} else {
+							continue;
+						}
+					}
+					requesterPolicies.push_back(Policy);
+				}
 			}
 		}
 

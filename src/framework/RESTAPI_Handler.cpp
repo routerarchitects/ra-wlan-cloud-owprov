@@ -80,11 +80,22 @@ namespace OpenWifi {
 
 		if (!TargetVenue.empty()) {
 			for (const auto &role : Roles) {
-				std::set<std::string> AllowedEntities;
-				GetDescendantEntities(role.entity, AllowedEntities);
-				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue == TargetVenue || role.venue.empty())) {
-					if (CheckRolePolicy(role)) {
-						return true;
+				if (role.entity == TargetEntity) {
+					std::set<std::string> AllowedVenues;
+					if (!role.venue.empty()) {
+						GetDescendantVenues(role.venue, AllowedVenues);
+					} else {
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								GetDescendantVenues(vId, AllowedVenues);
+							}
+						}
+					}
+					if (AllowedVenues.find(TargetVenue) != AllowedVenues.end()) {
+						if (CheckRolePolicy(role)) {
+							return true;
+						}
 					}
 				}
 			}
