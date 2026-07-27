@@ -34,32 +34,28 @@ namespace OpenWifi {
 			}
 			return PolicyAllows(Policy, "venue", Poco::Net::HTTPRequest::HTTP_GET);
 		};
+		std::set<std::string> DeniedVenues;
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			for (const auto &role : Roles) {
-				if (!policyAllowsGet(role)) {
-					continue;
-				}
 				if (!role.venue.empty()) {
-					GetDescendantVenues(role.venue, VisibleVenues);
-				} else if (!role.entity.empty()) {
-					ProvObjects::Entity ent;
-					if (StorageService()->EntityDB().GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
-						for (const auto &vId : ent.venues) {
-							GetDescendantVenues(vId, VisibleVenues);
-						}
-						continue;
+					if (policyAllowsGet(role)) {
+						GetDescendantVenues(role.venue, VisibleVenues);
+					} else {
+						GetDescendantVenues(role.venue, DeniedVenues);
 					}
-					std::set<std::string> EntSet;
-					GetDescendantEntities(role.entity, EntSet);
-					for (const auto &entId : EntSet) {
+				} else if (!role.entity.empty()) {
+					if (policyAllowsGet(role)) {
 						ProvObjects::Entity EntRec;
-						if (StorageService()->EntityDB().GetRecord("id", entId, EntRec)) {
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
 							for (const auto &vId : EntRec.venues) {
 								GetDescendantVenues(vId, VisibleVenues);
 							}
 						}
 					}
 				}
+			}
+			for (const auto &vId : DeniedVenues) {
+				VisibleVenues.erase(vId);
 			}
 		}
 

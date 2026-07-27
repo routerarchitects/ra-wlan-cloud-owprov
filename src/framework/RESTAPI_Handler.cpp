@@ -79,17 +79,29 @@ namespace OpenWifi {
 		}
 
 		if (!TargetVenue.empty()) {
+			// 1. Specific Venue Role Check: Give priority to explicit venue roles
+			bool foundSpecificVenueRole = false;
 			for (const auto &role : Roles) {
-				if (role.entity == TargetEntity) {
+				if (role.venue == TargetVenue) {
+					foundSpecificVenueRole = true;
+					if (CheckRolePolicy(role)) {
+						return true;
+					}
+				}
+			}
+			if (foundSpecificVenueRole) {
+				Reason = "Specific venue role policy denied access.";
+				return false;
+			}
+
+			// 2. Entity-wide Role Fallback: Used only if no specific venue role exists
+			for (const auto &role : Roles) {
+				if (role.entity == TargetEntity && (role.venue.empty() || role.venue == "")) {
 					std::set<std::string> AllowedVenues;
-					if (!role.venue.empty()) {
-						GetDescendantVenues(role.venue, AllowedVenues);
-					} else {
-						ProvObjects::Entity EntRec;
-						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
-							for (const auto &vId : EntRec.venues) {
-								GetDescendantVenues(vId, AllowedVenues);
-							}
+					ProvObjects::Entity EntRec;
+					if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
+						for (const auto &vId : EntRec.venues) {
+							GetDescendantVenues(vId, AllowedVenues);
 						}
 					}
 					if (AllowedVenues.find(TargetVenue) != AllowedVenues.end()) {

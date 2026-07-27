@@ -152,26 +152,49 @@ namespace OpenWifi {
 		}
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
-		for (const auto &role : Roles) {
-			if (role.entity == entityId) {
-				bool ScopeMatch = false;
-				if (!venueId.empty()) {
-					std::set<std::string> AllowedVenues;
-					if (!role.venue.empty()) {
-						RESTAPIHandler::GetDescendantVenues(role.venue, AllowedVenues);
-					} else {
+		if (!venueId.empty()) {
+			bool foundSpecificVenueRole = false;
+			for (const auto &role : Roles) {
+				if (role.venue == venueId) {
+					foundSpecificVenueRole = true;
+					ProvObjects::ManagementPolicy Policy;
+					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+							AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+						} else {
+							continue;
+						}
+					}
+					requesterPolicies.push_back(Policy);
+				}
+			}
+			if (!foundSpecificVenueRole) {
+				for (const auto &role : Roles) {
+					if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+						std::set<std::string> AllowedVenues;
 						ProvObjects::Entity EntRec;
 						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
 							for (const auto &vId : EntRec.venues) {
 								RESTAPIHandler::GetDescendantVenues(vId, AllowedVenues);
 							}
 						}
+						if (AllowedVenues.find(venueId) != AllowedVenues.end()) {
+							ProvObjects::ManagementPolicy Policy;
+							if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+								if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+									AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+								} else {
+									continue;
+								}
+							}
+							requesterPolicies.push_back(Policy);
+						}
 					}
-					ScopeMatch = (AllowedVenues.find(venueId) != AllowedVenues.end());
-				} else {
-					ScopeMatch = (role.venue.empty() || role.venue == "");
 				}
-				if (ScopeMatch) {
+			}
+		} else {
+			for (const auto &role : Roles) {
+				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
 					ProvObjects::ManagementPolicy Policy;
 					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
 						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
