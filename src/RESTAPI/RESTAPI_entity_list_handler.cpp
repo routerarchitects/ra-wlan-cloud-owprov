@@ -62,11 +62,6 @@ namespace OpenWifi {
 				for (const auto &venueId : ent.venues) {
 					addVenueAndDescendants(venueId);
 				}
-				if (ent.operatorId.empty()) {
-					for (const auto &childId : ent.children) {
-						addEntityAndDescendants(childId);
-					}
-				}
 			}
 		};
 
