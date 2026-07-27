@@ -80,9 +80,7 @@ namespace OpenWifi {
 
 		if (!TargetVenue.empty()) {
 			for (const auto &role : Roles) {
-				std::set<std::string> AllowedEntities;
-				GetDescendantEntities(role.entity, AllowedEntities);
-				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue == TargetVenue || role.venue.empty())) {
+				if (role.entity == TargetEntity && (role.venue == TargetVenue || role.venue.empty())) {
 					if (CheckRolePolicy(role)) {
 						return true;
 					}
@@ -90,9 +88,7 @@ namespace OpenWifi {
 			}
 		} else {
 			for (const auto &role : Roles) {
-				std::set<std::string> AllowedEntities;
-				GetDescendantEntities(role.entity, AllowedEntities);
-				if (AllowedEntities.find(TargetEntity) != AllowedEntities.end() && (role.venue.empty() || role.venue == "")) {
+				if (role.entity == TargetEntity && (role.venue.empty() || role.venue == "")) {
 					if (CheckRolePolicy(role)) {
 						return true;
 					}

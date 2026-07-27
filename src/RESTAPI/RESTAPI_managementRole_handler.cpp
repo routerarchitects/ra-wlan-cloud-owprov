@@ -153,9 +153,7 @@ namespace OpenWifi {
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
 		for (const auto &role : Roles) {
-			std::set<std::string> AllowedEntities;
-			RESTAPIHandler::GetDescendantEntities(role.entity, AllowedEntities);
-			if (AllowedEntities.find(entityId) != AllowedEntities.end() && (role.venue == venueId || role.venue.empty())) {
+			if (role.entity == entityId && (role.venue == venueId || role.venue.empty())) {
 				ProvObjects::ManagementPolicy Policy;
 				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
 					if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
