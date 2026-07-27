@@ -168,10 +168,14 @@ namespace OpenWifi {
 						continue;
 					}
 					AllowedEntities.insert(role.entity);
-					ProvObjects::Entity EntRec;
-					if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
-						for (const auto &vId : EntRec.venues) {
-							GetDescendantVenues(vId, AllowedVenues);
+					std::set<std::string> EntSet;
+					GetDescendantEntities(role.entity, EntSet);
+					for (const auto &entId : EntSet) {
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", entId, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								GetDescendantVenues(vId, AllowedVenues);
+							}
 						}
 					}
 				}
