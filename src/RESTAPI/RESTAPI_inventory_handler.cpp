@@ -283,7 +283,7 @@ namespace OpenWifi {
 		}
 
 		std::vector<std::string> Errors;
-		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
+		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {
 			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
@@ -461,7 +461,7 @@ namespace OpenWifi {
 		}
 
 		std::vector<std::string> Errors;
-		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
+		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {
 			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
@@ -469,7 +469,7 @@ namespace OpenWifi {
 		if (!ObjectsCreated.empty()) {
 			auto it = ObjectsCreated.find("configuration");
 			if (it != ObjectsCreated.end()) {
-				FromConfiguration = "";
+				FromConfiguration = Existing.deviceConfiguration;
 				ToConfiguration = it->second;
 				Existing.deviceConfiguration = ToConfiguration;
 			}

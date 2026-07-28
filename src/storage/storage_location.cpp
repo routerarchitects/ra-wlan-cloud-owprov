@@ -34,7 +34,8 @@ namespace OpenWifi {
 										   ORM::Field{"inUse", ORM::FieldType::FT_TEXT},
 										   ORM::Field{"tags", ORM::FieldType::FT_TEXT},
 										   ORM::Field{"managementPolicy", ORM::FieldType::FT_TEXT},
-										   ORM::Field{"entity", ORM::FieldType::FT_TEXT}};
+										   ORM::Field{"entity", ORM::FieldType::FT_TEXT},
+										   ORM::Field{"timezone", ORM::FieldType::FT_TEXT}};
 
 	static ORM::IndexVec LocationDB_Indexes{
 		{std::string("location_name_index"),
@@ -42,6 +43,22 @@ namespace OpenWifi {
 
 	LocationDB::LocationDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L)
 		: DB(T, "locations", LocationDB_Fields, LocationDB_Indexes, P, L, "loc") {}
+
+	// Upgrades the locations table schema by adding the timezone column.
+	bool LocationDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
+		to = Version();
+		std::vector<std::string> Script{
+			"alter table " + TableName_ + " add column timezone text"};
+
+		for (const auto &i : Script) {
+			try {
+				auto Session = Pool_.get();
+				Session << i, Poco::Data::Keywords::now;
+			} catch (...) {
+			}
+		}
+		return true;
+	}
 
 } // namespace OpenWifi
 
@@ -69,6 +86,7 @@ void ORM::DB<OpenWifi::LocationDBRecordType, OpenWifi::ProvObjects::Location>::C
 	Out.info.tags = OpenWifi::RESTAPI_utils::to_taglist(In.get<17>());
 	Out.managementPolicy = In.get<18>();
 	Out.entity = In.get<19>();
+	Out.timezone = In.get<20>();
 }
 
 template <>
@@ -94,4 +112,5 @@ void ORM::DB<OpenWifi::LocationDBRecordType, OpenWifi::ProvObjects::Location>::C
 	Out.set<17>(OpenWifi::RESTAPI_utils::to_string(In.info.tags));
 	Out.set<18>(In.managementPolicy);
 	Out.set<19>(In.entity);
+	Out.set<20>(In.timezone);
 }

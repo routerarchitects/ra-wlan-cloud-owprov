@@ -198,9 +198,9 @@ namespace OpenWifi {
 
 		RESTAPI::Errors::msg Error = RESTAPI::Errors::SUCCESS;
 		std::vector<std::string> Errors;
-		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
-		if (Error.err_num != 0) {
-			return BadRequest(RESTAPI::Errors::InternalError);
+		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
+		if (!Errors.empty()) {
+			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
@@ -499,19 +499,17 @@ namespace OpenWifi {
 		NewObject.entity = Existing.entity;
 
 		std::vector<std::string> Errors;
-		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
+		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {
 			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
 
 		if (!ObjectsCreated.empty()) {
-			if (!ObjectsCreated.empty()) {
-				auto it = ObjectsCreated.find("location");
-				if (it != ObjectsCreated.end()) {
-					MoveFromLocation = "";
-					MoveToLocation = it->second;
-					Existing.location = MoveToLocation;
-				}
+			auto it = ObjectsCreated.find("location");
+			if (it != ObjectsCreated.end()) {
+				MoveFromLocation = Existing.location;
+				MoveToLocation = it->second;
+				Existing.location = MoveToLocation;
 			}
 		}
 

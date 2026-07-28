@@ -506,82 +506,89 @@ namespace OpenWifi {
 
 	template <typename Type>
 	std::map<std::string, std::string> CreateObjects(Type &NewObject, RESTAPIHandler &R,
+													 const Poco::JSON::Object::Ptr &RawObject,
 													 std::vector<std::string> &Errors) {
 		std::map<std::string, std::string> Result;
 
-		auto createObjects = R.GetParameter("createObjects", "");
-		if (!createObjects.empty()) {
-			Poco::JSON::Parser P;
-			auto Objects = P.parse(createObjects).extract<Poco::JSON::Object::Ptr>();
-			if (Objects->isArray("objects")) {
-				auto ObjectsArray = Objects->getArray("objects");
-				for (const auto &i : *ObjectsArray) {
-					auto Object = i.extract<Poco::JSON::Object::Ptr>();
-					if (Object->has("location")) {
-						auto LocationDetails =
-							Object->get("location").extract<Poco::JSON::Object::Ptr>();
-						ProvObjects::Location LC;
-						if (LC.from_json(LocationDetails)) {
-							if constexpr (std::is_same_v<Type, ProvObjects::Venue>) {
-								std::string ParentEntity = FindParentEntity(NewObject);
-								ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, LC.info);
-								LC.entity = ParentEntity;
-								if (StorageService()->LocationDB().CreateRecord(LC)) {
-									NewObject.location = LC.info.id;
-									AddMembership(StorageService()->EntityDB(),
-												  &ProvObjects::Entity::locations, ParentEntity,
-												  LC.info.id);
-									Result["location"] = LC.info.id;
-								}
+		// Reject createObjects passed as a URL query parameter
+		std::string queryParamValue;
+		if (R.HasParameter("createObjects", queryParamValue)) {
+			Errors.push_back("createObjects must be provided in the request body, not as a URL query parameter");
+			return Result;
+		}
+
+		// Read createObjects from the JSON request body
+		if (RawObject && RawObject->has("createObjects")) {
+			if (!RawObject->isObject("createObjects")) {
+				Errors.push_back("Invalid JSON document: createObjects must be a JSON object");
+				return Result;
+			}
+			auto Objects = RawObject->getObject("createObjects");
+			if (!Objects->isArray("objects")) {
+				Errors.push_back("Invalid JSON document: createObjects must contain an objects array");
+				return Result;
+			}
+			auto ObjectsArray = Objects->getArray("objects");
+			for (const auto &i : *ObjectsArray) {
+				auto Object = i.extract<Poco::JSON::Object::Ptr>();
+				if (Object->has("location")) {
+					auto LocationDetails = Object->get("location").extract<Poco::JSON::Object::Ptr>();
+					ProvObjects::Location LC;
+					if (LC.from_json(LocationDetails)) {
+						if constexpr (std::is_same_v<Type, ProvObjects::Venue>) {
+							std::string ParentEntity = FindParentEntity(NewObject);
+							ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, LC.info);
+							LC.entity = ParentEntity;
+							if (StorageService()->LocationDB().CreateRecord(LC)) {
+								NewObject.location = LC.info.id;
+								AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::locations, ParentEntity, LC.info.id);
+								Result["location"] = LC.info.id;
 							}
-							if constexpr (std::is_same_v<Type, ProvObjects::Operator>) {
-								std::string ParentEntity = FindParentEntity(NewObject);
-								ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, LC.info);
-								LC.entity = ParentEntity;
-								if (StorageService()->LocationDB().CreateRecord(LC)) {
-									NewObject.location = LC.info.id;
-									AddMembership(StorageService()->EntityDB(),
-												  &ProvObjects::Entity::locations, ParentEntity,
-												  LC.info.id);
-									Result["location"] = LC.info.id;
-								}
+						}
+						if constexpr (std::is_same_v<Type, ProvObjects::Operator>) {
+							std::string ParentEntity = FindParentEntity(NewObject);
+							ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, LC.info);
+							LC.entity = ParentEntity;
+							if (StorageService()->LocationDB().CreateRecord(LC)) {
+								NewObject.location = LC.info.id;
+								AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::locations, ParentEntity, LC.info.id);
+								Result["location"] = LC.info.id;
 							}
-						} else {
-							Errors.push_back("Invalid JSON document");
-							break;
 						}
-					} else if (Object->has("contact")) {
-						auto ContactDetails =
-							Object->get("contact").extract<Poco::JSON::Object::Ptr>();
-						ProvObjects::Contact CC;
-						if (CC.from_json(ContactDetails)) {
-							std::cout << "contact decoded: " << CC.info.name << std::endl;
-						} else {
-							std::cout << "contact not decoded." << std::endl;
-						}
-					} else if (Object->has("configuration")) {
-						auto ConfigurationDetails =
-							Object->get("configuration")
-								.template extract<Poco::JSON::Object::Ptr>();
-						ProvObjects::DeviceConfiguration DC;
-						if (DC.from_json(ConfigurationDetails)) {
-							if constexpr (std::is_same_v<Type, ProvObjects::InventoryTag>) {
-								auto ValidationType =
-									ConfigurationValidator::GetType(NewObject.platform);
-								if (!ValidateConfigBlock(ValidationType, DC, Errors)) {
-									break;
-								}
-								ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, DC.info);
-								if (StorageService()->ConfigurationDB().CreateRecord(DC)) {
-									NewObject.deviceConfiguration = DC.info.id;
-									Result["configuration"] = DC.info.id;
-								}
-							}
-						} else {
-							Errors.push_back("Invalid JSON document");
-							break;
-						}
+					} else {
+						Errors.push_back("Invalid JSON document");
+						break;
 					}
+				} else if (Object->has("contact")) {
+					auto ContactDetails = Object->get("contact").extract<Poco::JSON::Object::Ptr>();
+					ProvObjects::Contact CC;
+					if (CC.from_json(ContactDetails)) {
+						std::cout << "contact decoded: " << CC.info.name << std::endl;
+					} else {
+						std::cout << "contact not decoded." << std::endl;
+					}
+				} else if (Object->has("configuration")) {
+					auto ConfigurationDetails = Object->get("configuration").template extract<Poco::JSON::Object::Ptr>();
+					ProvObjects::DeviceConfiguration DC;
+					if (DC.from_json(ConfigurationDetails)) {
+						if constexpr (std::is_same_v<Type, ProvObjects::InventoryTag>) {
+							auto ValidationType = ConfigurationValidator::GetType(NewObject.platform);
+							if (!ValidateConfigBlock(ValidationType, DC, Errors)) {
+								break;
+							}
+							ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, DC.info);
+							if (StorageService()->ConfigurationDB().CreateRecord(DC)) {
+								NewObject.deviceConfiguration = DC.info.id;
+								Result["configuration"] = DC.info.id;
+							}
+						}
+					} else {
+						Errors.push_back("Invalid JSON document");
+						break;
+					}
+				} else {
+					Errors.push_back("Invalid JSON document");
+					break;
 				}
 			}
 		}

@@ -148,6 +148,7 @@ namespace OpenWifi {
 		AssignIfPresent(RawObject, "postal", Existing.postal);
 		AssignIfPresent(RawObject, "country", Existing.country);
 		AssignIfPresent(RawObject, "geoCode", Existing.geoCode);
+		AssignIfPresent(RawObject, "timezone", Existing.timezone);
 		if (RawObject->has("addressLines"))
 			Existing.addressLines = NewObject.addressLines;
 		if (RawObject->has("phones"))

@@ -475,6 +475,10 @@ components:
           format: uuid
         geoCode:
           type: string
+        timezone:
+          type: string
+          description: IANA Timezone identifier string
+          example: Asia/Kolkata
 
     LocationList:
       type: object

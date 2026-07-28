@@ -335,6 +335,7 @@ namespace OpenWifi::ProvObjects {
 		field_to_json(Obj, "inUse", inUse);
 		field_to_json(Obj, "entity", entity);
 		field_to_json(Obj, "managementPolicy", managementPolicy);
+		field_to_json(Obj, "timezone", timezone);
 	}
 
 	bool Location::from_json(const Poco::JSON::Object::Ptr &Obj) {
@@ -355,6 +356,7 @@ namespace OpenWifi::ProvObjects {
 			field_from_json(Obj, "inUse", inUse);
 			field_from_json(Obj, "entity", entity);
 			field_from_json(Obj, "managementPolicy", managementPolicy);
+			field_from_json(Obj, "timezone", timezone);
 			return true;
 		} catch (...) {
 		}
