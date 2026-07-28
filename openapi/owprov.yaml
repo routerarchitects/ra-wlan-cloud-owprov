@@ -368,6 +368,22 @@ components:
           items:
             type: string
             format: uuid
+        createObjects:
+          $ref: '#/components/schemas/CreateObjects'
+
+    CreateObjects:
+      type: object
+      description: Inline objects to create and automatically link during parent object creation or modification
+      properties:
+        objects:
+          type: array
+          items:
+            type: object
+            properties:
+              location:
+                $ref: '#/components/schemas/Location'
+              configuration:
+                $ref: '#/components/schemas/DeviceConfiguration'
 
     VenueList:
       type: object
@@ -863,6 +879,8 @@ components:
           enum:
             - AP
             - SWITCH
+        createObjects:
+          $ref: '#/components/schemas/CreateObjects'
 
     VenueDeviceList:
       type: object
@@ -2675,24 +2693,6 @@ paths:
             type: string
             format: uuid
           required: true
-        - in: query
-          name: createObjects
-          schema:
-            type: object
-            properties:
-              objects:
-                type: array
-                items:
-                  oneOf:
-                    - type: object
-                      properties:
-                        location:
-                          $ref: '#/components/schemas/Location'
-                    - type: object
-                      properties:
-                        contact:
-                          $ref: '#/components/schemas/Contact'
-          required: false
       requestBody:
         description: Information used to create the new venue
         content:
