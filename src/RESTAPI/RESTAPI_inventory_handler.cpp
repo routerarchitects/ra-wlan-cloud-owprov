@@ -290,7 +290,7 @@ namespace OpenWifi {
 					return BadRequest(RESTAPI::Errors::InvalidTimezone);
 				}
 			}
-			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
+			return BadRequest(RESTAPI::Errors::InvalidCreateObjectsRequest, Errors[0]);
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
@@ -473,7 +473,7 @@ namespace OpenWifi {
 					return BadRequest(RESTAPI::Errors::InvalidTimezone);
 				}
 			}
-			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
+			return BadRequest(RESTAPI::Errors::InvalidCreateObjectsRequest, Errors[0]);
 		}
 
 		if (!ObjectsCreated.empty()) {
