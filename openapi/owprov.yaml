@@ -396,6 +396,8 @@ components:
             properties:
               location:
                 $ref: '#/components/schemas/Location'
+              contact:
+                $ref: '#/components/schemas/Contact'
               configuration:
                 $ref: '#/components/schemas/DeviceConfiguration'
 
