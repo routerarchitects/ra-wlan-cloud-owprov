@@ -78,9 +78,23 @@ namespace OpenWifi {
 		}
 
 		const auto &Obj = ParsedBody_;
+		if (Obj->has("timezone")) {
+			if (!Obj->get("timezone").isString()) {
+				return BadRequest(RESTAPI::Errors::InvalidTimezone);
+			}
+			auto Timezone = Poco::trim(Obj->get("timezone").toString());
+			if (!Utils::ValidTimeZone(Timezone)) {
+				return BadRequest(RESTAPI::Errors::InvalidTimezone);
+			}
+		}
+
 		ProvObjects::Location NewObject;
 		if (!NewObject.from_json(Obj)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		if (Obj->has("timezone")) {
+			NewObject.timezone = Poco::trim(Obj->get("timezone").toString());
 		}
 
 		if (!ProvObjects::CreateObjectInfo(Obj, UserInfo_.userinfo, NewObject.info)) {
@@ -123,9 +137,23 @@ namespace OpenWifi {
 		}
 
 		const auto &RawObject = ParsedBody_;
+		if (RawObject->has("timezone")) {
+			if (!RawObject->get("timezone").isString()) {
+				return BadRequest(RESTAPI::Errors::InvalidTimezone);
+			}
+			auto Timezone = Poco::trim(RawObject->get("timezone").toString());
+			if (!Utils::ValidTimeZone(Timezone)) {
+				return BadRequest(RESTAPI::Errors::InvalidTimezone);
+			}
+		}
+
 		ProvObjects::Location NewObject;
 		if (!NewObject.from_json(RawObject)) {
 			return BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+		}
+
+		if (RawObject->has("timezone")) {
+			Existing.timezone = Poco::trim(RawObject->get("timezone").toString());
 		}
 
 		if (!UpdateObjectInfo(RawObject, UserInfo_.userinfo, Existing.info)) {
@@ -148,7 +176,6 @@ namespace OpenWifi {
 		AssignIfPresent(RawObject, "postal", Existing.postal);
 		AssignIfPresent(RawObject, "country", Existing.country);
 		AssignIfPresent(RawObject, "geoCode", Existing.geoCode);
-		AssignIfPresent(RawObject, "timezone", Existing.timezone);
 		if (RawObject->has("addressLines"))
 			Existing.addressLines = NewObject.addressLines;
 		if (RawObject->has("phones"))

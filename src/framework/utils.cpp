@@ -13,6 +13,8 @@
 #include <ctime>
 #include <string>
 #include <algorithm>
+#include <set>
+#include <vector>
 
 #include <resolv.h>
 
@@ -605,6 +607,65 @@ namespace OpenWifi::Utils {
 		try {
 			Poco::URI u(uri);
 			return true;
+		} catch (...) {
+		}
+		return false;
+	}
+
+	[[nodiscard]] bool ValidTimeZone(const std::string &timezone) {
+		if (timezone.empty() || timezone.size() > 100)
+			return false;
+		if (timezone.find("..") != std::string::npos || timezone.front() == '/')
+			return false;
+
+		if (timezone == "UTC" || timezone == "GMT" || timezone == "Etc/UTC" || timezone == "Etc/GMT")
+			return true;
+
+		static const std::set<std::string> BlacklistedNames{
+			"localtime", "Factory", "posixrules", "zone.tab", "zone1970.tab",
+			"zonenow.tab", "iso3166.tab", "tzdata.zi", "leapseconds", "leap-seconds.list"
+		};
+		if (BlacklistedNames.find(timezone) != BlacklistedNames.end()) {
+			return false;
+		}
+
+		std::string lowerTz = Poco::toLower(timezone);
+		if (lowerTz.rfind("posix/", 0) == 0 ||
+			lowerTz.rfind("right/", 0) == 0 ||
+			lowerTz.rfind("systemv/", 0) == 0) {
+			return false;
+		}
+
+		if (timezone.find('/') != std::string::npos) {
+			static const std::vector<std::string> ValidPrefixes{
+				"Africa/", "America/", "Antarctica/", "Arctic/", "Asia/", "Atlantic/",
+				"Australia/", "Europe/", "Indian/", "Pacific/", "Etc/", "US/", "Canada/",
+				"Brazil/", "Chile/", "Mexico/"
+			};
+
+			bool hasValidPrefix = false;
+			for (const auto &prefix : ValidPrefixes) {
+				if (timezone.rfind(prefix, 0) == 0) {
+					hasValidPrefix = true;
+					break;
+				}
+			}
+
+			if (!hasValidPrefix) {
+				return false;
+			}
+		}
+
+		try {
+			Poco::File ZoneInfoRoot("/usr/share/zoneinfo");
+			if (!ZoneInfoRoot.exists() || !ZoneInfoRoot.isDirectory()) {
+				return false;
+			}
+
+			Poco::File F("/usr/share/zoneinfo/" + timezone);
+			if (F.exists() && (F.isFile() || F.isLink())) {
+				return true;
+			}
 		} catch (...) {
 		}
 		return false;

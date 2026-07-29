@@ -529,10 +529,64 @@ namespace OpenWifi {
 				return Result;
 			}
 			auto ObjectsArray = Objects->getArray("objects");
-			for (const auto &i : *ObjectsArray) {
-				auto Object = i.extract<Poco::JSON::Object::Ptr>();
+
+			// Phase 1: Pre-validation scan
+			for (std::size_t i = 0; i < ObjectsArray->size(); ++i) {
+				if (!ObjectsArray->isObject(i)) {
+					Errors.push_back("Invalid JSON document: items in createObjects.objects must be JSON objects");
+					return Result;
+				}
+				auto Object = ObjectsArray->getObject(i);
+
+				if (Object->has("contact")) {
+					if (!Object->isObject("contact")) {
+						Errors.push_back("Invalid JSON document: contact in createObjects must be a JSON object");
+						return Result;
+					}
+				}
+
 				if (Object->has("location")) {
-					auto LocationDetails = Object->get("location").extract<Poco::JSON::Object::Ptr>();
+					if (!Object->isObject("location")) {
+						Errors.push_back("Invalid JSON document: location in createObjects must be a JSON object");
+						return Result;
+					}
+					if (RawObject->has("location")) {
+						Errors.push_back("Cannot specify both location and createObjects.location");
+						return Result;
+					}
+					auto LocationObj = Object->getObject("location");
+					if (LocationObj->has("timezone")) {
+						if (!LocationObj->get("timezone").isString()) {
+							Errors.push_back("Invalid timezone identifier in createObjects.location");
+							return Result;
+						}
+						auto Timezone = Poco::trim(LocationObj->get("timezone").toString());
+						if (!Utils::ValidTimeZone(Timezone)) {
+							Errors.push_back("Invalid timezone identifier in createObjects.location");
+							return Result;
+						}
+						LocationObj->set("timezone", Timezone);
+					}
+				}
+
+				if (Object->has("configuration")) {
+					if (!Object->isObject("configuration")) {
+						Errors.push_back("Invalid JSON document: configuration in createObjects must be a JSON object");
+						return Result;
+					}
+				}
+
+				if (!Object->has("location") && !Object->has("configuration") && !Object->has("contact")) {
+					Errors.push_back("Invalid JSON document: item in createObjects.objects must contain location or configuration or contact");
+					return Result;
+				}
+			}
+
+			// Phase 2: Object Creation & Persistence
+			for (std::size_t i = 0; i < ObjectsArray->size(); ++i) {
+				auto Object = ObjectsArray->getObject(i);
+				if (Object->has("location")) {
+					auto LocationDetails = Object->getObject("location");
 					ProvObjects::Location LC;
 					if (LC.from_json(LocationDetails)) {
 						if constexpr (std::is_same_v<Type, ProvObjects::Venue>) {
@@ -544,8 +598,7 @@ namespace OpenWifi {
 								AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::locations, ParentEntity, LC.info.id);
 								Result["location"] = LC.info.id;
 							}
-						}
-						if constexpr (std::is_same_v<Type, ProvObjects::Operator>) {
+						} else if constexpr (std::is_same_v<Type, ProvObjects::Operator>) {
 							std::string ParentEntity = FindParentEntity(NewObject);
 							ProvObjects::CreateObjectInfo(R.UserInfo_.userinfo, LC.info);
 							LC.entity = ParentEntity;
@@ -560,7 +613,7 @@ namespace OpenWifi {
 						break;
 					}
 				} else if (Object->has("contact")) {
-					auto ContactDetails = Object->get("contact").extract<Poco::JSON::Object::Ptr>();
+					auto ContactDetails = Object->getObject("contact");
 					ProvObjects::Contact CC;
 					if (CC.from_json(ContactDetails)) {
 						std::cout << "contact decoded: " << CC.info.name << std::endl;
@@ -568,7 +621,7 @@ namespace OpenWifi {
 						std::cout << "contact not decoded." << std::endl;
 					}
 				} else if (Object->has("configuration")) {
-					auto ConfigurationDetails = Object->get("configuration").template extract<Poco::JSON::Object::Ptr>();
+					auto ConfigurationDetails = Object->getObject("configuration");
 					ProvObjects::DeviceConfiguration DC;
 					if (DC.from_json(ConfigurationDetails)) {
 						if constexpr (std::is_same_v<Type, ProvObjects::InventoryTag>) {
@@ -586,9 +639,6 @@ namespace OpenWifi {
 						Errors.push_back("Invalid JSON document");
 						break;
 					}
-				} else {
-					Errors.push_back("Invalid JSON document");
-					break;
 				}
 			}
 		}

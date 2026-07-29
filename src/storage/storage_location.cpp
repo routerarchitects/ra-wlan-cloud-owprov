@@ -47,17 +47,52 @@ namespace OpenWifi {
 	// Upgrades the locations table schema by adding the timezone column.
 	bool LocationDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
 		to = Version();
-		std::vector<std::string> Script{
-			"alter table " + TableName_ + " add column timezone text"};
 
-		for (const auto &i : Script) {
-			try {
-				auto Session = Pool_.get();
-				Session << i, Poco::Data::Keywords::now;
-			} catch (...) {
-			}
+		std::string CheckQuery;
+		if (Type_ == OpenWifi::DBType::sqlite) {
+			CheckQuery = "select count(*) from pragma_table_info('" + TableName_ + "') where lower(name) = 'timezone'";
+		} else if (Type_ == OpenWifi::DBType::pgsql) {
+			CheckQuery = "select count(*) from information_schema.columns where lower(table_name) = '" + Poco::toLower(TableName_) + "' and lower(column_name) = 'timezone' and table_schema = current_schema()";
+		} else {
+			CheckQuery = "select count(*) from information_schema.columns where lower(table_name) = '" + Poco::toLower(TableName_) + "' and lower(column_name) = 'timezone' and table_schema = database()";
 		}
-		return true;
+
+		std::size_t count = 0;
+		try {
+			auto Session = Pool_.get();
+			Session << CheckQuery, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
+		} catch (const Poco::Exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade schema pre-check failed on table {}: {}", TableName_, E.displayText()));
+			return false;
+		} catch (const std::exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade schema pre-check failed on table {}: {}", TableName_, E.what()));
+			return false;
+		} catch (...) {
+			Logger().error(fmt::format("LocationDB::Upgrade schema pre-check failed on table {}: unknown exception", TableName_));
+			return false;
+		}
+
+		if (count > 0) {
+			Logger().information(fmt::format("LocationDB::Upgrade: Column 'timezone' already exists in table {}", TableName_));
+			return true;
+		}
+
+		try {
+			auto Session = Pool_.get();
+			std::string Query = "alter table " + TableName_ + " add column timezone text";
+			Session << Query, Poco::Data::Keywords::now;
+			Logger().information(fmt::format("LocationDB::Upgrade: Successfully added column 'timezone' to table {}", TableName_));
+			return true;
+		} catch (const Poco::Exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade failed on table {}: {}", TableName_, E.displayText()));
+			return false;
+		} catch (const std::exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade failed on table {}: {}", TableName_, E.what()));
+			return false;
+		} catch (...) {
+			Logger().error(fmt::format("LocationDB::Upgrade failed on table {}: unknown exception", TableName_));
+			return false;
+		}
 	}
 
 } // namespace OpenWifi

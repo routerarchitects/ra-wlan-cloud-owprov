@@ -368,8 +368,22 @@ components:
           items:
             type: string
             format: uuid
-        createObjects:
-          $ref: '#/components/schemas/CreateObjects'
+
+    VenueCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Venue'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/CreateObjects'
+
+    VenueUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Venue'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/CreateObjects'
 
     CreateObjects:
       type: object
@@ -879,8 +893,22 @@ components:
           enum:
             - AP
             - SWITCH
-        createObjects:
-          $ref: '#/components/schemas/CreateObjects'
+
+    InventoryCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/InventoryTag'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/CreateObjects'
+
+    InventoryUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/InventoryTag'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/CreateObjects'
 
     VenueDeviceList:
       type: object
@@ -2417,7 +2445,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/InventoryTag'
+              $ref: '#/components/schemas/InventoryCreateRequest'
       responses:
         200:
           $ref: '#/components/schemas/InventoryTag'
@@ -2451,7 +2479,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/InventoryTag'
+              $ref: '#/components/schemas/InventoryUpdateRequest'
 
       responses:
         200:
@@ -2698,7 +2726,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Venue'
+              $ref: '#/components/schemas/VenueCreateRequest'
 
       responses:
         200:
@@ -2759,7 +2787,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Venue'
+              $ref: '#/components/schemas/VenueUpdateRequest'
 
       responses:
         200:

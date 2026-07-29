@@ -438,6 +438,9 @@ namespace OpenWifi::RESTAPI::Errors {
 	static const struct msg InvalidSubscriberDeviceGroup {
 		1193, "Invalid deviceGroup. Must be either 'olg' or 'ap'."
 	};
+	static const struct msg InvalidTimezone {
+		1200, "Invalid or unknown IANA timezone identifier."
+	};
 	static const struct msg FirstSubscriberDeviceMustBeOLG {
 		1194, "First subscriber device must have deviceGroup 'olg'."
 	};

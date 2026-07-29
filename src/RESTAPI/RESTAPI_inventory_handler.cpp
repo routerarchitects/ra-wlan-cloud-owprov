@@ -285,6 +285,11 @@ namespace OpenWifi {
 		std::vector<std::string> Errors;
 		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {
+			for (const auto &err : Errors) {
+				if (err.find("timezone") != std::string::npos || err.find("Timezone") != std::string::npos) {
+					return BadRequest(RESTAPI::Errors::InvalidTimezone);
+				}
+			}
 			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
 
@@ -463,6 +468,11 @@ namespace OpenWifi {
 		std::vector<std::string> Errors;
 		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {
+			for (const auto &err : Errors) {
+				if (err.find("timezone") != std::string::npos || err.find("Timezone") != std::string::npos) {
+					return BadRequest(RESTAPI::Errors::InvalidTimezone);
+				}
+			}
 			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
 		}
 
