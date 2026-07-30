@@ -196,7 +196,6 @@ namespace OpenWifi {
 
 		NewObject.children.clear();
 
-		RESTAPI::Errors::msg Error = RESTAPI::Errors::SUCCESS;
 		std::vector<std::string> Errors;
 		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {

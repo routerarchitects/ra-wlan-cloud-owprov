@@ -563,6 +563,17 @@ namespace OpenWifi {
 						return Result;
 					}
 					auto LocationObj = Object->getObject("location");
+					if (LocationObj->has("name")) {
+						if (!LocationObj->get("name").isString()) {
+							Errors.push_back("Invalid name in createObjects.location");
+							return Result;
+						}
+						std::string locationName = Poco::trim(LocationObj->get("name").toString());
+						if (!locationName.empty() && StorageService()->LocationDB().Exists("name", locationName)) {
+							Errors.push_back("Location name already exists");
+							return Result;
+						}
+					}
 					if (LocationObj->has("timezone")) {
 						if (!LocationObj->get("timezone").isString()) {
 							Errors.push_back("Invalid timezone identifier in createObjects.location");

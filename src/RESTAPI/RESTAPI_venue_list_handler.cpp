@@ -8,6 +8,14 @@
 
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
+        auto subscriberId = GetParameter("subscriberId", "");
+        if (!subscriberId.empty()) {
+            VenueDB::RecordVec Venues;
+            auto Where = fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId));
+            DB_.GetRecords(QB_.Offset, QB_.Limit, Venues, Where, " ORDER BY name ");
+            return ReturnObject("venues", Venues);
+        }
+
         auto RRMvendor = GetParameter("RRMvendor","");
         if(RRMvendor.empty()) {
             return ListHandler<VenueDB>("venues", DB_, *this);
