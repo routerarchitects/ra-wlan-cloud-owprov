@@ -444,20 +444,36 @@ namespace OpenWifi {
 			}
 		}
 
+		if (RawObject->has("entity")) {
+			std::string RequestedEntity = RawObject->get("entity").toString();
+			if (RequestedEntity != Existing.entity) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+					"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
+			}
+		}
+
+		if (RawObject->has("venue")) {
+			std::string RequestedVenue = RawObject->get("venue").toString();
+			if (RequestedVenue != Existing.venue) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+					"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
+			}
+		}
+
+		if (RawObject->has("users")) {
+			if (NewObject.users != Existing.users) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+					"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
+			}
+		}
+
 		std::string EffectivePolicyUUID = Existing.managementPolicy;
 		if (RawObject->has("managementPolicy")) {
 			EffectivePolicyUUID = RawObject->get("managementPolicy").toString();
 		}
 
 		std::string EffectiveEntity = Existing.entity;
-		if (RawObject->has("entity")) {
-			EffectiveEntity = RawObject->get("entity").toString();
-		}
-
 		std::string EffectiveVenue = Existing.venue;
-		if (RawObject->has("venue")) {
-			EffectiveVenue = RawObject->get("venue").toString();
-		}
 
 		ProvObjects::ManagementPolicy TargetPolicy;
 		if (!EffectivePolicyUUID.empty()) {
