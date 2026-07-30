@@ -530,6 +530,10 @@ namespace OpenWifi {
 				return Result;
 			}
 			auto ObjectsArray = Objects->getArray("objects");
+			if (ObjectsArray->size() != 1) {
+				Errors.push_back("Invalid JSON document: createObjects.objects array must contain exactly one item");
+				return Result;
+			}
 
 			// Phase 1: Pre-validation scan
 			for (std::size_t i = 0; i < ObjectsArray->size(); ++i) {
