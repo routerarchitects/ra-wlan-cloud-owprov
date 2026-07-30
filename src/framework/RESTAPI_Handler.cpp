@@ -327,6 +327,13 @@ namespace OpenWifi {
 				CandidateVenue = value;
 			else if (name == "operatorId" || name == "operator" || name == "registrationId")
 				CandidateOperator = value;
+			else if (name == "subscriberId" || name == "signupUUID") {
+				ProvObjects::SignupEntry SE;
+				if (StorageService()->SignupDB().GetRecord("userid", value, SE) ||
+					StorageService()->SignupDB().GetRecord("id", value, SE)) {
+					CandidateOperator = SE.operatorId;
+				}
+			}
 		}
 
 		// ----------------------------------------------------------------
