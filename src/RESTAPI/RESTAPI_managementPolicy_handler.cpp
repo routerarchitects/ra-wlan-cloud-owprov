@@ -99,6 +99,15 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
 		}
 
+		for (auto &entry : NewObject.entries) {
+			for (const auto &acc : entry.access) {
+				if (Poco::icompare(acc, "FULL") == 0) {
+					entry.access = {"FULL"};
+					break;
+				}
+			}
+		}
+
 		NewObject.inUse.clear();
 		if (DB_.CreateRecord(NewObject)) {
 			AuthCache::GetInstance()->Clear();
@@ -150,6 +159,14 @@ namespace OpenWifi {
 
 		if (RawObject->has("entries")) {
 			Existing.entries = NewPolicy.entries;
+			for (auto &entry : Existing.entries) {
+				for (const auto &acc : entry.access) {
+					if (Poco::icompare(acc, "FULL") == 0) {
+						entry.access = {"FULL"};
+						break;
+					}
+				}
+			}
 		}
 
 		if (DB_.UpdateRecord("id", Existing.info.id, Existing)) {
