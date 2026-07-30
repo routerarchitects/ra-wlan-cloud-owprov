@@ -528,7 +528,7 @@ namespace OpenWifi {
 					((Resource == "managementRole" || Resource == "managementPolicy") &&
 					 (Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
-					(Resource == "subscriberDevice" && (Poco::icompare(res, "inventory") == 0 || Poco::icompare(res, "subscriber") == 0)) ||
+					(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
 					(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
 					(Resource == "op_location" && Poco::icompare(res, "location") == 0)) {
 					ResourceMatches = true;
