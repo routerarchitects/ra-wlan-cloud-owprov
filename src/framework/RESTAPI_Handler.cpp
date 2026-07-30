@@ -458,7 +458,7 @@ namespace OpenWifi {
 		// not.
 		bool IsScoped =
 			(Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
-			 Resource == "device" || Resource == "configuration" || Resource == "managementRole" ||
+			 Resource == "configuration" || Resource == "managementRole" ||
 			 Resource == "contact" || Resource == "location" || Resource == "managementPolicy" ||
 			 Resource == "map" || Resource == "variables" || Resource == "serviceClass" ||
 			 Resource == "operator" || Resource == "overrides" || Resource == "subscriber" ||
@@ -528,7 +528,7 @@ namespace OpenWifi {
 					((Resource == "managementRole" || Resource == "managementPolicy") &&
 					 (Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
-					(Resource == "subscriberDevice" && Poco::icompare(res, "device") == 0) ||
+					(Resource == "subscriberDevice" && (Poco::icompare(res, "inventory") == 0 || Poco::icompare(res, "subscriber") == 0)) ||
 					(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
 					(Resource == "op_location" && Poco::icompare(res, "location") == 0)) {
 					ResourceMatches = true;
@@ -681,7 +681,7 @@ namespace OpenWifi {
 			return "inventory";
 		if (Path.find("/api/v1/subscriberDevice") != std::string::npos ||
 			Path.find("/api/v1/sub_devices") != std::string::npos)
-			return "device";
+			return "subscriberDevice";
 		if (Path.find("/api/v1/subscriber") != std::string::npos)
 			return "subscriber";
 		if (Path.find("/api/v1/configuration") != std::string::npos)

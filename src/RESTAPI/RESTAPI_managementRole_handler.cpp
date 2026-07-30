@@ -96,8 +96,8 @@ namespace OpenWifi {
 		for (const auto &res : entry.resources) {
 			if (Poco::icompare(res, resource) == 0 || res == "*" ||
 				Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0 ||
-				(Poco::icompare(res, "venue") == 0 && (resource == "venue" || resource == "device" || resource == "configuration" || resource == "variables" || resource == "map")) ||
-				(resource == "subscriberDevice" && Poco::icompare(res, "device") == 0) ||
+				(Poco::icompare(res, "venue") == 0 && (resource == "venue" || resource == "inventory" || resource == "configuration" || resource == "variables" || resource == "map")) ||
+				(resource == "subscriberDevice" && (Poco::icompare(res, "inventory") == 0 || Poco::icompare(res, "subscriber") == 0)) ||
 				(resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
 				(resource == "op_location" && Poco::icompare(res, "location") == 0)) {
 				ResourceMatches = true;
