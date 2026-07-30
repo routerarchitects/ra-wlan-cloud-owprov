@@ -392,14 +392,27 @@ components:
         objects:
           type: array
           items:
-            type: object
-            properties:
-              location:
-                $ref: '#/components/schemas/Location'
-              contact:
-                $ref: '#/components/schemas/Contact'
-              configuration:
-                $ref: '#/components/schemas/DeviceConfiguration'
+            oneOf:
+              - type: object
+                properties:
+                  location:
+                    $ref: '#/components/schemas/Location'
+                required:
+                  - location
+              - type: object
+                properties:
+                  contact:
+                    $ref: '#/components/schemas/Contact'
+                required:
+                  - contact
+              - type: object
+                properties:
+                  configuration:
+                    $ref: '#/components/schemas/DeviceConfiguration'
+                required:
+                  - configuration
+      required:
+        - objects
 
     VenueList:
       type: object

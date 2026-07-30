@@ -10,6 +10,7 @@
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
 #include "framework/ConfigurationValidator.h"
+#include "framework/utils.h"
 #include "libs/croncpp.h"
 #include "sdks/SDK_sec.h"
 
@@ -538,14 +539,17 @@ namespace OpenWifi {
 				}
 				auto Object = ObjectsArray->getObject(i);
 
-				if (Object->has("contact")) {
-					if (!Object->isObject("contact")) {
-						Errors.push_back("Invalid JSON document: contact in createObjects must be a JSON object");
-						return Result;
-					}
+				if ((Object->has("location") + Object->has("configuration") + Object->has("contact")) != 1) {
+					Errors.push_back("Invalid JSON document: item in createObjects.objects must contain exactly one of location, configuration, or contact");
+					return Result;
 				}
 
-				if (Object->has("location")) {
+				if constexpr (std::is_same_v<Type, ProvObjects::Venue> || std::is_same_v<Type, ProvObjects::Operator>) {
+					if (!Object->has("location")) {
+						Errors.push_back("Invalid JSON document: item in createObjects.objects must contain location");
+						return Result;
+					}
+
 					if (!Object->isObject("location")) {
 						Errors.push_back("Invalid JSON document: location in createObjects must be a JSON object");
 						return Result;
@@ -567,17 +571,18 @@ namespace OpenWifi {
 						}
 						LocationObj->set("timezone", Timezone);
 					}
-				}
+				} else if constexpr (std::is_same_v<Type, ProvObjects::InventoryTag>) {
+					if (!Object->has("configuration")) {
+						Errors.push_back("Invalid JSON document: item in createObjects.objects must contain configuration");
+						return Result;
+					}
 
-				if (Object->has("configuration")) {
 					if (!Object->isObject("configuration")) {
 						Errors.push_back("Invalid JSON document: configuration in createObjects must be a JSON object");
 						return Result;
 					}
-				}
-
-				if (!Object->has("location") && !Object->has("configuration") && !Object->has("contact")) {
-					Errors.push_back("Invalid JSON document: item in createObjects.objects must contain location or configuration or contact");
+				} else {
+					Errors.push_back("Unsupported object type for inline creation");
 					return Result;
 				}
 			}
