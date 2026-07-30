@@ -636,7 +636,7 @@ namespace OpenWifi {
 		if (Path.find("/api/v1/venue") != std::string::npos)
 			return "venue";
 		if (Path.find("/api/v1/inventory") != std::string::npos)
-			return "device";
+			return "inventory";
 		if (Path.find("/api/v1/subscriberDevice") != std::string::npos ||
 			Path.find("/api/v1/sub_devices") != std::string::npos)
 			return "device";

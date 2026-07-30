@@ -636,7 +636,7 @@ namespace OpenWifi {
 			ProvObjects::ManagementPolicyEntry E1;
 			E1.resources = {"operator"}; E1.access = {"CREATE", "READ", "UPDATE", "DELETE"}; P.entries.push_back(E1);
 			ProvObjects::ManagementPolicyEntry E2;
-			E2.resources = {"entity", "venue", "configuration", "managementRole", "device"};
+			E2.resources = {"entity", "venue", "configuration", "managementRole", "inventory"};
 			E2.access = {"FULL"}; P.entries.push_back(E2);
 			ProvObjects::ManagementPolicyEntry E3;
 			E3.resources = {"managementPolicy"}; E3.access = {"READ"}; P.entries.push_back(E3);
@@ -651,7 +651,7 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "configuration", "device"};
+			E1.resources = {"entity", "venue", "configuration", "inventory"};
 			E1.access = {"READ"}; P.entries.push_back(E1);
 
 			PolicyDB().CreateRecord(P);
@@ -666,7 +666,7 @@ namespace OpenWifi {
 			ProvObjects::ManagementPolicyEntry E1;
 			E1.resources = {"entity", "venue"}; E1.access = {"READ"}; P.entries.push_back(E1);
 			ProvObjects::ManagementPolicyEntry E2;
-			E2.resources = {"configuration", "device"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
+			E2.resources = {"configuration", "inventory"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
 
 			PolicyDB().CreateRecord(P);
 		}
@@ -680,7 +680,7 @@ namespace OpenWifi {
 			ProvObjects::ManagementPolicyEntry E1;
 			E1.resources = {"venue", "configuration"}; E1.access = {"READ"}; P.entries.push_back(E1);
 			ProvObjects::ManagementPolicyEntry E2;
-			E2.resources = {"device"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
+			E2.resources = {"inventory"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
 
 			PolicyDB().CreateRecord(P);
 		}

@@ -148,7 +148,7 @@ namespace OpenWifi {
 				}
 				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
 			}
-			return PolicyAllows(Policy, "device", Poco::Net::HTTPRequest::HTTP_GET);
+			return PolicyAllows(Policy, "inventory", Poco::Net::HTTPRequest::HTTP_GET);
 		};
 
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
