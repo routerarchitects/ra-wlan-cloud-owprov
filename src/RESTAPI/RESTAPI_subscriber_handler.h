@@ -18,7 +18,7 @@ namespace OpenWifi {
 													  Poco::Net::HTTPRequest::HTTP_PUT,
 													  Poco::Net::HTTPRequest::HTTP_GET,
 													  Poco::Net::HTTPRequest::HTTP_DELETE},
-							 Server, TransactionId, Internal, false, true) {}
+							 Server, TransactionId, Internal, true, true) {}
 
 		static auto PathName() {
 			return std::list<std::string>{"/api/v1/subscriber", "/api/v1/subscriber/{id}"};
