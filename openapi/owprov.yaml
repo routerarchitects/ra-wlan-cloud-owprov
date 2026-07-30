@@ -375,7 +375,7 @@ components:
         - type: object
           properties:
             createObjects:
-              $ref: '#/components/schemas/CreateObjects'
+              $ref: '#/components/schemas/VenueCreateObjects'
 
     VenueUpdateRequest:
       allOf:
@@ -383,34 +383,39 @@ components:
         - type: object
           properties:
             createObjects:
-              $ref: '#/components/schemas/CreateObjects'
+              $ref: '#/components/schemas/VenueCreateObjects'
 
-    CreateObjects:
+    VenueCreateObjects:
       type: object
-      description: Inline objects to create and automatically link during parent object creation or modification
+      description: Inline location objects to create and automatically link during Venue creation or modification
       properties:
         objects:
           type: array
           items:
-            oneOf:
-              - type: object
-                properties:
-                  location:
-                    $ref: '#/components/schemas/Location'
-                required:
-                  - location
-              - type: object
-                properties:
-                  contact:
-                    $ref: '#/components/schemas/Contact'
-                required:
-                  - contact
-              - type: object
-                properties:
-                  configuration:
-                    $ref: '#/components/schemas/DeviceConfiguration'
-                required:
-                  - configuration
+            type: object
+            additionalProperties: false
+            properties:
+              location:
+                $ref: '#/components/schemas/Location'
+            required:
+              - location
+      required:
+        - objects
+
+    InventoryCreateObjects:
+      type: object
+      description: Inline configuration objects to create and automatically link during Inventory creation or modification
+      properties:
+        objects:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              configuration:
+                $ref: '#/components/schemas/DeviceConfiguration'
+            required:
+              - configuration
       required:
         - objects
 
@@ -915,7 +920,7 @@ components:
         - type: object
           properties:
             createObjects:
-              $ref: '#/components/schemas/CreateObjects'
+              $ref: '#/components/schemas/InventoryCreateObjects'
 
     InventoryUpdateRequest:
       allOf:
@@ -923,7 +928,7 @@ components:
         - type: object
           properties:
             createObjects:
-              $ref: '#/components/schemas/CreateObjects'
+              $ref: '#/components/schemas/InventoryCreateObjects'
 
     VenueDeviceList:
       type: object
