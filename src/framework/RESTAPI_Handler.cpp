@@ -21,8 +21,15 @@ namespace OpenWifi {
 		std::string Resource = GetResourceName(Path);
 		if (Resource.empty()) {
 			Reason = "Unknown or prohibited resource path.";
+			Logger_.information(fmt::format("AUTH_DEBUG: Denied - Unknown resource path '{}'", Path));
 			return false;
 		}
+
+		Logger_.information(fmt::format(
+			"AUTH_DEBUG: User='{}' UserRole='{}' Path='{}' Method='{}' Resource='{}'",
+			UserInfo_.userinfo.id,
+			SecurityObjects::UserTypeToString(UserInfo_.userinfo.userRole), Path, Method,
+			Resource));
 
 		if (Resource == "user" &&
 			(Method == Poco::Net::HTTPRequest::HTTP_POST ||
@@ -32,6 +39,7 @@ namespace OpenWifi {
 			if (Poco::icompare(RequestedUserRole, "root") == 0 &&
 				UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 				Reason = "Only root may assign the root user role.";
+				Logger_.information(fmt::format("AUTH_DEBUG: Denied - Non-root trying to assign root role"));
 				return false;
 			}
 		}
@@ -46,40 +54,45 @@ namespace OpenWifi {
 		std::vector<ProvObjects::ManagementRole> Roles;
 		FindAllUserRoles(UserId, Roles);
 
+		Logger_.information(fmt::format("AUTH_DEBUG: User '{}' has {} management roles", UserId, Roles.size()));
+
 		auto CheckRolePolicy = [&](const ProvObjects::ManagementRole &role) -> bool {
 			ProvObjects::ManagementPolicy Policy;
 			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
 				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					Logger_.information(fmt::format("AUTH_DEBUG: Policy ID '{}' not found in DB", role.managementPolicy));
 					return false;
 				}
 				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
 			}
-			return PolicyAllows(Policy, Resource, Method);
+			bool res = PolicyAllows(Policy, Resource, Method);
+			Logger_.information(fmt::format("AUTH_DEBUG: PolicyAllows(policy='{}', resource='{}', method='{}') -> {}", Policy.info.id, Resource, Method, res));
+			return res;
 		};
 
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
-			// If a scope constraint was specified (via path ID, query param, or body)
-			// but could not be resolved against the database, we must fail closed.
+			Logger_.information(fmt::format("AUTH_DEBUG: ResolveTargetContext returned false for Path='{}'", Path));
 			if (HasScopeConstraint(Resource, Method)) {
 				Reason = "Scope resolution failed for constrained operation; access denied.";
+				Logger_.information(fmt::format("AUTH_DEBUG: Denied - HasScopeConstraint is true but ResolveTargetContext failed"));
 				return false;
 			}
-			// If no scope constraint was specified (e.g. global/collection operations like
-			// GET /api/v1/entity or GET /api/v1/inventory), we check if any role permits
-			// the operation globally.
 			for (const auto &role : Roles) {
 				if (CheckRolePolicy(role)) {
+					Logger_.information(fmt::format("AUTH_DEBUG: Granted global operation via role '{}'", role.info.id));
 					return true;
 				}
 			}
 			Reason = "No authorized role found for this target resource and operation.";
+			Logger_.information(fmt::format("AUTH_DEBUG: Denied - No role permits global operation for resource '{}'", Resource));
 			return false;
 		}
 
+		Logger_.information(fmt::format("AUTH_DEBUG: Resolved TargetEntity='{}' TargetVenue='{}'", TargetEntity, TargetVenue));
+
 		if (!TargetVenue.empty()) {
-			// 1. Specific Venue Role Check: Give priority to explicit venue roles
 			bool foundSpecificVenueRole = false;
 			for (const auto &role : Roles) {
 				if (role.venue == TargetVenue) {
@@ -91,10 +104,10 @@ namespace OpenWifi {
 			}
 			if (foundSpecificVenueRole) {
 				Reason = "Specific venue role policy denied access.";
+				Logger_.information(fmt::format("AUTH_DEBUG: Denied by specific venue role policy"));
 				return false;
 			}
 
-			// 2. Entity-wide Role Fallback: Used only if no specific venue role exists
 			for (const auto &role : Roles) {
 				if (role.entity == TargetEntity && (role.venue.empty() || role.venue == "")) {
 					std::set<std::string> AllowedVenues;
@@ -113,8 +126,10 @@ namespace OpenWifi {
 			}
 		} else {
 			for (const auto &role : Roles) {
+				Logger_.information(fmt::format("AUTH_DEBUG: Comparing role.entity='{}' with TargetEntity='{}'", role.entity, TargetEntity));
 				if (role.entity == TargetEntity && (role.venue.empty() || role.venue == "")) {
 					if (CheckRolePolicy(role)) {
+						Logger_.information(fmt::format("AUTH_DEBUG: Granted access via matching role.entity='{}' with policy='{}'", role.entity, role.managementPolicy));
 						return true;
 					}
 				}
@@ -122,6 +137,7 @@ namespace OpenWifi {
 		}
 
 		Reason = "No authorized role matches the required scope and permission.";
+		Logger_.information(fmt::format("AUTH_DEBUG: Denied for Path='{}'. Reason='{}'", Path, Reason));
 		return false;
 	}
 
@@ -397,29 +413,37 @@ namespace OpenWifi {
 		}
 
 		if (!CandidateOperator.empty()) {
+			Logger_.information(fmt::format("RESOLVE_DEBUG: Resolving CandidateOperator='{}'", CandidateOperator));
 			ProvObjects::Entity E;
 			if (StorageService()->EntityDB().GetRecord("operatorId", CandidateOperator, E)) {
 				TargetEntity = E.info.id;
+				Logger_.information(fmt::format("RESOLVE_DEBUG: Found Entity by operatorId, TargetEntity='{}'", TargetEntity));
 				return true;
 			}
 			if (StorageService()->EntityDB().GetRecord("id", CandidateOperator, E)) {
 				TargetEntity = E.info.id;
+				Logger_.information(fmt::format("RESOLVE_DEBUG: Found Entity by id, TargetEntity='{}'", TargetEntity));
 				return true;
 			}
 			ProvObjects::Operator O;
 			if (StorageService()->OperatorDB().GetRecord("id", CandidateOperator, O) ||
 				StorageService()->OperatorDB().GetRecord("registrationId", CandidateOperator, O)) {
+				Logger_.information(fmt::format("RESOLVE_DEBUG: Found Operator id='{}' registrationId='{}' entityId='{}'", O.info.id, O.registrationId, O.entityId));
 				if (!O.entityId.empty() && StorageService()->EntityDB().Exists("id", O.entityId)) {
 					TargetEntity = O.entityId;
+					Logger_.information(fmt::format("RESOLVE_DEBUG: Resolved TargetEntity='{}' from O.entityId", TargetEntity));
 					return true;
 				}
 				if (StorageService()->EntityDB().GetRecord("operatorId", O.info.id, E)) {
 					TargetEntity = E.info.id;
+					Logger_.information(fmt::format("RESOLVE_DEBUG: Resolved TargetEntity='{}' from EntityDB.operatorId", TargetEntity));
 					return true;
 				}
 				TargetEntity = O.entityId.empty() ? O.info.id : O.entityId;
+				Logger_.information(fmt::format("RESOLVE_DEBUG: Fallback TargetEntity='{}'", TargetEntity));
 				return true;
 			}
+			Logger_.information(fmt::format("RESOLVE_DEBUG: CandidateOperator='{}' not found in OperatorDB or EntityDB", CandidateOperator));
 			return false; // Operator ID provided but not found in DB.
 		}
 
