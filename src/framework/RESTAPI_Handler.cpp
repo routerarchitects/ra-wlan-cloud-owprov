@@ -325,7 +325,7 @@ namespace OpenWifi {
 				CandidateEntity = value;
 			else if (name == "venue")
 				CandidateVenue = value;
-			else if (name == "operatorId" || name == "operator")
+			else if (name == "operatorId" || name == "operator" || name == "registrationId")
 				CandidateOperator = value;
 		}
 
@@ -348,6 +348,8 @@ namespace OpenWifi {
 				CandidateOperator = ParsedBody_->get("operatorId").toString();
 			else if (ParsedBody_->has("operator"))
 				CandidateOperator = ParsedBody_->get("operator").toString();
+			else if (ParsedBody_->has("registrationId"))
+				CandidateOperator = ParsedBody_->get("registrationId").toString();
 
 			if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_->has("parent")) {
 				std::string ParentId = ParsedBody_->get("parent").toString();
@@ -400,6 +402,10 @@ namespace OpenWifi {
 			ProvObjects::Operator O;
 			if (StorageService()->OperatorDB().GetRecord("id", CandidateOperator, O)) {
 				TargetEntity = O.entityId.empty() ? CandidateOperator : O.entityId;
+				return true;
+			}
+			if (StorageService()->OperatorDB().GetRecord("registrationId", CandidateOperator, O)) {
+				TargetEntity = O.entityId.empty() ? O.info.id : O.entityId;
 				return true;
 			}
 			return false; // Operator ID provided but not found in DB.

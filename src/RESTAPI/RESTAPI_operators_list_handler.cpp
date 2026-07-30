@@ -13,16 +13,27 @@ namespace OpenWifi {
 		bool AllOperatorsAllowed = IsRoot;
 
 		if (!AllOperatorsAllowed) {
+			auto RoleAllowsOperatorRead = [&](const ProvObjects::ManagementRole &role) {
+				if (role.managementPolicy.empty()) return false;
+				ProvObjects::ManagementPolicy Policy;
+				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+					if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+						return false;
+					}
+					AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+				}
+				return PolicyAllows(Policy, "operator", Poco::Net::HTTPRequest::HTTP_GET);
+			};
+
 			std::vector<ProvObjects::ManagementRole> Roles;
 			if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 				auto &EntityDB = StorageService()->EntityDB();
 				for (const auto &role : Roles) {
 					if (role.entity.empty()) continue;
-					if (role.entity == EntityDB.RootUUID()) {
-						AllOperatorsAllowed = true;
-						break;
-					}
 					if (!role.venue.empty()) {
+						continue;
+					}
+					if (!RoleAllowsOperatorRead(role)) {
 						continue;
 					}
 					ProvObjects::Entity ent;
