@@ -407,11 +407,16 @@ namespace OpenWifi {
 				return true;
 			}
 			ProvObjects::Operator O;
-			if (StorageService()->OperatorDB().GetRecord("id", CandidateOperator, O)) {
-				TargetEntity = O.entityId.empty() ? CandidateOperator : O.entityId;
-				return true;
-			}
-			if (StorageService()->OperatorDB().GetRecord("registrationId", CandidateOperator, O)) {
+			if (StorageService()->OperatorDB().GetRecord("id", CandidateOperator, O) ||
+				StorageService()->OperatorDB().GetRecord("registrationId", CandidateOperator, O)) {
+				if (!O.entityId.empty() && StorageService()->EntityDB().Exists("id", O.entityId)) {
+					TargetEntity = O.entityId;
+					return true;
+				}
+				if (StorageService()->EntityDB().GetRecord("operatorId", O.info.id, E)) {
+					TargetEntity = E.info.id;
+					return true;
+				}
 				TargetEntity = O.entityId.empty() ? O.info.id : O.entityId;
 				return true;
 			}
