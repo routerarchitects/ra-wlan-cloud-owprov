@@ -627,6 +627,9 @@ namespace OpenWifi {
 								NewObject.location = LC.info.id;
 								AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::locations, ParentEntity, LC.info.id);
 								Result["location"] = LC.info.id;
+							} else {
+								Errors.push_back("Could not create inline location");
+								return Result;
 							}
 						} else if constexpr (std::is_same_v<Type, ProvObjects::Operator>) {
 							std::string ParentEntity = FindParentEntity(NewObject);
@@ -636,6 +639,9 @@ namespace OpenWifi {
 								NewObject.location = LC.info.id;
 								AddMembership(StorageService()->EntityDB(), &ProvObjects::Entity::locations, ParentEntity, LC.info.id);
 								Result["location"] = LC.info.id;
+							} else {
+								Errors.push_back("Could not create inline location");
+								return Result;
 							}
 						}
 					} else {
@@ -663,6 +669,9 @@ namespace OpenWifi {
 							if (StorageService()->ConfigurationDB().CreateRecord(DC)) {
 								NewObject.deviceConfiguration = DC.info.id;
 								Result["configuration"] = DC.info.id;
+							} else {
+								Errors.push_back("Could not create inline configuration");
+								return Result;
 							}
 						}
 					} else {
