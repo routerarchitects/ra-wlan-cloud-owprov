@@ -606,6 +606,10 @@ namespace OpenWifi {
 						Errors.push_back("Invalid JSON document: configuration in createObjects must be a JSON object");
 						return Result;
 					}
+					if (RawObject->has("deviceConfiguration")) {
+						Errors.push_back("Cannot specify both deviceConfiguration and createObjects.configuration");
+						return Result;
+					}
 				} else {
 					Errors.push_back("Unsupported object type for inline creation");
 					return Result;
