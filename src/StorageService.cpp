@@ -634,10 +634,8 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "configuration", "managementRole", "inventory", "operator", "subscriber"};
+			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber"};
 			E1.access = {"FULL"}; P.entries.push_back(E1);
-			ProvObjects::ManagementPolicyEntry E2;
-			E2.resources = {"managementPolicy"}; E2.access = {"READ"}; P.entries.push_back(E2);
 
 			PolicyDB().CreateRecord(P);
 		}
