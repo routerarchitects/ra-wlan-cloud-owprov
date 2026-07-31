@@ -2681,6 +2681,13 @@ paths:
             example:
               - this is the shortname of the RRM vendor
           required: false
+        - in: query
+          description: filter venues by subscriber ID
+          name: subscriberId
+          schema:
+            type: string
+            format: uuid
+          required: false
       responses:
         200:
           description: Return a list of venues.
