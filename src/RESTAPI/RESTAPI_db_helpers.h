@@ -569,9 +569,19 @@ namespace OpenWifi {
 							return Result;
 						}
 						std::string locationName = Poco::trim(LocationObj->get("name").toString());
-						if (!locationName.empty() && StorageService()->LocationDB().Exists("name", locationName)) {
-							Errors.push_back("Location name already exists");
-							return Result;
+						if constexpr (std::is_same_v<Type, ProvObjects::Venue>) {
+							if (!locationName.empty() && !NewObject.location.empty()) {
+								ProvObjects::Location ExistingLC;
+								if (StorageService()->LocationDB().GetRecord("id", NewObject.location, ExistingLC)) {
+									if (ExistingLC.info.name == locationName) {
+										Errors.push_back("Location name already exists");
+										return Result;
+									}
+								} else {
+									Errors.push_back("Could not load location record");
+									return Result;
+								}
+							}
 						}
 					}
 					if (LocationObj->has("timezone")) {

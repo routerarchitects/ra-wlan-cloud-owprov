@@ -501,6 +501,7 @@ namespace OpenWifi {
 		std::string ErrorText;
 		NewObject.parent = Existing.parent;
 		NewObject.entity = Existing.entity;
+		NewObject.location = Existing.location;
 
 		std::vector<std::string> Errors;
 		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
