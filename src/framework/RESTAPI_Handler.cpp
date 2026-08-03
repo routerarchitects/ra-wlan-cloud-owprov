@@ -158,9 +158,14 @@ namespace OpenWifi {
 			if (it != Bindings_.end()) {
 				Id = it->second;
 			} else {
-				it = Bindings_.find(Poco::toLower(std::string(RESTAPI::Protocol::SERIALNUMBER)));
+				it = Bindings_.find("serialNumber");
 				if (it != Bindings_.end()) {
 					Id = it->second;
+				} else {
+					it = Bindings_.find("serialnumber");
+					if (it != Bindings_.end()) {
+						Id = it->second;
+					}
 				}
 			}
 		}
@@ -168,6 +173,11 @@ namespace OpenWifi {
 		const bool HasBoundObjectId =
 			!Id.empty() && Id != "0" &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0);
+
+		Logger_.information(fmt::format("RESOLVE_DEBUG: Path='{}' Method='{}' Id='{}' HasBoundObjectId={}", Path, Method, Id, HasBoundObjectId));
+		for (const auto &[bKey, bVal] : Bindings_) {
+			Logger_.information(fmt::format("RESOLVE_DEBUG: Binding key='{}' val='{}'", bKey, bVal));
+		}
 
 		if (HasBoundObjectId) {
 			if (Path.find("/api/v1/entity") != std::string::npos) {
@@ -192,7 +202,64 @@ namespace OpenWifi {
 															  T)) {
 					TargetEntity = T.entity;
 					TargetVenue = T.venue;
-					return true;
+					if (TargetEntity.empty() && !TargetVenue.empty()) {
+						ProvObjects::Venue V;
+						if (StorageService()->VenueDB().GetRecord("id", TargetVenue, V)) {
+							TargetEntity = V.entity;
+						}
+					}
+					if (TargetEntity.empty() && !T.subscriber.empty()) {
+						ProvObjects::SignupEntry SE;
+						if (StorageService()->SignupDB().GetRecord("userid", T.subscriber, SE) ||
+							StorageService()->SignupDB().GetRecord("id", T.subscriber, SE)) {
+							ProvObjects::Operator O;
+							if (StorageService()->OperatorDB().GetRecord("id", SE.operatorId, O)) {
+								TargetEntity = O.entityId;
+							}
+						}
+					}
+					if (!TargetEntity.empty() || !TargetVenue.empty()) {
+						return true;
+					}
+				}
+				// Fallback to SubscriberDeviceDB if device is in sub_devices
+				ProvObjects::SubscriberDevice SD;
+				if (StorageService()->SubscriberDeviceDB().GetRecord("id", Id, SD) ||
+					StorageService()->SubscriberDeviceDB().GetRecord("serialNumber", Id, SD)) {
+					if (!SD.operatorId.empty()) {
+						ProvObjects::Operator O;
+						if (StorageService()->OperatorDB().GetRecord("id", SD.operatorId, O)) {
+							TargetEntity = O.entityId;
+							return true;
+						}
+						ProvObjects::Entity E;
+						if (StorageService()->EntityDB().GetRecord("operatorId", SD.operatorId, E) ||
+							StorageService()->EntityDB().GetRecord("id", SD.operatorId, E)) {
+							TargetEntity = E.info.id;
+							return true;
+						}
+					}
+				}
+				return false;
+			} else if (Path.find("/api/v1/configurationOverrides") != std::string::npos ||
+					   Path.find("/api/v1/overrides") != std::string::npos) {
+				ProvObjects::InventoryTag T;
+				bool foundTag = StorageService()->InventoryDB().GetRecord("id", Id, T) ||
+								StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id, T);
+				Logger_.information(fmt::format("RESOLVE_DEBUG: configurationOverrides lookup Id='{}' foundTag={}", Id, foundTag));
+				if (foundTag) {
+					TargetEntity = T.entity;
+					TargetVenue = T.venue;
+					Logger_.information(fmt::format("RESOLVE_DEBUG: Tag T.entity='{}' T.venue='{}'", T.entity, T.venue));
+					if (TargetEntity.empty() && !TargetVenue.empty()) {
+						ProvObjects::Venue V;
+						if (StorageService()->VenueDB().GetRecord("id", TargetVenue, V)) {
+							TargetEntity = V.entity;
+						}
+					}
+					if (!TargetEntity.empty() || !TargetVenue.empty()) {
+						return true;
+					}
 				}
 				return false;
 			} else if (Path.find("/api/v1/configuration") != std::string::npos) {
@@ -270,16 +337,7 @@ namespace OpenWifi {
 					return true;
 				}
 				return false;
-			} else if (Path.find("/api/v1/overrides") != std::string::npos) {
-				ProvObjects::InventoryTag T;
-				if (StorageService()->InventoryDB().GetRecord("id", Id, T) ||
-					StorageService()->InventoryDB().GetRecord(RESTAPI::Protocol::SERIALNUMBER, Id,
-															  T)) {
-					TargetEntity = T.entity;
-					TargetVenue = T.venue;
-					return true;
-				}
-				return false;
+
 			} else if (Path.find("/api/v1/subscriberDevice") != std::string::npos) {
 				ProvObjects::SubscriberDevice SD;
 				if (StorageService()->SubscriberDeviceDB().GetRecord("id", Id, SD) ||
@@ -529,6 +587,7 @@ namespace OpenWifi {
 					 (Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
+					(Resource == "overrides" && Poco::icompare(res, "inventory") == 0) ||
 					(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
 					(Resource == "op_location" && Poco::icompare(res, "location") == 0)) {
 					ResourceMatches = true;
@@ -684,6 +743,9 @@ namespace OpenWifi {
 			return "subscriberDevice";
 		if (Path.find("/api/v1/subscriber") != std::string::npos)
 			return "subscriber";
+		if (Path.find("/api/v1/configurationOverrides") != std::string::npos ||
+			Path.find("/api/v1/overrides") != std::string::npos)
+			return "overrides";
 		if (Path.find("/api/v1/configuration") != std::string::npos)
 			return "configuration";
 		if (Path.find("/api/v1/managementRole") != std::string::npos)
@@ -707,7 +769,8 @@ namespace OpenWifi {
 			return "openroaming";
 		if (Path.find("/api/v1/serviceClass") != std::string::npos)
 			return "serviceClass";
-		if (Path.find("/api/v1/overrides") != std::string::npos)
+		if (Path.find("/api/v1/configurationOverrides") != std::string::npos ||
+			Path.find("/api/v1/overrides") != std::string::npos)
 			return "overrides";
 		if (Path.find("/api/v1/iptocountry") != std::string::npos)
 			return "iptocountry";

@@ -140,6 +140,7 @@ namespace OpenWifi {
 		std::vector<ProvObjects::ManagementRole> Roles;
 		std::set<std::string> AllowedEntities;
 		std::set<std::string> AllowedVenues;
+		std::set<std::string> DeniedVenues;
 		auto RoleAllowsDeviceRead = [&](const ProvObjects::ManagementRole &role) {
 			ProvObjects::ManagementPolicy Policy;
 			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
@@ -152,29 +153,37 @@ namespace OpenWifi {
 		};
 
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
+			// 1. Process exact venue-scoped roles (ONLY exact venue, no child venue expansion)
 			for (const auto &role : Roles) {
-				if (!RoleAllowsDeviceRead(role)) {
-					continue;
-				}
 				if (!role.venue.empty()) {
-					GetDescendantVenues(role.venue, AllowedVenues);
-				} else if (!role.entity.empty()) {
-					ProvObjects::Entity ent;
-					if (StorageService()->EntityDB().GetRecord("id", role.entity, ent) && !ent.operatorId.empty()) {
-						AllowedEntities.insert(role.entity);
-						for (const auto &vId : ent.venues) {
-							GetDescendantVenues(vId, AllowedVenues);
-						}
-						continue;
+					if (RoleAllowsDeviceRead(role)) {
+						AllowedVenues.insert(role.venue);
+					} else {
+						DeniedVenues.insert(role.venue);
 					}
-					AllowedEntities.insert(role.entity);
-					ProvObjects::Entity EntRec;
-					if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
-						for (const auto &vId : EntRec.venues) {
-							GetDescendantVenues(vId, AllowedVenues);
+				}
+			}
+
+			// 2. Process entity-scoped roles (Covers entity + all venues owned by entity, except denied exact venues)
+			for (const auto &role : Roles) {
+				if (role.venue.empty() && !role.entity.empty()) {
+					if (RoleAllowsDeviceRead(role)) {
+						AllowedEntities.insert(role.entity);
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								if (!DeniedVenues.count(vId)) {
+									AllowedVenues.insert(vId);
+								}
+							}
 						}
 					}
 				}
+			}
+
+			// 3. Enforce shadowing: remove any explicitly denied exact venues
+			for (const auto &vId : DeniedVenues) {
+				AllowedVenues.erase(vId);
 			}
 		}
 

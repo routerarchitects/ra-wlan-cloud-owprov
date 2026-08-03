@@ -10,8 +10,27 @@ import (
 // 3. MANAGEMENT ROLE IMMUTABILITY TESTS (PUT /api/v1/managementRole/{id})
 // ----------------------------------------------------------------------------
 
+/*
+ * TestManagementRoleImmutability
+ *
+ * DESCRIPTION:
+ *   Validates Management Role immutability rules according to Section 6.4 of the Specification.
+ *   On PUT /api/v1/managementRole/{id}:
+ *   - Only managementPolicy (Policy ID) or role metadata (name/description) may be updated.
+ *   - Scope fields (entity, venue, users) are strictly IMMUTABLE.
+ *
+ * SCENARIOS TESTED:
+ *   1. Positive: Request updates only managementPolicy ID -> Operation succeeds.
+ *      Expected Status: 200 OK.
+ *   2. Negative: Request attempts to modify entity UUID -> Rejected with error message.
+ *      Expected Status: 400 Bad Request ("Entity ID, Venue ID, and User ID are immutable").
+ *   3. Negative: Request attempts to modify venue UUID -> Rejected with error message.
+ *      Expected Status: 400 Bad Request.
+ *   4. Negative: Request attempts to modify users list -> Rejected with error message.
+ *      Expected Status: 400 Bad Request.
+ */
 func TestManagementRoleImmutability(t *testing.T) {
-	client := &TestClient{BaseURL: "https://openwifi.wlan.local:16005/api/v1", Client: http.DefaultClient}
+	client := NewTestClient("https://openwifi.wlan.local:16005/api/v1")
 
 	roleID := "ed7ff809-20d3-48f4-8fe2-c882cd681657"
 	rootToken := "Bearer root-test-token"

@@ -10,8 +10,25 @@ import (
 // 4. SUBSCRIBER DEVICE & INVENTORY PERMISSION TESTS
 // ----------------------------------------------------------------------------
 
+/*
+ * TestSubscriberDevicePermissions
+ * 
+ * DESCRIPTION:
+ *   Validates subscriber device permissions according to Sections 10 and 11.2 of the Specification.
+ *   Subscriber device endpoints (/api/v1/subscriberDevice) map to resource "subscriberDevice" 
+ *   and strictly require inventory:READ permission. Holding subscriber:FULL alone without 
+ *   inventory permission must result in access denial.
+ *
+ * SCENARIOS TESTED:
+ *   1. Positive: User with inventory:READ policy calls GET /subscriberDevice?operatorId=OperatorA_UUID.
+ *      Expected Status: 200 OK.
+ *   2. Negative: User with subscriber:FULL policy but missing inventory permission calls GET /subscriberDevice.
+ *      Expected Status: 403 Access Denied.
+ *   3. Negative (Cross-Operator): User A on Operator A calls GET /subscriberDevice for Operator B.
+ *      Expected Status: 403 Access Denied.
+ */
 func TestSubscriberDevicePermissions(t *testing.T) {
-	client := &TestClient{BaseURL: "https://openwifi.wlan.local:16005/api/v1", Client: http.DefaultClient}
+	client := NewTestClient("https://openwifi.wlan.local:16005/api/v1")
 
 	operatorA_UUID := "b7dcf2fa-f35c-4e0a-818d-3136f38a6990"
 	operatorB_UUID := "c8edf3ab-a46d-5f1b-929e-4247g49b7001"

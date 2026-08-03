@@ -10,11 +10,31 @@ import (
 // 2. OPERATOR ISOLATION & VISIBILITY TESTS
 // ----------------------------------------------------------------------------
 
+/*
+ * TestOperatorIsolation_GetAndList
+ *
+ * DESCRIPTION:
+ *   Validates Operator access rules according to Section 11.1 of the Specification.
+ *   Non-root users can access an Operator only if they hold an exact Entity-scoped role
+ *   on its Operator Entity with a policy granting Operator:READ.
+ *   Root Entity assignment no longer grants blanket access to all operators.
+ *
+ * SCENARIOS TESTED:
+ *   1. Positive: User A with role on Operator A Entity + operator:READ policy calls GET /operator/{uuid_A}.
+ *      Expected Status: 200 OK.
+ *   2. Negative (Cross-Operator): User A calls GET /operator/{uuid_B} (Operator B).
+ *      Expected Status: 403 Access Denied.
+ *   3. Negative (Cross-Operator): User B calls GET /operator/{uuid_A} (Operator A).
+ *      Expected Status: 403 Access Denied.
+ *   4. Negative (Root Entity Privilege Bypass Removed): User assigned to Root Entity (without role on Operator A)
+ *      calls GET /operator/{uuid_A}.
+ *      Expected Status: 403 Access Denied.
+ */
 func TestOperatorIsolation_GetAndList(t *testing.T) {
-	client := &TestClient{BaseURL: "https://openwifi.wlan.local:16005/api/v1", Client: http.DefaultClient}
+	client := NewTestClient("https://openwifi.wlan.local:16005/api/v1")
 
 	operatorA_UUID := "b7dcf2fa-f35c-4e0a-818d-3136f38a6990"
-	operatorB_UUID := "c8edf3ab-a46d-5f1b-929e-4247g49b7001"
+	operatorB_UUID := "de2434b5-9fcb-4367-a101-8e4da5cfa36f"
 
 	userA_Token := "Bearer user-admin-operator-a-token"
 	userB_Token := "Bearer user-admin-operator-b-token"
@@ -50,7 +70,7 @@ func TestOperatorIsolation_GetAndList(t *testing.T) {
 	})
 
 	t.Run("Negative: User assigned to Root Entity without operator:READ policy", func(t *testing.T) {
-		rootEntityUserToken := "Bearer root-entity-user-no-operator-read-token"
+		rootEntityUserToken := "b6ba0d38b3a438af80a65be2dab666ad95791091d5cfb72264f2a6d1d38e82cb"
 		status, _, err := client.DoRequest("GET", fmt.Sprintf("/operator/%s", operatorA_UUID), rootEntityUserToken, nil)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
