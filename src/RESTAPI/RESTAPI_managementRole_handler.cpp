@@ -348,8 +348,8 @@ namespace OpenWifi {
 			}
 		}
 
-		if (NewObject.users.empty()) {
-			return BadRequest(RESTAPI::Errors::MissingUserID);
+		if (NewObject.users.size() != 1) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, "Management role must contain exactly one user in the users array.");
 		}
 		std::string UserId = NewObject.users[0];
 		std::string UserValidationError;
