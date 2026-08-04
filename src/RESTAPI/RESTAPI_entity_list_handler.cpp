@@ -129,8 +129,24 @@ namespace OpenWifi {
 			return MakeJSONObjectArray("entities", SelectedEntities, *this);
 		}
 
+		auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+			if (ids.empty()) return "";
+			std::string res = field + " IN (";
+			bool first = true;
+			for (const auto &id : ids) {
+				if (!first) res += ",";
+				res += "'" + ORM::Escape(id) + "'";
+				first = false;
+			}
+			res += ")";
+			return res;
+		};
+
+		std::string ScopeWhere = makeInClause("id", VisibleEntities);
+
 		if (QB_.CountOnly) {
-			return ReturnCountOnly(VisibleEntities.size());
+			auto C = DB_.Count(ScopeWhere);
+			return ReturnCountOnly(C);
 		}
 
 		if (GetBoolParameter("getTree", false)) {
@@ -301,12 +317,7 @@ namespace OpenWifi {
 		}
 
 		EntityDB::RecordVec FilteredEntities;
-		for (const auto &entityId : VisibleEntities) {
-			ProvObjects::Entity Entity;
-			if (StorageService()->EntityDB().GetRecord("id", entityId, Entity)) {
-				FilteredEntities.push_back(Entity);
-			}
-		}
+		DB_.GetRecords(QB_.Offset, QB_.Limit, FilteredEntities, ScopeWhere, QB_.OrderBy);
 		return MakeJSONObjectArray("entities", FilteredEntities, *this);
 	}
 
