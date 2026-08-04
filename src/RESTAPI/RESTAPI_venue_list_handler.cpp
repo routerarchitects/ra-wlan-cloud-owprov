@@ -39,9 +39,9 @@ namespace OpenWifi {
 			for (const auto &role : Roles) {
 				if (!role.venue.empty()) {
 					if (policyAllowsGet(role)) {
-						GetDescendantVenues(role.venue, VisibleVenues);
+						VisibleVenues.insert(role.venue);
 					} else {
-						GetDescendantVenues(role.venue, DeniedVenues);
+						DeniedVenues.insert(role.venue);
 					}
 				} else if (!role.entity.empty()) {
 					if (policyAllowsGet(role)) {
@@ -64,33 +64,39 @@ namespace OpenWifi {
 			return ReturnObject("venues", Venues);
 		}
 
-		// 3. Retrieve all venues and filter by allowedVenues
-		VenueDB::RecordVec AllVenues;
-		auto RRMvendor = GetParameter("RRMvendor","");
-		if (!RRMvendor.empty()) {
-			auto Where = fmt::format(" deviceRules LIKE '%{}%' ", RRMvendor);
-			DB_.GetRecords(0, 10000, AllVenues, Where, " ORDER BY name ");
-		} else {
-			DB_.GetRecords(0, 10000, AllVenues);
+		auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+			if (ids.empty()) return "";
+			std::string res = field + " IN (";
+			bool first = true;
+			for (const auto &id : ids) {
+				if (!first) res += ",";
+				res += "'" + ORM::Escape(id) + "'";
+				first = false;
+			}
+			res += ")";
+			return res;
+		};
+
+		std::string ScopeWhere = makeInClause("id", VisibleVenues);
+
+		if (QB_.CountOnly) {
+			auto C = DB_.Count(ScopeWhere);
+			return ReturnCountOnly(C);
 		}
 
-		VenueDB::RecordVec FilteredVenues;
-		for (const auto &v : AllVenues) {
-			if (VisibleVenues.count(v.info.id)) {
-				FilteredVenues.push_back(v);
+		auto RRMvendor = GetParameter("RRMvendor", "");
+		std::string FinalWhere = ScopeWhere;
+		if (!RRMvendor.empty()) {
+			std::string RRMWhere = fmt::format(" deviceRules LIKE '%{}%' ", ORM::Escape(RRMvendor));
+			if (!FinalWhere.empty()) {
+				FinalWhere = "(" + FinalWhere + ") AND (" + RRMWhere + ")";
+			} else {
+				FinalWhere = RRMWhere;
 			}
 		}
 
-		// Apply pagination (Offset, Limit) manually
-		VenueDB::RecordVec PaginatedVenues;
-		uint64_t offset = QB_.Offset;
-		uint64_t limit = QB_.Limit;
-		if (limit == 0) limit = 100;
-		uint64_t count = 0;
-		for (size_t i = offset; i < FilteredVenues.size() && count < limit; ++i) {
-			PaginatedVenues.push_back(FilteredVenues[i]);
-			count++;
-		}
-		return ReturnObject("venues", PaginatedVenues);
+		VenueDB::RecordVec FilteredVenues;
+		DB_.GetRecords(QB_.Offset, QB_.Limit, FilteredVenues, FinalWhere, " ORDER BY name ");
+		return ReturnObject("venues", FilteredVenues);
 	}
 } // namespace OpenWifi
