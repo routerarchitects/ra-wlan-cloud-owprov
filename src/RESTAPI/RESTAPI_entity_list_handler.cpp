@@ -317,7 +317,7 @@ namespace OpenWifi {
 		}
 
 		EntityDB::RecordVec FilteredEntities;
-		DB_.GetRecords(QB_.Offset, QB_.Limit, FilteredEntities, ScopeWhere, QB_.OrderBy);
+		DB_.GetRecords(QB_.Offset, QB_.Limit, FilteredEntities, ScopeWhere);
 		return MakeJSONObjectArray("entities", FilteredEntities, *this);
 	}
 
