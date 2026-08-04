@@ -42,6 +42,20 @@ namespace OpenWifi {
 
 		std::function<void(const std::string &)> addVenueAndDescendants;
 		std::function<void(const std::string &)> addEntityAndDescendants;
+		std::function<void(const std::string &)> addVenueAncestors;
+
+		addVenueAncestors = [&](const std::string &venueId) {
+			ProvObjects::Venue ven;
+			if (StorageService()->VenueDB().GetRecord("id", venueId, ven)) {
+				if (!ven.entity.empty()) {
+					VisibleEntities.insert(ven.entity);
+				}
+				if (!ven.parent.empty() && ven.parent != venueId) {
+					VisibleVenues.insert(ven.parent);
+					addVenueAncestors(ven.parent);
+				}
+			}
+		};
 
 		addVenueAndDescendants = [&](const std::string &venueId) {
 			if (VisibleVenues.count(venueId)) return;
@@ -70,7 +84,8 @@ namespace OpenWifi {
 			for (const auto &role : Roles) {
 				if (!role.venue.empty()) {
 					if (policyAllowsGet(role, "venue")) {
-						addVenueAndDescendants(role.venue);
+						VisibleVenues.insert(role.venue);
+						addVenueAncestors(role.venue);
 					} else {
 						ProvObjects::Venue ven;
 						if (StorageService()->VenueDB().GetRecord("id", role.venue, ven)) {
@@ -135,6 +150,34 @@ namespace OpenWifi {
 				}
 			}
 
+			auto canReadInventoryOnVenue = [&](const std::string &vId) -> bool {
+				if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) return true;
+				for (const auto &role : Roles) {
+					if (role.venue == vId) {
+						return policyAllowsGet(role, "inventory");
+					}
+				}
+				ProvObjects::Venue ven;
+				if (StorageService()->VenueDB().GetRecord("id", vId, ven) && !ven.entity.empty()) {
+					for (const auto &role : Roles) {
+						if (role.entity == ven.entity && (role.venue.empty() || role.venue == "")) {
+							return policyAllowsGet(role, "inventory");
+						}
+					}
+				}
+				return false;
+			};
+
+			auto canReadInventoryOnEntity = [&](const std::string &eId) -> bool {
+				if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) return true;
+				for (const auto &role : Roles) {
+					if (role.entity == eId && (role.venue.empty() || role.venue == "")) {
+						return policyAllowsGet(role, "inventory");
+					}
+				}
+				return false;
+			};
+
 			std::function<Poco::JSON::Object::Ptr(const std::string &)> buildVenueNode;
 			buildVenueNode = [&](const std::string &venueId) -> Poco::JSON::Object::Ptr {
 				auto venueIt = VenueRecords.find(venueId);
@@ -150,8 +193,10 @@ namespace OpenWifi {
 					}
 				}
 				Poco::JSON::Array Devices;
-				for (const auto &devId : venueIt->second.devices) {
-					Devices.add(devId);
+				if (canReadInventoryOnVenue(venueId)) {
+					for (const auto &devId : venueIt->second.devices) {
+						Devices.add(devId);
+					}
 				}
 				Node->set("type", "venue");
 				Node->set("name", venueIt->second.info.name);
@@ -186,8 +231,10 @@ namespace OpenWifi {
 					}
 				}
 				Poco::JSON::Array Devices;
-				for (const auto &devId : entityIt->second.devices) {
-					Devices.add(devId);
+				if (canReadInventoryOnEntity(entityId)) {
+					for (const auto &devId : entityIt->second.devices) {
+						Devices.add(devId);
+					}
 				}
 				Node->set("type", "entity");
 				Node->set("name", entityIt->second.info.name);
