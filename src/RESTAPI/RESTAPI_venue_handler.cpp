@@ -231,7 +231,10 @@ namespace OpenWifi {
 							 NewObject.parent, NewObject.info.id);
 			MoveUsage(StorageService()->ConfigurationDB(), DB_, {}, NewObject.deviceConfiguration,
 					  NewObject.info.id);
-			AutoCreateCreatorRole(NewObject.entity, NewObject.info.id, NewObject.entity, NewObject.parent);
+			if (!AutoCreateCreatorRole(NewObject.entity, NewObject.info.id, NewObject.entity, NewObject.parent)) {
+				DB_.DeleteRecord("id", NewObject.info.id);
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
 
 			ProvObjects::Venue NewRecord;
 			DB_.GetRecord("id", NewObject.info.id, NewRecord);

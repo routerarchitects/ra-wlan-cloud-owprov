@@ -779,12 +779,12 @@ namespace OpenWifi {
 		return "";
 	}
 
-	void RESTAPIHandler::AutoCreateCreatorRole(const std::string &CreatedEntityId,
+	bool RESTAPIHandler::AutoCreateCreatorRole(const std::string &CreatedEntityId,
 											   const std::string &CreatedVenueId,
 											   const std::string &ParentEntityId,
 											   const std::string &ParentVenueId) {
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
-			return;
+			return true;
 		}
 
 		ProvObjects::ManagementRole ParentRole;
@@ -835,10 +835,13 @@ namespace OpenWifi {
 
 				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), "",
 						  NewRole.managementPolicy, NewRole.info.id);
+				return true;
 			} else {
 				poco_error(Logger(), "AutoCreateCreatorRole: Failed to create role record in DB");
+				return false;
 			}
 		}
+		return true;
 	}
 
 } // namespace OpenWifi

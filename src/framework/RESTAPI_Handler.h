@@ -762,7 +762,7 @@ namespace OpenWifi {
 		bool FindAnyRole(const std::string &userId, ProvObjects::ManagementRole &AnyRole);
 		bool FindAllUserRoles(const std::string &userId,
 							  std::vector<ProvObjects::ManagementRole> &Roles);
-		void AutoCreateCreatorRole(const std::string &CreatedEntityId,
+		bool AutoCreateCreatorRole(const std::string &CreatedEntityId,
 								   const std::string &CreatedVenueId,
 								   const std::string &ParentEntityId,
 								   const std::string &ParentVenueId);

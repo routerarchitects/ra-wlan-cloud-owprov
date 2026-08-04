@@ -136,7 +136,10 @@ namespace OpenWifi {
 			MoveUsage(StorageService()->PolicyDB(), DB_, "", NewEntity.managementPolicy,
 					  NewEntity.info.id);
 			DB_.AddChild("id", NewEntity.parent, NewEntity.info.id);
-			AutoCreateCreatorRole(NewEntity.info.id, "", NewEntity.parent, "");
+			if (!AutoCreateCreatorRole(NewEntity.info.id, "", NewEntity.parent, "")) {
+				DB_.DeleteRecord("id", NewEntity.info.id);
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
 
 			Poco::JSON::Object Answer;
 			NewEntity.to_json(Answer);
