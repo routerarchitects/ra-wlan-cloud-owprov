@@ -20,7 +20,25 @@ defaults:
     shell: bash
 
 jobs:
+  rbac-lab-integration-tests:
+    name: Spin up Containers & Run RBAC Lab Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v3
+
+    - name: Set up Go environment
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Spin up Docker Compose Containers & Execute Lab Tests
+      run: |
+        chmod +x tests/lab_tests/run_lab_tests.sh
+        ./tests/lab_tests/run_lab_tests.sh
+
   docker:
+    needs: rbac-lab-integration-tests
     runs-on: ubuntu-latest
     env:
       DOCKER_REGISTRY_URL: tip-tip-wlan-cloud-ucentral.jfrog.io
