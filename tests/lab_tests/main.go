@@ -49,7 +49,7 @@ func main() {
 	owprovBase := getEnv("OWPROV_BASE_URL", "https://localhost:16005/api/v1")
 	rootEmail := getEnv("OWSEC_ROOT_EMAIL", "tip@ucentral.com")
 
-	rootPasswords := []string{"Iotina@123", "Iotina@1234"}
+	rootPasswords := []string{"Iotina@123", "openwifi", "Iotina@1234"}
 
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	client := &http.Client{Transport: tr, Timeout: 15 * time.Second}
@@ -490,12 +490,38 @@ func login(client *http.Client, base, email, password string) (string, error) {
 	}
 	defer resp.Body.Close()
 	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	var decoded map[string]any
+	_ = json.Unmarshal(bodyBytes, &decoded)
+
+	// Check if initial login requires password change on fresh container bootup
+	if mustChange, ok := decoded["mustChangePassword"].(bool); ok && mustChange {
+		fmt.Printf("Root initial login requires password change. Updating root password to %s...\n", password)
+		changePayload := map[string]any{
+			"userId":          email,
+			"currentPassword": "openwifi",
+			"newPassword":     password,
+		}
+		rawChange, _ := json.Marshal(changePayload)
+		changeReq, _ := http.NewRequest(http.MethodPost, base+"/oauth2", bytes.NewReader(rawChange))
+		changeReq.Header.Set("Content-Type", "application/json")
+		changeResp, err := client.Do(changeReq)
+		if err == nil {
+			defer changeResp.Body.Close()
+			cBytes, _ := io.ReadAll(changeResp.Body)
+			var cDecoded map[string]any
+			_ = json.Unmarshal(cBytes, &cDecoded)
+			if t, ok := cDecoded["access_token"].(string); ok && t != "" {
+				return t, nil
+			}
+			if t, ok := cDecoded["token"].(string); ok && t != "" {
+				return t, nil
+			}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("login failed: status %d, body %s", resp.StatusCode, string(bodyBytes))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(bodyBytes, &decoded); err != nil {
-		return "", err
 	}
 	token, _ := decoded["access_token"].(string)
 	if token == "" {
