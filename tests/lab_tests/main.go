@@ -38,6 +38,35 @@ var KnownFailures = map[string]string{
 	"ROOT-UPDATE-0007":    "Depends on ROOT-BOOTSTRAP-0009 (configuration not created due to owfms/S3 issue)",
 	"ROOT-LIFECYCLE-0004": "Inventory tag was not created (owfms/S3 issue), so venue delete-with-device guard is not testable",
 	"ROOT-LIFECYCLE-0005": "Inventory tag was not created (owfms/S3 issue), so delete returns 404",
+	"ADMIN-BOOTSTRAP-0015": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; inventory tag creation blocked",
+	"ADMIN-BOOTSTRAP-0016": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; configuration creation blocked",
+	"ADMIN-INSCOPE-0015":   "Depends on ADMIN-BOOTSTRAP-0015 (inventory tag not created due to owfms/S3 issue)",
+	"ADMIN-INSCOPE-0016":   "Depends on ADMIN-BOOTSTRAP-0016 (configuration not created due to owfms/S3 issue)",
+	"ADMIN-INSCOPE-0017":   "Depends on ADMIN-BOOTSTRAP-0015 (inventory tag not created due to owfms/S3 issue)",
+	"ADMIN-INSCOPE-0018":   "Depends on ADMIN-BOOTSTRAP-0016 (configuration not created due to owfms/S3 issue)",
+	"ADMIN-LIFECYCLE-0021": "Inventory tag was not created (owfms/S3 issue), so delete returns 404",
+	"ADMIN-LIFECYCLE-0022": "Configuration was not created (owfms/S3 issue), so delete returns 404",
+	"NONROOT-BOOTSTRAP-0029": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; inventory tag creation blocked",
+	"NONROOT-BOOTSTRAP-0030": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; configuration creation blocked",
+	"ADMIN-FULL-0009":        "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"ADMIN-FULL-0010":        "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
+	"ADMIN-FULL-0011":        "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"ADMIN-READ-0004":        "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"ADMIN-READ-0005":        "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
+	"NOC-POS-0004":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"NOC-POS-0005":           "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
+	"NOC-POS-0006":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"CSR-POS-0003":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"CSR-POS-0004":           "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
+	"INSTALLER-POS-0003":     "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"INSTALLER-POS-0004":     "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"INSTALLER-POS-0005":     "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
+	"ACCOUNTING-POS-0003":    "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"ACCOUNTING-POS-0004":    "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
+	"NONROOT-LIFECYCLE-0026": "Inventory tag was not created (owfms/S3 issue), so delete returns 404",
+	"NONROOT-LIFECYCLE-0027": "Configuration was not created (owfms/S3 issue), so delete returns 404",
+	"DEF-NOC-0003":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
+	"DEF-INST-0002":          "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -49,10 +78,18 @@ func main() {
 	owprovBase := getEnv("OWPROV_BASE_URL", "https://localhost:16005/api/v1")
 	rootEmail := getEnv("OWSEC_ROOT_EMAIL", "tip@ucentral.com")
 
-	rootPasswords := []string{"Iotina@123", "openwifi", "Iotina@1234"}
+	defaultRootPw := getEnv("OWSEC_ROOT_DEFAULT_PASSWORD", "openwifi")
+	targetRootPw := getEnv("OWSEC_ROOT_PASSWORD", "Iotina@123")
 
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	client := &http.Client{Transport: tr, Timeout: 15 * time.Second}
+
+	// Automatically handle first-boot password change if root password is still 'openwifi'
+	if err := ensureRootPasswordChanged(client, owsecBase, rootEmail, defaultRootPw, targetRootPw); err != nil {
+		fmt.Printf("[Bootstrap Warning] Root password initialization check: %v\n", err)
+	}
+
+	rootPasswords := []string{targetRootPw, "Iotina@1234"}
 
 	var rootToken string
 	var loginErr error
@@ -72,10 +109,11 @@ func main() {
 	// ── Pre-cleanup: make the test run idempotent ──────────────────────────
 	fmt.Println("\n=== Pre-cleanup: removing any leftover test data from previous runs ===")
 	preCleanup(client, owsecBase, owprovBase, rootToken)
-	fmt.Println("=== Pre-cleanup complete ===\n")
+	fmt.Printf("=== Pre-cleanup complete ===\n\n")
 
 	// ── Load CSV ───────────────────────────────────────────────────────────
-	csvPath := "owprov_rbac_v2_1_root_lab_test_cases.csv"
+	csvPath := getEnv("TEST_CSV", "owprov_rbac_v2_1_root_lab_test_cases.csv")
+	fmt.Printf("Loading test suite CSV: %s\n", csvPath)
 	file, err := os.Open(csvPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal: Failed to open CSV: %v\n", err)
@@ -148,7 +186,17 @@ func main() {
 	failedCount := 0
 	knownFailCount := 0
 
-	resultsFile, err := os.Create("rbac_actual_results.csv")
+	resultsFileName := getEnv("RESULTS_CSV", "")
+	if resultsFileName == "" {
+		if strings.Contains(csvPath, "admin") {
+			resultsFileName = "rbac_admin_actual_results.csv"
+		} else {
+			resultsFileName = "rbac_root_actual_results.csv"
+		}
+	}
+	fmt.Printf("Results will be written to: %s\n", resultsFileName)
+
+	resultsFile, err := os.Create(resultsFileName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to create results CSV: %v\n", err)
 	}
@@ -175,18 +223,20 @@ func main() {
 		baseURL := owprovBase
 		if strings.HasPrefix(tc.Endpoint, "/api/v1/oauth2") ||
 			strings.HasPrefix(tc.Endpoint, "/api/v1/user") ||
-			strings.HasPrefix(tc.Endpoint, "/api/v1/subuser") {
+			strings.HasPrefix(tc.Endpoint, "/api/v1/subuser") ||
+			strings.HasPrefix(tc.Endpoint, "/api/v1/subscriber") {
 			baseURL = owsecBase
 		}
 
 		trimmedEndpoint := strings.TrimPrefix(resolvedEndpoint, "/api/v1")
-		// POST /user → /user/0
-		if tc.Method == "POST" && trimmedEndpoint == "/user" {
-			trimmedEndpoint = "/user/0"
+
+		// OWSEC user creation endpoint is POST /user/0 (handling query parameters)
+		if tc.Method == "POST" && (trimmedEndpoint == "/user" || strings.HasPrefix(trimmedEndpoint, "/user?")) {
+			trimmedEndpoint = strings.Replace(trimmedEndpoint, "/user", "/user/0", 1)
 		}
 		// POST /subuser → /subuser/0
-		if tc.Method == "POST" && trimmedEndpoint == "/subuser" {
-			trimmedEndpoint = "/subuser/0"
+		if tc.Method == "POST" && (trimmedEndpoint == "/subuser" || strings.HasPrefix(trimmedEndpoint, "/subuser?")) {
+			trimmedEndpoint = strings.Replace(trimmedEndpoint, "/subuser", "/subuser/0", 1)
 		}
 		fullURL := baseURL + trimmedEndpoint
 		fmt.Printf("%s %s\n", tc.Method, fullURL)
@@ -197,18 +247,39 @@ func main() {
 		// Choose actor token
 		activeToken := rootToken
 		actor := "ROOT"
-		switch tc.ID {
-		case "ROOT-DELEGATION-0001", "ROOT-DELEGATION-0002",
-			"ROOT-AUTOROLE-0001",
-			"ROOT-VENUE-PARENT-0001", "ROOT-VENUE-PARENT-0002",
-			"ROOT-SHADOW-0001", "ROOT-SHADOW-0002",
-			"ROOT-BOOTSTRAP-0024":
-			activeToken = placeholders["admin_a_token"]
-			actor = "Admin A"
-		case "ROOT-VENUE-NONPARENT-0001", "ROOT-VENUE-NONPARENT-0002",
-			"ROOT-VENUE-NONPARENT-0003", "ROOT-VENUE-NONPARENT-0004":
-			activeToken = placeholders["admin_b_token"]
-			actor = "Admin B"
+		if strings.HasPrefix(tc.ID, "ADMIN-FULL-") || strings.HasPrefix(tc.ID, "ADMIN-DELEGATION-") {
+			activeToken = placeholders["token_admin_full"]
+			actor = "Admin Full"
+		} else if strings.HasPrefix(tc.ID, "ADMIN-READ-") {
+			activeToken = placeholders["token_admin_read"]
+			actor = "Admin Read"
+		} else if strings.HasPrefix(tc.ID, "ADMIN-SUBVERIFY-") {
+			activeToken = placeholders["token_sub_l1"]
+			actor = "Sub-User 1"
+		} else if strings.HasPrefix(tc.ID, "NOC-") {
+			activeToken = placeholders["token_noc"]
+			actor = "NOC User"
+		} else if strings.HasPrefix(tc.ID, "CSR-") {
+			activeToken = placeholders["token_csr"]
+			actor = "CSR User"
+		} else if strings.HasPrefix(tc.ID, "INSTALLER-") {
+			activeToken = placeholders["token_installer"]
+			actor = "INSTALLER User"
+		} else if strings.HasPrefix(tc.ID, "ACCOUNTING-") {
+			activeToken = placeholders["token_accounting"]
+			actor = "ACCOUNTING User"
+		} else if strings.HasPrefix(tc.ID, "DEF-ADMIN-") {
+			activeToken = placeholders["token_def_admin"]
+			actor = "Default Admin"
+		} else if strings.HasPrefix(tc.ID, "DEF-NOC-") {
+			activeToken = placeholders["token_def_noc"]
+			actor = "Default NOC"
+		} else if strings.HasPrefix(tc.ID, "DEF-CSR-") {
+			activeToken = placeholders["token_def_csr"]
+			actor = "Default CSR"
+		} else if strings.HasPrefix(tc.ID, "DEF-INST-") {
+			activeToken = placeholders["token_def_installer"]
+			actor = "Default Installer"
 		}
 		fmt.Printf("Actor: %s\n", actor)
 
@@ -238,6 +309,11 @@ func main() {
 		}
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+
+		// Pause briefly after oauth2 login requests to prevent OWSEC rate limits
+		if strings.HasPrefix(tc.Endpoint, "/api/v1/oauth2") {
+			time.Sleep(250 * time.Millisecond)
+		}
 
 		actualStatus := resp.StatusCode
 		fmt.Printf("Response Status: %d\n", actualStatus)
@@ -291,6 +367,7 @@ func main() {
 
 		writeResult(writer, tc, resolvedEndpoint, fmt.Sprintf("%d", actualStatus), resultStr, knownReason, detailsStr)
 	}
+	writer.Flush()
 
 	// ── Summary ────────────────────────────────────────────────────────────
 	total := len(testCases)
@@ -302,10 +379,10 @@ func main() {
 	fmt.Printf("║  FAIL       : %-27d║\n", failedCount)
 	fmt.Printf("║  KNOWN-FAIL : %-27d║\n", knownFailCount)
 	fmt.Printf("╚══════════════════════════════════════════╝\n")
-	fmt.Println("Detailed results written to: rbac_actual_results.csv")
+	fmt.Printf("Detailed results written to: %s\n", resultsFileName)
 
 	if failedCount > 0 {
-		fmt.Printf("\n[ERROR] %d unexpected failure(s). Inspect rbac_actual_results.csv.\n", failedCount)
+		fmt.Printf("\n[ERROR] %d unexpected failure(s). Inspect %s.\n", failedCount, resultsFileName)
 		os.Exit(1)
 	}
 	fmt.Printf("\n[OK] All %d expected test cases passed (plus %d known infrastructure failures noted).\n",
@@ -334,6 +411,7 @@ func preCleanup(client *http.Client, owsecBase, owprovBase, rootToken string) {
 	deleteTestOperators(client, owprovBase, rootToken, []string{"op-l1-a", "updated-op-a", "op-l1-b"})
 	deleteTestEntities(client, owprovBase, rootToken, []string{"entity-l1-1", "entity-l2-1"})
 	deleteTestInventory(client, owprovBase, rootToken, "dc6279652f20")
+	deleteTestPolicies(client, owprovBase, rootToken)
 }
 
 func findUserByEmail(client *http.Client, owsecBase, token, email string) string {
@@ -361,6 +439,33 @@ func findUserByEmail(client *http.Client, owsecBase, token, email string) string
 		}
 	}
 	return ""
+}
+
+func deleteTestPolicies(client *http.Client, owprovBase, token string) {
+	req, _ := http.NewRequest("GET", owprovBase+"/managementPolicy", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	var decoded map[string]any
+	if json.Unmarshal(b, &decoded) != nil {
+		return
+	}
+	policies, _ := decoded["managementPolicies"].([]any)
+	for _, p := range policies {
+		pMap, _ := p.(map[string]any)
+		if pMap == nil {
+			continue
+		}
+		name, _ := pMap["name"].(string)
+		id, _ := pMap["id"].(string)
+		if strings.HasPrefix(name, "policy-") {
+			deleteResource(client, owprovBase+"/managementPolicy/"+id, token, "policy "+name)
+		}
+	}
 }
 
 func deleteTestOperators(client *http.Client, owprovBase, token string, names []string) {
@@ -490,38 +595,12 @@ func login(client *http.Client, base, email, password string) (string, error) {
 	}
 	defer resp.Body.Close()
 	bodyBytes, _ := io.ReadAll(resp.Body)
-
-	var decoded map[string]any
-	_ = json.Unmarshal(bodyBytes, &decoded)
-
-	// Check if initial login requires password change on fresh container bootup
-	if mustChange, ok := decoded["mustChangePassword"].(bool); ok && mustChange {
-		fmt.Printf("Root initial login requires password change. Updating root password to %s...\n", password)
-		changePayload := map[string]any{
-			"userId":          email,
-			"currentPassword": "openwifi",
-			"newPassword":     password,
-		}
-		rawChange, _ := json.Marshal(changePayload)
-		changeReq, _ := http.NewRequest(http.MethodPost, base+"/oauth2", bytes.NewReader(rawChange))
-		changeReq.Header.Set("Content-Type", "application/json")
-		changeResp, err := client.Do(changeReq)
-		if err == nil {
-			defer changeResp.Body.Close()
-			cBytes, _ := io.ReadAll(changeResp.Body)
-			var cDecoded map[string]any
-			_ = json.Unmarshal(cBytes, &cDecoded)
-			if t, ok := cDecoded["access_token"].(string); ok && t != "" {
-				return t, nil
-			}
-			if t, ok := cDecoded["token"].(string); ok && t != "" {
-				return t, nil
-			}
-		}
-	}
-
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("login failed: status %d, body %s", resp.StatusCode, string(bodyBytes))
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(bodyBytes, &decoded); err != nil {
+		return "", err
 	}
 	token, _ := decoded["access_token"].(string)
 	if token == "" {
@@ -533,25 +612,82 @@ func login(client *http.Client, base, email, password string) (string, error) {
 	return token, nil
 }
 
+func ensureRootPasswordChanged(client *http.Client, owsecBase, email, oldPassword, newPassword string) error {
+	// Step 1: Check if login already works with target new password
+	_, err := login(client, owsecBase, email, newPassword)
+	if err == nil {
+		fmt.Println("[Bootstrap] Root user already configured with new password.")
+		return nil
+	}
+
+	// Step 2: If login failed, perform first-boot password change
+	fmt.Println("[Bootstrap] First boot detected. Changing root password from default ('openwifi') to target password...")
+
+	payload := map[string]string{
+		"userId":      email,
+		"password":    oldPassword,
+		"newPassword": newPassword,
+	}
+	raw, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest(http.MethodPost, owsecBase+"/oauth2", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send password change request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("first-boot password change failed: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	fmt.Println("[Bootstrap] Root password successfully changed to new password!")
+	return nil
+}
+
 func extractPlaceholders(tcID string, decoded map[string]any, placeholders map[string]string) {
 	id, _ := decoded["id"].(string)
 	if id == "" {
 		id, _ = decoded["uuid"].(string)
 	}
+	entityId, _ := decoded["entityId"].(string)
+	if entityId == "" {
+		entityId, _ = decoded["entity"].(string)
+	}
+
+	// Support nested 'operator' or 'operation' response wrapper
+	if opObj, ok := decoded["operator"].(map[string]any); ok {
+		if id == "" {
+			id, _ = opObj["id"].(string)
+		}
+		if entityId == "" {
+			entityId, _ = opObj["entityId"].(string)
+		}
+	}
+	if opObj, ok := decoded["operation"].(map[string]any); ok {
+		if id == "" {
+			id, _ = opObj["id"].(string)
+		}
+		if entityId == "" {
+			entityId, _ = opObj["entityId"].(string)
+		}
+	}
 
 	switch tcID {
-	case "ROOT-BOOTSTRAP-0002":
+	case "ROOT-BOOTSTRAP-0002", "NONROOT-BOOTSTRAP-0002":
 		placeholders["operator_a_id"] = id
-		if entity, ok := decoded["entityId"].(string); ok && entity != "" {
-			placeholders["entity_l1_a_id"] = entity
-			fmt.Printf("[Extracted] operator_a_id=%s  entity_l1_a_id=%s\n", id, entity)
-		}
-	case "ROOT-BOOTSTRAP-0003":
+		placeholders["entity_l1_a_id"] = entityId
+		fmt.Printf("[Extracted] operator_a_id=%s  entity_l1_a_id=%s\n", id, entityId)
+	case "ROOT-BOOTSTRAP-0003", "NONROOT-BOOTSTRAP-0003":
 		placeholders["operator_b_id"] = id
-		if entity, ok := decoded["entityId"].(string); ok && entity != "" {
-			placeholders["entity_l1_b_id"] = entity
-			fmt.Printf("[Extracted] operator_b_id=%s  entity_l1_b_id=%s\n", id, entity)
-		}
+		placeholders["entity_l1_b_id"] = entityId
+		fmt.Printf("[Extracted] operator_b_id=%s  entity_l1_b_id=%s\n", id, entityId)
 	case "ROOT-BOOTSTRAP-0004":
 		placeholders["entity_l1_1_id"] = id
 		fmt.Printf("[Extracted] entity_l1_1_id=%s\n", id)
@@ -658,7 +794,225 @@ func extractPlaceholders(tcID string, decoded map[string]any, placeholders map[s
 				}
 			}
 		}
+
+	case "NONROOT-BOOTSTRAP-0004":
+		placeholders["policy_admin_full_id"] = id
+		fmt.Printf("[Extracted] policy_admin_full_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0005":
+		placeholders["policy_admin_read_id"] = id
+		fmt.Printf("[Extracted] policy_admin_read_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0006":
+		placeholders["policy_noc_id"] = id
+		fmt.Printf("[Extracted] policy_noc_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0007":
+		placeholders["policy_csr_id"] = id
+		fmt.Printf("[Extracted] policy_csr_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0008":
+		placeholders["policy_installer_id"] = id
+		fmt.Printf("[Extracted] policy_installer_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0009":
+		placeholders["policy_accounting_id"] = id
+		fmt.Printf("[Extracted] policy_accounting_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0010":
+		placeholders["user_admin_full_id"] = id
+		fmt.Printf("[Extracted] user_admin_full_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0011":
+		placeholders["user_admin_read_id"] = id
+		fmt.Printf("[Extracted] user_admin_read_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0012":
+		placeholders["user_noc_id"] = id
+		fmt.Printf("[Extracted] user_noc_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0013":
+		placeholders["user_csr_id"] = id
+		fmt.Printf("[Extracted] user_csr_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0014":
+		placeholders["user_installer_id"] = id
+		fmt.Printf("[Extracted] user_installer_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0015":
+		placeholders["user_accounting_id"] = id
+		fmt.Printf("[Extracted] user_accounting_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0016":
+		placeholders["venue_l1_1_id"] = id
+		fmt.Printf("[Extracted] venue_l1_1_id=%s\n", id)
+	case "NONROOT-BOOTSTRAP-0017":
+		placeholders["role_admin_full_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_admin_full_id=%s\n", placeholders["role_admin_full_id"])
+	case "NONROOT-BOOTSTRAP-0018":
+		placeholders["role_admin_read_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_admin_read_id=%s\n", placeholders["role_admin_read_id"])
+	case "NONROOT-BOOTSTRAP-0019":
+		placeholders["role_noc_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_noc_id=%s\n", placeholders["role_noc_id"])
+	case "NONROOT-BOOTSTRAP-0020":
+		placeholders["role_csr_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_csr_id=%s\n", placeholders["role_csr_id"])
+	case "NONROOT-BOOTSTRAP-0021":
+		placeholders["role_installer_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_installer_id=%s\n", placeholders["role_installer_id"])
+	case "NONROOT-BOOTSTRAP-0022":
+		placeholders["role_accounting_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_accounting_id=%s\n", placeholders["role_accounting_id"])
+	case "NONROOT-BOOTSTRAP-0023":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_admin_full"] = tok
+		fmt.Printf("[Extracted] token_admin_full=%s\n", tok)
+	case "NONROOT-BOOTSTRAP-0024":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_admin_read"] = tok
+		fmt.Printf("[Extracted] token_admin_read=%s\n", tok)
+	case "NONROOT-BOOTSTRAP-0025":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_noc"] = tok
+		fmt.Printf("[Extracted] token_noc=%s\n", tok)
+	case "NONROOT-BOOTSTRAP-0026":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_csr"] = tok
+		fmt.Printf("[Extracted] token_csr=%s\n", tok)
+	case "NONROOT-BOOTSTRAP-0027":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_installer"] = tok
+		fmt.Printf("[Extracted] token_installer=%s\n", tok)
+	case "NONROOT-BOOTSTRAP-0028":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_accounting"] = tok
+		fmt.Printf("[Extracted] token_accounting=%s\n", tok)
+	case "NONROOT-BOOTSTRAP-0030":
+		placeholders["config_a_id"] = id
+		fmt.Printf("[Extracted] config_a_id=%s\n", id)
+	case "DEFAULT-BOOTSTRAP-0001":
+		placeholders["user_def_admin_id"] = id
+		fmt.Printf("[Extracted] user_def_admin_id=%s\n", id)
+	case "DEFAULT-BOOTSTRAP-0002":
+		placeholders["user_def_noc_id"] = id
+		fmt.Printf("[Extracted] user_def_noc_id=%s\n", id)
+	case "DEFAULT-BOOTSTRAP-0003":
+		placeholders["user_def_csr_id"] = id
+		fmt.Printf("[Extracted] user_def_csr_id=%s\n", id)
+	case "DEFAULT-BOOTSTRAP-0004":
+		placeholders["user_def_installer_id"] = id
+		fmt.Printf("[Extracted] user_def_installer_id=%s\n", id)
+	case "DEFAULT-BOOTSTRAP-0005":
+		placeholders["role_def_admin_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_def_admin_id=%s\n", placeholders["role_def_admin_id"])
+	case "DEFAULT-BOOTSTRAP-0006":
+		placeholders["role_def_noc_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_def_noc_id=%s\n", placeholders["role_def_noc_id"])
+	case "DEFAULT-BOOTSTRAP-0007":
+		placeholders["role_def_csr_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_def_csr_id=%s\n", placeholders["role_def_csr_id"])
+	case "DEFAULT-BOOTSTRAP-0008":
+		placeholders["role_def_installer_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_def_installer_id=%s\n", placeholders["role_def_installer_id"])
+	case "DEFAULT-BOOTSTRAP-0009":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_def_admin"] = tok
+		fmt.Printf("[Extracted] token_def_admin=%s\n", tok)
+	case "DEFAULT-BOOTSTRAP-0010":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_def_noc"] = tok
+		fmt.Printf("[Extracted] token_def_noc=%s\n", tok)
+	case "DEFAULT-BOOTSTRAP-0011":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_def_csr"] = tok
+		fmt.Printf("[Extracted] token_def_csr=%s\n", tok)
+	case "DEFAULT-BOOTSTRAP-0012":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_def_installer"] = tok
+		fmt.Printf("[Extracted] token_def_installer=%s\n", tok)
+	case "DEF-ADMIN-0002":
+		placeholders["venue_def_admin_id"] = id
+		fmt.Printf("[Extracted] venue_def_admin_id=%s\n", id)
+	case "ADMIN-FULL-0002":
+		placeholders["entity_l2_admin_id"] = id
+		fmt.Printf("[Extracted] entity_l2_admin_id=%s\n", id)
+	case "ADMIN-FULL-0003":
+		placeholders["venue_l2_admin_id"] = id
+		fmt.Printf("[Extracted] venue_l2_admin_id=%s\n", id)
+	case "ADMIN-DELEGATION-0001":
+		placeholders["user_sub_l1_id"] = id
+		fmt.Printf("[Extracted] user_sub_l1_id=%s\n", id)
+	case "ADMIN-DELEGATION-0002":
+		placeholders["role_sub_l1_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_sub_l1_id=%s\n", placeholders["role_sub_l1_id"])
+	case "ADMIN-DELEGATION-0003":
+		tok, _ := decoded["access_token"].(string)
+		if tok == "" {
+			tok, _ = decoded["token"].(string)
+		}
+		placeholders["token_sub_l1"] = tok
+		fmt.Printf("[Extracted] token_sub_l1=%s\n", tok)
+	case "ADMIN-FULL-0004":
+		placeholders["user_sub_full_id"] = id
+		fmt.Printf("[Extracted] user_sub_full_id=%s\n", id)
+	case "ADMIN-FULL-0005":
+		placeholders["role_sub_full_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_sub_full_id=%s\n", placeholders["role_sub_full_id"])
+	case "ADMIN-INSCOPE-0008":
+		placeholders["policy_admin_a_id"] = id
+		fmt.Printf("[Extracted] policy_admin_a_id=%s\n", id)
+	case "ADMIN-DELEGATION-POS-0001":
+		placeholders["role_sub_a_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_sub_a_id=%s\n", placeholders["role_sub_a_id"])
+	case "ADMIN-HIERARCHY-NEG-0005":
+		placeholders["entity_hacked_b_id"] = id
+		fmt.Printf("[Extracted] entity_hacked_b_id=%s\n", id)
+	case "ADMIN-HIERARCHY-NEG-0006":
+		placeholders["venue_hacked_b_id"] = id
+		fmt.Printf("[Extracted] venue_hacked_b_id=%s\n", id)
+	case "ADMIN-HIERARCHY-NEG-0007":
+		placeholders["op_unauth_id"] = id
+		if entity, ok := decoded["entityId"].(string); ok && entity != "" {
+			placeholders["entity_op_unauth_id"] = entity
+		}
+		fmt.Printf("[Extracted] op_unauth_id=%s\n", id)
+	case "ADMIN-SHADOW-0001":
+		placeholders["role_venue_shadow_id"] = extractRoleID(id, decoded)
+		fmt.Printf("[Extracted] role_venue_shadow_id=%s\n", placeholders["role_venue_shadow_id"])
 	}
+}
+
+func extractRoleID(fallbackID string, decoded map[string]any) string {
+	if roleID, ok := decoded["id"].(string); ok && roleID != "" {
+		return roleID
+	}
+	if roles, ok := decoded["roles"].([]any); ok && len(roles) > 0 {
+		if rMap, ok := roles[0].(map[string]any); ok {
+			if rID, ok := rMap["id"].(string); ok {
+				return rID
+			}
+		}
+	}
+	return fallbackID
 }
 
 func getEnv(key, fallback string) string {

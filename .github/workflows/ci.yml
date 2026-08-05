@@ -20,33 +20,9 @@ defaults:
     shell: bash
 
 jobs:
-  rbac-lab-integration-tests:
-    name: Spin up Containers & Run RBAC Lab Tests
-    needs: docker
+  docker:
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
-    steps:
-    - name: Checkout Repository Code
-      uses: actions/checkout@v3
-
-    - name: Set up Go environment
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-
-    - name: Spin up Docker Containers in GitHub Actions Environment
-      run: |
-        docker network create openwifi
-        docker run -d --name postgres --network openwifi -e POSTGRES_PASSWORD=postgrespassword -e POSTGRES_USER=postgres -e POSTGRES_DB=openwifi postgres:15-alpine
-        sleep 5
-        docker run -d --name owsec --network openwifi -p 16001:16001 -e SECURITY_DB_HOST=postgres -e SECURITY_DB_USER=postgres -e SECURITY_DB_PASSWORD=postgrespassword -e SECURITY_DB_DATABASE=openwifi ghcr.io/routerarchitects/ra-owsec:v1.0.0
-        sleep 10
-        docker run -d --name owprov --network openwifi -p 16005:16005 -e PROV_DB_HOST=postgres -e PROV_DB_USER=postgres -e PROV_DB_PASSWORD=postgrespassword -e PROV_DB_DATABASE=openwifi -e SECURITY_SERVER_URI=https://owsec:16001 routerarchitect123/ra-ow-prov:anil
-        sleep 10
-
-    - name: Run RBAC Data-Driven Lab Test Suite
-      run: |
-        cd tests/lab_tests
-        go run main.go
     env:
       DOCKER_REGISTRY_URL: tip-tip-wlan-cloud-ucentral.jfrog.io
       DOCKER_REGISTRY_USERNAME: ucentral
@@ -74,6 +50,38 @@ jobs:
         SLACK_COLOR: "${{ job.status }}"
         SLACK_ICON: https://raw.githubusercontent.com/quintessence/slack-icons/master/images/github-logo-slack-icon.png
         SLACK_TITLE: Docker build failed for OWProv service
+
+  rbac-lab-integration-tests:
+    name: Spin up Containers & Run RBAC Lab Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v3
+
+    - name: Set up Go environment
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Spin up Docker Containers in GitHub Actions Environment
+      run: |
+        docker network create openwifi
+        docker run -d --name postgres --network openwifi -e POSTGRES_PASSWORD=postgrespassword -e POSTGRES_USER=postgres -e POSTGRES_DB=openwifi postgres:15-alpine
+        sleep 5
+        docker run -d --name owsec --network openwifi -p 16001:16001 -e SECURITY_DB_HOST=postgres -e SECURITY_DB_USER=postgres -e SECURITY_DB_PASSWORD=postgrespassword -e SECURITY_DB_DATABASE=openwifi ghcr.io/routerarchitects/ra-owsec:v1.0.0
+        sleep 10
+        docker run -d --name owprov --network openwifi -p 16005:16005 -e PROV_DB_HOST=postgres -e PROV_DB_USER=postgres -e PROV_DB_PASSWORD=postgrespassword -e PROV_DB_DATABASE=openwifi -e SECURITY_SERVER_URI=https://owsec:16001 routerarchitect123/ra-ow-prov:anil
+        sleep 10
+
+    - name: Run Root RBAC Lab Test Suite
+      run: |
+        cd tests/lab_tests
+        TEST_CSV=owprov_rbac_v2_1_root_lab_test_cases.csv RESULTS_CSV=rbac_root_actual_results.csv go run main.go
+
+    - name: Run Admin RBAC Lab Test Suite
+      run: |
+        cd tests/lab_tests
+        TEST_CSV=owprov_rbac_v2_1_admin_lab_test_cases.csv RESULTS_CSV=rbac_admin_actual_results.csv go run main.go
 
   trigger-testing:
     if: startsWith(github.ref, 'refs/pull/')
