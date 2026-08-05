@@ -5,52 +5,16 @@ on:
     paths-ignore:
       - 'openapi/**'
       - '**.md'
-    branches:
-      - main
-      - 'release/*'
-    tags:
-      - 'v*'
   pull_request:
-    branches:
-      - main
-      - 'release/*'
+    paths-ignore:
+      - 'openapi/**'
+      - '**.md'
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  docker:
-    name: Build & Push Docker Image
-    runs-on: ubuntu-latest
-    env:
-      DOCKER_REGISTRY_URL: tip-tip-wlan-cloud-ucentral.jfrog.io
-      DOCKER_REGISTRY_USERNAME: ucentral
-    steps:
-    - name: Checkout actions repo
-      uses: actions/checkout@v3
-      with:
-        repository: Telecominfraproject/.github
-        path: github
-
-    - name: Build and push Docker image
-      uses: ./github/composite-actions/docker-image-build
-      with:
-        image_name: owprov
-        registry: tip-tip-wlan-cloud-ucentral.jfrog.io
-        registry_user: ucentral
-        registry_password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
-
-    - name: Notify on failure via Slack
-      if: failure() && github.ref == 'refs/heads/main'
-      uses: rtCamp/action-slack-notify@v2
-      env:
-        SLACK_USERNAME: GitHub Actions failure notifier
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        SLACK_COLOR: "${{ job.status }}"
-        SLACK_ICON: https://raw.githubusercontent.com/quintessence/slack-icons/master/images/github-logo-slack-icon.png
-        SLACK_TITLE: Docker build failed for OWProv service
-
   rbac-lab-integration-tests:
     name: Spin up Containers & Run RBAC Lab Tests
     runs-on: ubuntu-latest
@@ -82,55 +46,3 @@ jobs:
       run: |
         cd tests/lab_tests
         TEST_CSV=owprov_rbac_v2_1_admin_lab_test_cases.csv RESULTS_CSV=rbac_admin_actual_results.csv go run main.go
-
-  trigger-testing:
-    if: startsWith(github.ref, 'refs/pull/')
-    runs-on: ubuntu-latest
-    needs: docker
-    steps:
-    - name: Get base branch name and set as output
-      id: get_base_branch
-      run: |
-        echo "branch=$(echo ${GITHUB_BASE_REF##*/})" >> $GITHUB_OUTPUT
-        echo "owgw_branch=$(echo ${GITHUB_BASE_REF##*/} | sed 's/main/master/g')" >> $GITHUB_OUTPUT
-
-    - name: Checkout actions repo
-      uses: actions/checkout@v3
-      with:
-        repository: Telecominfraproject/.github
-        path: github
-
-    - name: Trigger testing of OpenWifi Docker Compose deployment and wait for result
-      uses: ./github/composite-actions/trigger-workflow-and-wait
-      env:
-        BASE_BRANCH: ${{ steps.get_base_branch.outputs.branch }}
-        OWGW_BASE_BRANCH: ${{ steps.get_base_branch.outputs.owgw_branch }}
-      with:
-        owner: Telecominfraproject
-        repo: wlan-testing
-        workflow: ow_docker-compose.yml
-        token: ${{ secrets.WLAN_TESTING_PAT }}
-        ref: master
-        inputs: '{"deployment_version": "${{ env.BASE_BRANCH }}", "owgw_version": "${{ env.OWGW_BASE_BRANCH }}", "owsec_version": "${{ env.BASE_BRANCH }}", "owfms_version": "${{ env.BASE_BRANCH }}", "owprov_version": "${{ github.sha }}", "owanalytics_version": "${{ env.BASE_BRANCH }}", "owsub_version": "${{ env.BASE_BRANCH }}", "microservice": "all"}'
-
-  trigger-deploy-to-dev:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs:
-      - docker
-    steps:
-    - name: Checkout actions repo
-      uses: actions/checkout@v2
-      with:
-        repository: Telecominfraproject/.github
-        path: github
-
-    - name: Trigger deployment of the latest version to dev instance and wait for result
-      uses: ./github/composite-actions/trigger-workflow-and-wait
-      with:
-        owner: Telecominfraproject
-        repo: wlan-testing
-        workflow: ucentralgw-dev-deployment.yaml
-        token: ${{ secrets.WLAN_TESTING_PAT }}
-        ref: master
-        inputs: '{"force_latest": "true"}'
