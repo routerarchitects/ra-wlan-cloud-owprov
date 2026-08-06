@@ -457,7 +457,7 @@ namespace OpenWifi {
 
 		std::string MoveFromLocation, MoveToLocation;
 		if (AssignIfPresent(RawObject, "location", MoveToLocation)) {
-			if (MoveToLocation.empty() ||
+			if (!MoveToLocation.empty() &&
 				!StorageService()->LocationDB().Exists("id", MoveToLocation)) {
 				return BadRequest(RESTAPI::Errors::LocationMustExist);
 			}
