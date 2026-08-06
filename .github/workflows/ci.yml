@@ -17,60 +17,65 @@ defaults:
     shell: bash
 
 jobs:
-  yaml-validation:
-    name: Validate YAML Syntax
+  openapi-validation:
+    name: Validate OpenAPI Schemas
     runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
       with:
-        python-version: '3.x'
+        node-version: '22'
 
-    - name: Install Validation Dependencies
-      run: python3 -m pip install --disable-pip-version-check PyYAML
+    - name: Install Redocly CLI
+      run: npm install -g @redocly/cli@2.41.1
 
-    - name: Validate YAML Syntax Dynamically
+    - name: Validate OpenAPI Specifications with Redocly
       run: |
-        files=$(find openapi -type f \( -name "*.yaml" -o -name "*.yml" \))
-        if [ -z "$files" ]; then
-          echo "ERROR: No YAML files (.yaml or .yml) found in openapi/ directory!"
+        mapfile -d '' files < <(
+          find openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0
+        )
+
+        if (( ${#files[@]} == 0 )); then
+          echo "ERROR: No OpenAPI specification files found in openapi/ directory!" >&2
           exit 1
         fi
-        find openapi -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | \
-          xargs -0 -r -n1 python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))'
-        echo "All discovered YAML files parsed successfully!"
+
+        redocly lint -- "${files[@]}"
 
   shell-script-check:
     name: Shell Script Syntax Check
     runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Check Shell Scripts Syntax
       run: |
-        find . -type f \( -name "*.sh" -o -perm -111 \) \
-          -not -path "*/.git/*" \
-          -not -path "*/build/*" \
-          -not -path "*/cmake-build/*" \
-          -not -path "*/node_modules/*" \
-          | while read -r file; do
-              if [[ "$file" == *.sh ]] || head -n 1 "$file" | grep -qE '^#!.*/(ba)?sh'; then
-                echo "Checking syntax: $file"
-                bash -n "$file"
-              fi
-            done
-        echo "All discovered shell scripts passed syntax check!"
+        set -euo pipefail
+
+        while IFS= read -r -d '' file; do
+          if [[ "$file" == *.sh ]] || head -n 1 "$file" | grep -qE '^#!.*/(ba)?sh([[:space:]]|$)'; then
+            echo "Checking syntax: $file"
+            bash -n "$file"
+          fi
+        done < <(
+          find . -type f \( -name '*.sh' -o -perm -111 \) \
+            -not -path '*/.git/*' \
+            -not -path '*/build/*' \
+            -not -path '*/cmake-build/*' \
+            -not -path '*/node_modules/*' \
+            -print0
+        )
 
   docker-build:
     name: Build Docker Image
     runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Build Docker Image
       run: |
