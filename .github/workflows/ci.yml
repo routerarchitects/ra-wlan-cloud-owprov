@@ -5,10 +5,14 @@ on:
     paths-ignore:
       - 'openapi/**'
       - '**.md'
+    branches:
+      - main
+      - 'release/*'
+    tags:
+      - 'v*'
   pull_request:
-    paths-ignore:
-      - 'openapi/**'
-      - '**.md'
+    branches:
+      - main
 
 defaults:
   run:
