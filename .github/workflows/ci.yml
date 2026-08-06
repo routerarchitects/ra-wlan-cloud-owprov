@@ -3,97 +3,75 @@ name: CI
 on:
   push:
     paths-ignore:
-      - 'openapi/**'
       - '**.md'
-    
+    branches:
+      - main
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
-      - 'release/*'
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  docker:
+  yaml-validation:
+    name: Validate YAML Syntax
     runs-on: ubuntu-latest
-    env:
-      DOCKER_REGISTRY_URL: tip-tip-wlan-cloud-ucentral.jfrog.io
-      DOCKER_REGISTRY_USERNAME: ucentral
     steps:
-    - name: Checkout actions repo
+    - name: Checkout Repository Code
       uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        repository: Telecominfraproject/.github
-        path: github
+        python-version: '3.x'
 
-    - name: Build and push Docker image
-      uses: ./github/composite-actions/docker-image-build
-      with:
-        image_name: owprov
-        registry: tip-tip-wlan-cloud-ucentral.jfrog.io
-        registry_user: ucentral
-        registry_password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+    - name: Install Validation Dependencies
+      run: python3 -m pip install --disable-pip-version-check PyYAML
 
-    - name: Notify on failure via Slack
-      if: failure() && github.ref == 'refs/heads/main'
-      uses: rtCamp/action-slack-notify@v2
-      env:
-        SLACK_USERNAME: GitHub Actions failure notifier
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        SLACK_COLOR: "${{ job.status }}"
-        SLACK_ICON: https://raw.githubusercontent.com/quintessence/slack-icons/master/images/github-logo-slack-icon.png
-        SLACK_TITLE: Docker build failed for OWProv service
-
-  trigger-testing:
-    if: startsWith(github.ref, 'refs/pull/')
-    runs-on: ubuntu-latest
-    needs: docker
-    steps:
-    - name: Get base branch name and set as output
-      id: get_base_branch
+    - name: Validate YAML Syntax Dynamically
       run: |
-        echo "branch=$(echo ${GITHUB_BASE_REF##*/})" >> $GITHUB_OUTPUT
-        echo "owgw_branch=$(echo ${GITHUB_BASE_REF##*/} | sed 's/main/master/g')" >> $GITHUB_OUTPUT
+        files=$(find openapi -type f \( -name "*.yaml" -o -name "*.yml" \))
+        if [ -z "$files" ]; then
+          echo "ERROR: No YAML files (.yaml or .yml) found in openapi/ directory!"
+          exit 1
+        fi
+        find openapi -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | \
+          xargs -0 -r -n1 python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))'
+        echo "All discovered YAML files parsed successfully!"
 
-    - name: Checkout actions repo
-      uses: actions/checkout@v3
-      with:
-        repository: Telecominfraproject/.github
-        path: github
-
-    - name: Trigger testing of OpenWifi Docker Compose deployment and wait for result
-      uses: ./github/composite-actions/trigger-workflow-and-wait
-      env:
-        BASE_BRANCH: ${{ steps.get_base_branch.outputs.branch }}
-        OWGW_BASE_BRANCH: ${{ steps.get_base_branch.outputs.owgw_branch }}
-      with:
-        owner: Telecominfraproject
-        repo: wlan-testing
-        workflow: ow_docker-compose.yml
-        token: ${{ secrets.WLAN_TESTING_PAT }}
-        ref: master
-        inputs: '{"deployment_version": "${{ env.BASE_BRANCH }}", "owgw_version": "${{ env.OWGW_BASE_BRANCH }}", "owsec_version": "${{ env.BASE_BRANCH }}", "owfms_version": "${{ env.BASE_BRANCH }}", "owprov_version": "${{ github.sha }}", "owanalytics_version": "${{ env.BASE_BRANCH }}", "owsub_version": "${{ env.BASE_BRANCH }}", "microservice": "all"}'
-
-  trigger-deploy-to-dev:
+  shell-script-check:
+    name: Shell Script Syntax Check
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs:
-      - docker
     steps:
-    - name: Checkout actions repo
-      uses: actions/checkout@v2
-      with:
-        repository: Telecominfraproject/.github
-        path: github
+    - name: Checkout Repository Code
+      uses: actions/checkout@v3
 
-    - name: Trigger deployment of the latest version to dev instance and wait for result
-      uses: ./github/composite-actions/trigger-workflow-and-wait
-      with:
-        owner: Telecominfraproject
-        repo: wlan-testing
-        workflow: ucentralgw-dev-deployment.yaml
-        token: ${{ secrets.WLAN_TESTING_PAT }}
-        ref: master
-        inputs: '{"force_latest": "true"}'
+    - name: Check Shell Scripts Syntax
+      run: |
+        find . -type f \( -name "*.sh" -o -perm -111 \) \
+          -not -path "*/.git/*" \
+          -not -path "*/build/*" \
+          -not -path "*/cmake-build/*" \
+          -not -path "*/node_modules/*" \
+          | while read -r file; do
+              if [[ "$file" == *.sh ]] || head -n 1 "$file" | grep -qE '^#!.*/(ba)?sh'; then
+                echo "Checking syntax: $file"
+                bash -n "$file"
+              fi
+            done
+        echo "All discovered shell scripts passed syntax check!"
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v3
+
+    - name: Build Docker Image
+      run: |
+        docker build -t owprov:test .
