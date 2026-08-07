@@ -584,18 +584,16 @@ namespace OpenWifi {
 							}
 						}
 					}
-					if (LocationObj->has("timezone")) {
-						if (!LocationObj->get("timezone").isString()) {
-							Errors.push_back("Invalid timezone identifier in createObjects.location");
-							return Result;
-						}
-						auto Timezone = Poco::trim(LocationObj->get("timezone").toString());
-						if (!Utils::ValidTimeZone(Timezone)) {
-							Errors.push_back("Invalid timezone identifier in createObjects.location");
-							return Result;
-						}
-						LocationObj->set("timezone", Timezone);
+					if (!LocationObj->has("timezone") || !LocationObj->get("timezone").isString()) {
+						Errors.push_back("Invalid timezone identifier in createObjects.location");
+						return Result;
 					}
+					auto Timezone = Poco::trim(LocationObj->get("timezone").toString());
+					if (!Utils::ValidTimeZone(Timezone)) {
+						Errors.push_back("Invalid timezone identifier in createObjects.location");
+						return Result;
+					}
+					LocationObj->set("timezone", Timezone);
 				} else if constexpr (std::is_same_v<Type, ProvObjects::InventoryTag>) {
 					if (!Object->has("configuration")) {
 						Errors.push_back("Invalid JSON document: item in createObjects.objects must contain configuration");

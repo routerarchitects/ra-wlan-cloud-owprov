@@ -10,23 +10,29 @@
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
         auto subscriberId = GetParameter("subscriberId", "");
-        if (!subscriberId.empty()) {
-            if (!Utils::ValidUUID(subscriberId)) {
-                return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-            }
-            VenueDB::RecordVec Venues;
-            auto Where = fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId));
-            DB_.GetRecords(QB_.Offset, QB_.Limit, Venues, Where, " ORDER BY name ");
-            return ReturnObject("venues", Venues);
+        auto RRMvendor = GetParameter("RRMvendor", "");
+
+        if (!subscriberId.empty() && !Utils::ValidUUID(subscriberId)) {
+            return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
         }
 
-        auto RRMvendor = GetParameter("RRMvendor","");
-        if(RRMvendor.empty()) {
+        if (subscriberId.empty() && RRMvendor.empty()) {
             return ListHandler<VenueDB>("venues", DB_, *this);
         }
+
+        std::string WhereClause;
+        if (!subscriberId.empty()) {
+            WhereClause += fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId));
+        }
+        if (!RRMvendor.empty()) {
+            if (!WhereClause.empty()) {
+                WhereClause += " AND ";
+            }
+            WhereClause += fmt::format(" deviceRules LIKE '%{}%' ", ORM::Escape(RRMvendor));
+        }
+
         VenueDB::RecordVec Venues;
-        auto Where = fmt::format(" deviceRules LIKE '%{}%' ", RRMvendor);
-        DB_.GetRecords(QB_.Offset, QB_.Limit, Venues, Where, " ORDER BY name ");
-        return ReturnObject("venues",Venues);
+        DB_.GetRecords(QB_.Offset, QB_.Limit, Venues, WhereClause, " ORDER BY name ");
+        return ReturnObject("venues", Venues);
     }
 } // namespace OpenWifi
