@@ -369,6 +369,60 @@ components:
             type: string
             format: uuid
 
+    VenueCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Venue'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/VenueCreateObjects'
+
+    VenueUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Venue'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/VenueCreateObjects'
+
+    VenueCreateObjects:
+      type: object
+      description: Inline location objects to create and automatically link during Venue creation or modification
+      properties:
+        objects:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              location:
+                $ref: '#/components/schemas/LocationCreateRequest'
+            required:
+              - location
+      required:
+        - objects
+
+    InventoryCreateObjects:
+      type: object
+      description: Inline configuration objects to create and automatically link during Inventory creation or modification
+      properties:
+        objects:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              configuration:
+                $ref: '#/components/schemas/DeviceConfiguration'
+            required:
+              - configuration
+      required:
+        - objects
+
     VenueList:
       type: object
       properties:
@@ -475,6 +529,17 @@ components:
           format: uuid
         geoCode:
           type: string
+        timezone:
+          type: string
+          description: IANA Timezone identifier string
+          example: Asia/Kolkata
+
+    LocationCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Location'
+        - type: object
+          required:
+            - timezone
 
     LocationList:
       type: object
@@ -859,6 +924,22 @@ components:
           enum:
             - AP
             - SWITCH
+
+    InventoryCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/InventoryTag'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/InventoryCreateObjects'
+
+    InventoryUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/InventoryTag'
+        - type: object
+          properties:
+            createObjects:
+              $ref: '#/components/schemas/InventoryCreateObjects'
 
     VenueDeviceList:
       type: object
@@ -2149,7 +2230,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Location'
+              $ref: '#/components/schemas/LocationCreateRequest'
       responses:
         200:
           $ref: '#/components/schemas/Location'
@@ -2395,7 +2476,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/InventoryTag'
+              $ref: '#/components/schemas/InventoryCreateRequest'
       responses:
         200:
           $ref: '#/components/schemas/InventoryTag'
@@ -2429,7 +2510,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/InventoryTag'
+              $ref: '#/components/schemas/InventoryUpdateRequest'
 
       responses:
         200:
@@ -2607,6 +2688,13 @@ paths:
             example:
               - this is the shortname of the RRM vendor
           required: false
+        - in: query
+          description: filter venues by subscriber ID
+          name: subscriberId
+          schema:
+            type: string
+            format: uuid
+          required: false
       responses:
         200:
           description: Return a list of venues.
@@ -2671,30 +2759,12 @@ paths:
             type: string
             format: uuid
           required: true
-        - in: query
-          name: createObjects
-          schema:
-            type: object
-            properties:
-              objects:
-                type: array
-                items:
-                  oneOf:
-                    - type: object
-                      properties:
-                        location:
-                          $ref: '#/components/schemas/Location'
-                    - type: object
-                      properties:
-                        contact:
-                          $ref: '#/components/schemas/Contact'
-          required: false
       requestBody:
         description: Information used to create the new venue
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Venue'
+              $ref: '#/components/schemas/VenueCreateRequest'
 
       responses:
         200:
@@ -2755,7 +2825,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Venue'
+              $ref: '#/components/schemas/VenueUpdateRequest'
 
       responses:
         200:

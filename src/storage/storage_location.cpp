@@ -34,7 +34,8 @@ namespace OpenWifi {
 										   ORM::Field{"inUse", ORM::FieldType::FT_TEXT},
 										   ORM::Field{"tags", ORM::FieldType::FT_TEXT},
 										   ORM::Field{"managementPolicy", ORM::FieldType::FT_TEXT},
-										   ORM::Field{"entity", ORM::FieldType::FT_TEXT}};
+										   ORM::Field{"entity", ORM::FieldType::FT_TEXT},
+										   ORM::Field{"timezone", ORM::FieldType::FT_TEXT}};
 
 	static ORM::IndexVec LocationDB_Indexes{
 		{std::string("location_name_index"),
@@ -42,6 +43,57 @@ namespace OpenWifi {
 
 	LocationDB::LocationDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L)
 		: DB(T, "locations", LocationDB_Fields, LocationDB_Indexes, P, L, "loc") {}
+
+	// Upgrades the locations table schema by adding the timezone column.
+	bool LocationDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
+		to = Version();
+
+		std::string CheckQuery;
+		if (Type_ == OpenWifi::DBType::sqlite) {
+			CheckQuery = "select count(*) from pragma_table_info('" + TableName_ + "') where lower(name) = 'timezone'";
+		} else if (Type_ == OpenWifi::DBType::pgsql) {
+			CheckQuery = "select count(*) from information_schema.columns where lower(table_name) = '" + Poco::toLower(TableName_) + "' and lower(column_name) = 'timezone' and table_schema = current_schema()";
+		} else {
+			CheckQuery = "select count(*) from information_schema.columns where lower(table_name) = '" + Poco::toLower(TableName_) + "' and lower(column_name) = 'timezone' and table_schema = database()";
+		}
+
+		std::size_t count = 0;
+		try {
+			auto Session = Pool_.get();
+			Session << CheckQuery, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
+		} catch (const Poco::Exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade schema pre-check failed on table {}: {}", TableName_, E.displayText()));
+			return false;
+		} catch (const std::exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade schema pre-check failed on table {}: {}", TableName_, E.what()));
+			return false;
+		} catch (...) {
+			Logger().error(fmt::format("LocationDB::Upgrade schema pre-check failed on table {}: unknown exception", TableName_));
+			return false;
+		}
+
+		if (count > 0) {
+			Logger().information(fmt::format("LocationDB::Upgrade: Column 'timezone' already exists in table {}", TableName_));
+			return true;
+		}
+
+		try {
+			auto Session = Pool_.get();
+			std::string Query = "alter table " + TableName_ + " add column timezone text";
+			Session << Query, Poco::Data::Keywords::now;
+			Logger().information(fmt::format("LocationDB::Upgrade: Successfully added column 'timezone' to table {}", TableName_));
+			return true;
+		} catch (const Poco::Exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade failed on table {}: {}", TableName_, E.displayText()));
+			return false;
+		} catch (const std::exception &E) {
+			Logger().error(fmt::format("LocationDB::Upgrade failed on table {}: {}", TableName_, E.what()));
+			return false;
+		} catch (...) {
+			Logger().error(fmt::format("LocationDB::Upgrade failed on table {}: unknown exception", TableName_));
+			return false;
+		}
+	}
 
 } // namespace OpenWifi
 
@@ -69,6 +121,7 @@ void ORM::DB<OpenWifi::LocationDBRecordType, OpenWifi::ProvObjects::Location>::C
 	Out.info.tags = OpenWifi::RESTAPI_utils::to_taglist(In.get<17>());
 	Out.managementPolicy = In.get<18>();
 	Out.entity = In.get<19>();
+	Out.timezone = In.get<20>();
 }
 
 template <>
@@ -94,4 +147,5 @@ void ORM::DB<OpenWifi::LocationDBRecordType, OpenWifi::ProvObjects::Location>::C
 	Out.set<17>(OpenWifi::RESTAPI_utils::to_string(In.info.tags));
 	Out.set<18>(In.managementPolicy);
 	Out.set<19>(In.entity);
+	Out.set<20>(In.timezone);
 }
