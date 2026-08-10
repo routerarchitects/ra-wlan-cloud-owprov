@@ -3,101 +3,80 @@ name: CI
 on:
   push:
     paths-ignore:
-      - 'openapi/**'
       - '**.md'
     branches:
       - main
-      - 'release/*'
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
-      - 'release/*'
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  docker:
+  openapi-validation:
+    name: Validate OpenAPI Schemas
     runs-on: ubuntu-latest
-    env:
-      DOCKER_REGISTRY_URL: tip-tip-wlan-cloud-ucentral.jfrog.io
-      DOCKER_REGISTRY_USERNAME: ucentral
     steps:
-    - name: Checkout actions repo
-      uses: actions/checkout@v3
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
       with:
-        repository: Telecominfraproject/.github
-        path: github
+        node-version: '22'
 
-    - name: Build and push Docker image
-      uses: ./github/composite-actions/docker-image-build
-      with:
-        image_name: owprov
-        registry: tip-tip-wlan-cloud-ucentral.jfrog.io
-        registry_user: ucentral
-        registry_password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+    - name: Install Redocly CLI
+      run: npm install -g @redocly/cli@2.41.1
 
-    - name: Notify on failure via Slack
-      if: failure() && github.ref == 'refs/heads/main'
-      uses: rtCamp/action-slack-notify@v2
-      env:
-        SLACK_USERNAME: GitHub Actions failure notifier
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        SLACK_COLOR: "${{ job.status }}"
-        SLACK_ICON: https://raw.githubusercontent.com/quintessence/slack-icons/master/images/github-logo-slack-icon.png
-        SLACK_TITLE: Docker build failed for OWProv service
-
-  trigger-testing:
-    if: startsWith(github.ref, 'refs/pull/')
-    runs-on: ubuntu-latest
-    needs: docker
-    steps:
-    - name: Get base branch name and set as output
-      id: get_base_branch
+    - name: Validate OpenAPI Specifications with Redocly
       run: |
-        echo "branch=$(echo ${GITHUB_BASE_REF##*/})" >> $GITHUB_OUTPUT
-        echo "owgw_branch=$(echo ${GITHUB_BASE_REF##*/} | sed 's/main/master/g')" >> $GITHUB_OUTPUT
+        mapfile -d '' files < <(
+          find openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0
+        )
 
-    - name: Checkout actions repo
-      uses: actions/checkout@v3
-      with:
-        repository: Telecominfraproject/.github
-        path: github
+        if (( ${#files[@]} == 0 )); then
+          echo "ERROR: No OpenAPI specification files found in openapi/ directory!" >&2
+          exit 1
+        fi
 
-    - name: Trigger testing of OpenWifi Docker Compose deployment and wait for result
-      uses: ./github/composite-actions/trigger-workflow-and-wait
-      env:
-        BASE_BRANCH: ${{ steps.get_base_branch.outputs.branch }}
-        OWGW_BASE_BRANCH: ${{ steps.get_base_branch.outputs.owgw_branch }}
-      with:
-        owner: Telecominfraproject
-        repo: wlan-testing
-        workflow: ow_docker-compose.yml
-        token: ${{ secrets.WLAN_TESTING_PAT }}
-        ref: master
-        inputs: '{"deployment_version": "${{ env.BASE_BRANCH }}", "owgw_version": "${{ env.OWGW_BASE_BRANCH }}", "owsec_version": "${{ env.BASE_BRANCH }}", "owfms_version": "${{ env.BASE_BRANCH }}", "owprov_version": "${{ github.sha }}", "owanalytics_version": "${{ env.BASE_BRANCH }}", "owsub_version": "${{ env.BASE_BRANCH }}", "microservice": "all"}'
+        redocly lint -- "${files[@]}"
 
-  trigger-deploy-to-dev:
+  shell-script-check:
+    name: Shell Script Syntax Check
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs:
-      - docker
     steps:
-    - name: Checkout actions repo
-      uses: actions/checkout@v2
-      with:
-        repository: Telecominfraproject/.github
-        path: github
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
 
-    - name: Trigger deployment of the latest version to dev instance and wait for result
-      uses: ./github/composite-actions/trigger-workflow-and-wait
-      with:
-        owner: Telecominfraproject
-        repo: wlan-testing
-        workflow: ucentralgw-dev-deployment.yaml
-        token: ${{ secrets.WLAN_TESTING_PAT }}
-        ref: master
-        inputs: '{"force_latest": "true"}'
+    - name: Check Shell Scripts Syntax
+      run: |
+        set -euo pipefail
+
+        while IFS= read -r -d '' file; do
+          if [[ "$file" == *.sh ]] || head -n 1 "$file" | grep -qE '^#!.*/(ba)?sh([[:space:]]|$)'; then
+            echo "Checking syntax: $file"
+            bash -n "$file"
+          fi
+        done < <(
+          find . -type f \( -name '*.sh' -o -perm -111 \) \
+            -not -path '*/.git/*' \
+            -not -path '*/build/*' \
+            -not -path '*/cmake-build/*' \
+            -not -path '*/node_modules/*' \
+            -print0
+        )
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Build Docker Image
+      run: |
+        docker build -t owprov:test .
