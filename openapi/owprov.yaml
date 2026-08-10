@@ -398,7 +398,7 @@ components:
             additionalProperties: false
             properties:
               location:
-                $ref: '#/components/schemas/Location'
+                $ref: '#/components/schemas/LocationCreateRequest'
             required:
               - location
       required:
@@ -533,6 +533,13 @@ components:
           type: string
           description: IANA Timezone identifier string
           example: Asia/Kolkata
+
+    LocationCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Location'
+        - type: object
+          required:
+            - timezone
 
     LocationList:
       type: object
@@ -2223,7 +2230,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Location'
+              $ref: '#/components/schemas/LocationCreateRequest'
       responses:
         200:
           $ref: '#/components/schemas/Location'
