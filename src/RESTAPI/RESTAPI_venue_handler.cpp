@@ -211,11 +211,15 @@ namespace OpenWifi {
 
 		NewObject.children.clear();
 
-		RESTAPI::Errors::msg Error = RESTAPI::Errors::SUCCESS;
 		std::vector<std::string> Errors;
-		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
-		if (Error.err_num != 0) {
-			return BadRequest(RESTAPI::Errors::InternalError);
+		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
+		if (!Errors.empty()) {
+			for (const auto &err : Errors) {
+				if (err.find("timezone") != std::string::npos || err.find("Timezone") != std::string::npos) {
+					return BadRequest(RESTAPI::Errors::InvalidTimezone);
+				}
+			}
+			return BadRequest(RESTAPI::Errors::InvalidCreateObjectsRequest, Errors[0]);
 		}
 
 		if (DB_.CreateRecord(NewObject)) {
@@ -472,7 +476,7 @@ namespace OpenWifi {
 
 		std::string MoveFromLocation, MoveToLocation;
 		if (AssignIfPresent(RawObject, "location", MoveToLocation)) {
-			if (MoveToLocation.empty() ||
+			if (!MoveToLocation.empty() &&
 				!StorageService()->LocationDB().Exists("id", MoveToLocation)) {
 				return BadRequest(RESTAPI::Errors::LocationMustExist);
 			}
@@ -516,21 +520,25 @@ namespace OpenWifi {
 		std::string ErrorText;
 		NewObject.parent = Existing.parent;
 		NewObject.entity = Existing.entity;
+		NewObject.location = Existing.location;
 
 		std::vector<std::string> Errors;
-		auto ObjectsCreated = CreateObjects(NewObject, *this, Errors);
+		auto ObjectsCreated = CreateObjects(NewObject, *this, ParsedBody_, Errors);
 		if (!Errors.empty()) {
-			return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
+			for (const auto &err : Errors) {
+				if (err.find("timezone") != std::string::npos || err.find("Timezone") != std::string::npos) {
+					return BadRequest(RESTAPI::Errors::InvalidTimezone);
+				}
+			}
+			return BadRequest(RESTAPI::Errors::InvalidCreateObjectsRequest, Errors[0]);
 		}
 
 		if (!ObjectsCreated.empty()) {
-			if (!ObjectsCreated.empty()) {
-				auto it = ObjectsCreated.find("location");
-				if (it != ObjectsCreated.end()) {
-					MoveFromLocation = "";
-					MoveToLocation = it->second;
-					Existing.location = MoveToLocation;
-				}
+			auto it = ObjectsCreated.find("location");
+			if (it != ObjectsCreated.end()) {
+				MoveFromLocation = Existing.location;
+				MoveToLocation = it->second;
+				Existing.location = MoveToLocation;
 			}
 		}
 

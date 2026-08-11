@@ -48,7 +48,10 @@ namespace OpenWifi {
 		EntityDB_->Create();
 		PolicyDB_->Create();
 		VenueDB_->Create();
-		LocationDB_->Create();
+		if (!LocationDB_->Create()) {
+			poco_critical(Logger(), "LocationDB initialization or migration reported failure. Halting daemon startup.");
+			return -1;
+		}
 		ContactDB_->Create();
 		InventoryDB_->Create();
 		RolesDB_->Create();

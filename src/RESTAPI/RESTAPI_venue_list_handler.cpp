@@ -5,6 +5,7 @@
 #include "RESTAPI_venue_list_handler.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "StorageService.h"
+#include "framework/utils.h"
 
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {

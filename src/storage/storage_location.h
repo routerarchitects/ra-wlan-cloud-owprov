@@ -15,13 +15,14 @@ namespace OpenWifi {
 	typedef Poco::Tuple<std::string, std::string, std::string, std::string, uint64_t, uint64_t,
 						std::string, std::string, std::string, std::string, std::string,
 						std::string, std::string, std::string, std::string, std::string,
-						std::string, std::string, std::string, std::string>
+						std::string, std::string, std::string, std::string, std::string>
 		LocationDBRecordType;
 
 	class LocationDB : public ORM::DB<LocationDBRecordType, ProvObjects::Location> {
 	  public:
 		LocationDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L);
 		virtual ~LocationDB(){};
+		bool Upgrade(uint32_t from, uint32_t &to) override;
 
 	  private:
 	};

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  openapi-validation:
+    name: Validate OpenAPI Schemas
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Install Redocly CLI
+      run: npm install -g @redocly/cli@2.41.1
+
+    - name: Validate OpenAPI Specifications with Redocly
+      run: |
+        mapfile -d '' files < <(
+          find openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0
+        )
+
+        if (( ${#files[@]} == 0 )); then
+          echo "ERROR: No OpenAPI specification files found in openapi/ directory!" >&2
+          exit 1
+        fi
+
+        redocly lint -- "${files[@]}"
+
+  shell-script-check:
+    name: Shell Script Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Check Shell Scripts Syntax
+      run: |
+        set -euo pipefail
+
+        while IFS= read -r -d '' file; do
+          if [[ "$file" == *.sh ]] || head -n 1 "$file" | grep -qE '^#!.*/(ba)?sh([[:space:]]|$)'; then
+            echo "Checking syntax: $file"
+            bash -n "$file"
+          fi
+        done < <(
+          find . -type f \( -name '*.sh' -o -perm -111 \) \
+            -not -path '*/.git/*' \
+            -not -path '*/build/*' \
+            -not -path '*/cmake-build/*' \
+            -not -path '*/node_modules/*' \
+            -print0
+        )
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Build Docker Image
+      run: |
+        docker build -t owprov:test .

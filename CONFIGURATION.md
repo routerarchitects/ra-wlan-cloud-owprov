@@ -55,7 +55,7 @@ openwifi.restapi.host.0.backlog = 100
 openwifi.restapi.host.0.security = relaxed
 openwifi.restapi.host.0.rootca = $OWPROV_ROOT/certs/restapi-ca.pem
 openwifi.restapi.host.0.address = *
-openwifi.restapi.host.0.port = 16004
+openwifi.restapi.host.0.port = 16005
 openwifi.restapi.host.0.cert = $OWPROV_ROOT/certs/restapi-cert.pem
 openwifi.restapi.host.0.key = $OWPROV_ROOT/certs/restapi-key.pem
 openwifi.restapi.host.0.key.password = mypassword
@@ -86,7 +86,7 @@ openwifi.internal.restapi.host.0.backlog = 100
 openwifi.internal.restapi.host.0.security = relaxed
 openwifi.internal.restapi.host.0.rootca = $OWPROV_ROOT/certs/restapi-ca.pem
 openwifi.internal.restapi.host.0.address = *
-openwifi.internal.restapi.host.0.port = 17004
+openwifi.internal.restapi.host.0.port = 17005
 openwifi.internal.restapi.host.0.cert = $OWPROV_ROOT/certs/restapi-cert.pem
 openwifi.internal.restapi.host.0.key = $OWPROV_ROOT/certs/restapi-key.pem
 openwifi.internal.restapi.host.0.key.password = mypassword
@@ -115,8 +115,8 @@ These are different Microservie parameters. Following is a brief explanation.
 openwifi.service.key = $OWPROV_ROOT/certs/restapi-key.pem
 openwifi.service.key.password = mypassword
 openwifi.system.data = $OWPROV_ROOT/data
-openwifi.system.uri.private = https://localhost:17004
-openwifi.system.uri.public = https://ucentral.example.com:16004
+openwifi.system.uri.private = https://localhost:17005
+openwifi.system.uri.public = https://ucentral.example.com:16005
 openwifi.system.uri.ui = https://provisionins-ui.example.com
 openwifi.security.restapi.disable = false
 openwifi.system.commandchannel = /tmp/app.ucentralprov
@@ -147,7 +147,7 @@ Allow unknown devices to be provisioned by the system.
 In order to support an application load balancer health check verification, your need to provide the following parameters.
 ```properties
 alb.enable = true
-alb.port = 16104
+alb.port = 16105
 ```
 
 ### Kafka

@@ -256,6 +256,7 @@ namespace OpenWifi::ProvObjects {
         Types::StringVec inUse;
         Types::UUID_t entity;
         Types::UUID_t managementPolicy;
+        std::string timezone;
 
         void to_json(Poco::JSON::Object &Obj) const;
 

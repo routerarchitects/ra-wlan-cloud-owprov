@@ -87,7 +87,7 @@ RUN mkdir -p "$OWPROV_ROOT" "$OWPROV_CONFIG" && \
 
 RUN apt-get update && apt-get install --no-install-recommends -y \
     librdkafka++1 gosu gettext ca-certificates bash jq curl wget \
-    libmariadb-dev-compat libpq5 postgresql-client libfmt7
+    libmariadb-dev-compat libpq5 postgresql-client libfmt7 tzdata
 
 COPY readiness_check /readiness_check
 COPY test_scripts/curl/cli /cli

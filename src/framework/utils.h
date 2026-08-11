@@ -123,6 +123,7 @@ namespace OpenWifi::Utils {
 	[[nodiscard]] bool IsAlphaNumeric(const std::string &s);
 	[[nodiscard]] std::string SanitizeToken(const std::string &Token);
 	[[nodiscard]] bool ValidateURI(const std::string &uri);
+	[[nodiscard]] bool ValidTimeZone(const std::string &timezone);
 
 	[[nodiscard]] std::uint64_t ConvertDate(const std::string &d);
 
