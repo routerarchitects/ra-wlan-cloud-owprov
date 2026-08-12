@@ -112,12 +112,53 @@ jobs:
           cp /tmp/owprov-data/certs/restapi-cert.pem \
             /tmp/owprov-data/certs/restapi-ca.pem
 
-          echo "Generated certificates:"
-          ls -l /tmp/owprov-data/certs
+          # Important: container user must be able to read these
+          chmod 644 /tmp/owprov-data/certs/restapi-key.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-cert.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-ca.pem
 
-          test -s /tmp/owprov-data/certs/restapi-key.pem
-          test -s /tmp/owprov-data/certs/restapi-cert.pem
-          test -s /tmp/owprov-data/certs/restapi-ca.pem
+          # owprov/SQLite must also be able to write runtime data
+          chmod 777 /tmp/owprov-data/data
+          chmod 666 /tmp/owprov-data/data/registry.json
+
+          echo "Generated certificates:"
+          ls -la /tmp/owprov-data/certs
+          echo "Runtime data:"
+          ls -la /tmp/owprov-data/data
+
+          test -r /tmp/owprov-data/certs/restapi-key.pem
+          test -r /tmp/owprov-data/certs/restapi-cert.pem
+          test -r /tmp/owprov-data/certs/restapi-ca.pem
+
+
+
+
+
+      # -- Diagnostic check --
+      - name: Debug owprov image user and mounts
+        run: |
+          set -euo pipefail
+
+          echo "Configured image user:"
+          docker image inspect owprov:test \
+            --format 'User={{.Config.User}}'
+
+          echo "Files as seen from inside container:"
+          docker run --rm \
+            -v /tmp/owprov-data/certs:/owprov-data/certs:ro \
+            -v /tmp/owprov-data/data:/owprov-data/data \
+            owprov:test \
+            sh -c '
+              id
+              echo "--- certs ---"
+              ls -la /owprov-data/certs
+              echo "--- data ---"
+              ls -la /owprov-data/data
+              echo "--- key readability ---"
+              test -r /owprov-data/certs/restapi-key.pem &&
+                echo "KEY READABLE" ||
+                { echo "KEY NOT READABLE"; exit 1; }
+            '
 
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
