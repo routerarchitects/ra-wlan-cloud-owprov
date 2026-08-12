@@ -89,13 +89,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+
+
+      - name: Prepare owprov runtime certificates
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/owprov-data/certs
+          mkdir -p /tmp/owprov-data/data
+
+          echo '{}' > /tmp/owprov-data/data/registry.json
+
+          openssl req \
+            -x509 \
+            -nodes \
+            -days 1 \
+            -newkey rsa:2048 \
+            -keyout /tmp/owprov-data/certs/restapi-key.pem \
+            -out /tmp/owprov-data/certs/restapi-cert.pem \
+            -subj "/CN=localhost"
+
+          cp /tmp/owprov-data/certs/restapi-cert.pem \
+            /tmp/owprov-data/certs/restapi-ca.pem
+
+          echo "Generated certificates:"
+          ls -l /tmp/owprov-data/certs
+
+          test -s /tmp/owprov-data/certs/restapi-key.pem
+          test -s /tmp/owprov-data/certs/restapi-cert.pem
+          test -s /tmp/owprov-data/certs/restapi-ca.pem
+
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
         run: |
-          set -e
+          set -euo pipefail
+
           docker run -d \
             --name owprov \
             --network host \
+            -v /tmp/owprov-data/certs:/owprov-data/certs:ro \
+            -v /tmp/owprov-data/data:/owprov-data/data \
             -e TEMPLATE_CONFIG=true \
             -e KAFKA_ENABLE=true \
             -e KAFKA_BROKERLIST=localhost:9092 \
@@ -105,16 +138,27 @@ jobs:
             owprov:test
 
           echo "Waiting for owprov to start on port 16005..."
+
           for i in {1..40}; do
-            if curl -k -s --max-time 3 https://localhost:16005/api/v1/system?command=info > /dev/null 2>&1; then
+            if curl -k -s --fail --max-time 3 \
+              "https://localhost:16005/api/v1/system?command=info" \
+              > /dev/null 2>&1; then
               echo "owprov is UP!"
               exit 0
             fi
-            echo "  attempt $i/40..."
+
+            if ! docker inspect -f '{{.State.Running}}' owprov 2>/dev/null | grep -q true; then
+              echo "ERROR: owprov container exited!"
+              docker logs owprov
+              exit 1
+            fi
+
+            echo "attempt $i/40..."
             sleep 3
           done
+
           echo "ERROR: owprov did not start in time!"
-          docker logs owprov 2>&1 | tail -50
+          docker logs owprov
           exit 1
 
       # ── Start mock services ───────────────────────────────────────────────────
