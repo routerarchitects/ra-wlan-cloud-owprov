@@ -83,29 +83,28 @@ jobs:
             --if-not-exists
 
       # ── Build owprov Docker image (with layer cache) ──────────────────────────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build owprov Docker Image (cached)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          load: true
-          tags: owprov:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-
-
-      - name: Prepare owprov runtime certificates
+      - name: Prepare owprov runtime data
         run: |
           set -euo pipefail
 
           mkdir -p /tmp/owprov-data/certs
           mkdir -p /tmp/owprov-data/data
 
-          echo '{}' > /tmp/owprov-data/data/registry.json
+          cat > /tmp/owprov-data/data/registry.json <<'EOF'
+          {
+            "deviceTypes": [
+              "openwrt_generic",
+              "edgecore_eap101",
+              "edgecore_eap102",
+              "edgecore_ecs4100",
+              "indio_um305ac",
+              "cig_wf188",
+              "wlan_ap",
+              "generic",
+              "tplink_archer"
+            ]
+          }
+          EOF
 
           openssl req \
             -x509 \
@@ -119,26 +118,15 @@ jobs:
           cp /tmp/owprov-data/certs/restapi-cert.pem \
             /tmp/owprov-data/certs/restapi-ca.pem
 
-          # Important: container user must be able to read these
           chmod 644 /tmp/owprov-data/certs/restapi-key.pem
           chmod 644 /tmp/owprov-data/certs/restapi-cert.pem
           chmod 644 /tmp/owprov-data/certs/restapi-ca.pem
 
-          # owprov/SQLite must also be able to write runtime data
           chmod 777 /tmp/owprov-data/data
           chmod 666 /tmp/owprov-data/data/registry.json
 
-          echo "Generated certificates:"
-          ls -la /tmp/owprov-data/certs
-          echo "Runtime data:"
-          ls -la /tmp/owprov-data/data
-
-          test -r /tmp/owprov-data/certs/restapi-key.pem
-          test -r /tmp/owprov-data/certs/restapi-cert.pem
-          test -r /tmp/owprov-data/certs/restapi-ca.pem
-
-
-
+          echo "registry.json:"
+          cat /tmp/owprov-data/data/registry.json
 
 
       # -- Diagnostic check --
@@ -166,6 +154,39 @@ jobs:
                 echo "KEY READABLE" ||
                 { echo "KEY NOT READABLE"; exit 1; }
             '
+
+      # ── Start mock services ───────────────────────────────────────────────────
+      - name: Start mock_owsec and mock_fms
+        run: |
+          set -e
+          PORT=16001 /tmp/mock_owsec &
+          PORT=16004 /tmp/mock_fms &
+
+          echo "Waiting for mock_owsec (port 16001)..."
+          for i in {1..20}; do
+            if curl -k -s --fail --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
+              echo "mock_owsec is UP!"
+              break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: mock_owsec did not start!"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Waiting for mock_fms (port 16004)..."
+          for i in {1..20}; do
+            if curl -k -s --fail --max-time 2 https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
+              echo "mock_fms is UP!"
+              break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: mock_fms did not start!"
+              exit 1
+            fi
+            sleep 1
+          done
 
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
@@ -208,39 +229,6 @@ jobs:
           echo "ERROR: owprov did not start in time!"
           docker logs owprov
           exit 1
-
-      # ── Start mock services ───────────────────────────────────────────────────
-      - name: Start mock_owsec and mock_fms
-        run: |
-          set -e
-          PORT=16001 /tmp/mock_owsec &
-          PORT=16004 /tmp/mock_fms &
-
-          echo "Waiting for mock_owsec (port 16001)..."
-          for i in {1..20}; do
-            if curl -k -s --fail --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
-              echo "mock_owsec is UP!"
-              break
-            fi
-            if [ "$i" -eq 20 ]; then
-              echo "ERROR: mock_owsec did not start!"
-              exit 1
-            fi
-            sleep 1
-          done
-
-          echo "Waiting for mock_fms (port 16004)..."
-          for i in {1..20}; do
-            if curl -k -s --fail --max-time 2 https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
-              echo "mock_fms is UP!"
-              break
-            fi
-            if [ "$i" -eq 20 ]; then
-              echo "ERROR: mock_fms did not start!"
-              exit 1
-            fi
-            sleep 1
-          done
 
       # ── Publish Kafka join events ────────────────────────────────────────────
       - name: Publish owsec + owfms Kafka join events
