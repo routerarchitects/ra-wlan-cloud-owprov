@@ -42,19 +42,20 @@ jobs:
           docker run -d \
             --name kafka \
             --network host \
-            -e KAFKA_CFG_NODE_ID=0 \
-            -e KAFKA_CFG_PROCESS_ROLES=controller,broker \
-            -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
-            -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
-            -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
-            -e KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@localhost:9093 \
-            -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-            -e ALLOW_PLAINTEXT_LISTENER=yes \
-            bitnami/kafka:3.6
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
+            apache/kafka:latest
 
           echo "Waiting for Kafka to be ready..."
           for i in {1..30}; do
-            if docker exec kafka /opt/bitnami/kafka/bin/kafka-topics.sh \
+            if docker exec kafka /opt/kafka/bin/kafka-topics.sh \
                 --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
               echo "Kafka is ready!"
               exit 0
@@ -68,7 +69,7 @@ jobs:
       # ── Create Kafka topic ───────────────────────────────────────────────────
       - name: Create Kafka service_events topic
         run: |
-          docker exec kafka /opt/bitnami/kafka/bin/kafka-topics.sh \
+          docker exec kafka /opt/kafka/bin/kafka-topics.sh \
             --bootstrap-server localhost:9092 \
             --create --topic service_events \
             --partitions 1 --replication-factor 1 \
@@ -153,11 +154,11 @@ jobs:
       - name: Publish owsec + owfms Kafka join events
         run: |
           echo '{"event":"join","id":16001,"type":"owsec","publicEndPoint":"https://localhost:16001","privateEndPoint":"https://localhost:16001","key":"testkey","version":"2.1.0"}' | \
-            docker exec -i kafka /opt/bitnami/kafka/bin/kafka-console-producer.sh \
+            docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
             --bootstrap-server localhost:9092 --topic service_events
 
           echo '{"event":"join","id":16004,"type":"owfms","publicEndPoint":"https://localhost:16004","privateEndPoint":"https://localhost:16004","key":"testkey","version":"2.1.0"}' | \
-            docker exec -i kafka /opt/bitnami/kafka/bin/kafka-console-producer.sh \
+            docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
             --bootstrap-server localhost:9092 --topic service_events
 
           echo "Waiting 10s for owprov to process join events..."
