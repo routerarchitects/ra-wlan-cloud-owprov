@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/csv"
@@ -27,52 +28,13 @@ type TestCase struct {
 	Description    string
 }
 
-// KnownFailures maps TestCaseID → human-readable reason for expected failure
-// These are infrastructure-level issues, not RBAC logic issues.
-var KnownFailures = map[string]string{
-	"ROOT-BOOTSTRAP-0008": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; inventory tag creation blocked",
-	"ROOT-BOOTSTRAP-0009": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; configuration creation blocked (deviceTypes validated against FMS cache)",
-	"ROOT-READ-0012":      "Depends on ROOT-BOOTSTRAP-0008 (inventory tag not created due to owfms/S3 issue)",
-	"ROOT-READ-0014":      "Depends on ROOT-BOOTSTRAP-0009 (configuration not created due to owfms/S3 issue)",
-	"ROOT-UPDATE-0006":    "Depends on ROOT-BOOTSTRAP-0008 (inventory tag not created due to owfms/S3 issue)",
-	"ROOT-UPDATE-0007":    "Depends on ROOT-BOOTSTRAP-0009 (configuration not created due to owfms/S3 issue)",
-	"ROOT-LIFECYCLE-0004": "Inventory tag was not created (owfms/S3 issue), so venue delete-with-device guard is not testable",
-	"ROOT-LIFECYCLE-0005": "Inventory tag was not created (owfms/S3 issue), so delete returns 404",
-	"ADMIN-BOOTSTRAP-0015": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; inventory tag creation blocked",
-	"ADMIN-BOOTSTRAP-0016": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; configuration creation blocked",
-	"ADMIN-INSCOPE-0015":   "Depends on ADMIN-BOOTSTRAP-0015 (inventory tag not created due to owfms/S3 issue)",
-	"ADMIN-INSCOPE-0016":   "Depends on ADMIN-BOOTSTRAP-0016 (configuration not created due to owfms/S3 issue)",
-	"ADMIN-INSCOPE-0017":   "Depends on ADMIN-BOOTSTRAP-0015 (inventory tag not created due to owfms/S3 issue)",
-	"ADMIN-INSCOPE-0018":   "Depends on ADMIN-BOOTSTRAP-0016 (configuration not created due to owfms/S3 issue)",
-	"ADMIN-LIFECYCLE-0021": "Inventory tag was not created (owfms/S3 issue), so delete returns 404",
-	"ADMIN-LIFECYCLE-0022": "Configuration was not created (owfms/S3 issue), so delete returns 404",
-	"NONROOT-BOOTSTRAP-0029": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; inventory tag creation blocked",
-	"NONROOT-BOOTSTRAP-0030": "owfms cannot fetch device types from S3 – DeviceTypeCache is empty; configuration creation blocked",
-	"ADMIN-FULL-0009":        "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"ADMIN-FULL-0010":        "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
-	"ADMIN-FULL-0011":        "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"ADMIN-READ-0004":        "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"ADMIN-READ-0005":        "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
-	"NOC-POS-0004":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"NOC-POS-0005":           "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
-	"NOC-POS-0006":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"CSR-POS-0003":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"CSR-POS-0004":           "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
-	"INSTALLER-POS-0003":     "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"INSTALLER-POS-0004":     "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"INSTALLER-POS-0005":     "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
-	"ACCOUNTING-POS-0003":    "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"ACCOUNTING-POS-0004":    "Depends on NONROOT-BOOTSTRAP-0030 (configuration not created due to owfms/S3 issue)",
-	"NONROOT-LIFECYCLE-0026": "Inventory tag was not created (owfms/S3 issue), so delete returns 404",
-	"NONROOT-LIFECYCLE-0027": "Configuration was not created (owfms/S3 issue), so delete returns 404",
-	"DEF-NOC-0003":           "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-	"DEF-INST-0002":          "Depends on NONROOT-BOOTSTRAP-0029 (inventory tag not created due to owfms/S3 issue)",
-}
+var KnownFailures = map[string]string{}
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 func main() {
 	fmt.Println("=== Starting Hierarchical RBAC v2.1 Lab Test Runner ===")
+	loadEnvFile(".env")
 
 	owsecBase := getEnv("OWSEC_BASE_URL", "https://localhost:16001/api/v1")
 	owprovBase := getEnv("OWPROV_BASE_URL", "https://localhost:16005/api/v1")
@@ -112,42 +74,49 @@ func main() {
 	fmt.Printf("=== Pre-cleanup complete ===\n\n")
 
 	// ── Load CSV ───────────────────────────────────────────────────────────
-	csvPath := getEnv("TEST_CSV", "owprov_rbac_v2_1_root_lab_test_cases.csv")
-	fmt.Printf("Loading test suite CSV: %s\n", csvPath)
-	file, err := os.Open(csvPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal: Failed to open CSV: %v\n", err)
-		os.Exit(1)
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
-	records, err := reader.ReadAll()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal: Failed to parse CSV: %v\n", err)
-		os.Exit(1)
+	csvEnv := getEnv("TEST_CSV", "")
+	var csvFiles []string
+	if csvEnv != "" {
+		csvFiles = []string{csvEnv}
+	} else {
+		csvFiles = []string{
+			"owprov_rbac_v2_1_root_lab_test_cases.csv",
+			"owprov_rbac_v2_1_admin_lab_test_cases.csv",
+		}
 	}
 
 	var testCases []TestCase
-	for i, r := range records {
-		if i == 0 {
+	for _, csvPath := range csvFiles {
+		fmt.Printf("Loading test suite CSV: %s\n", csvPath)
+		file, err := os.Open(csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to open CSV %s: %v\n", csvPath, err)
 			continue
 		}
-		if len(r) < 8 {
+		reader := csv.NewReader(file)
+		records, err := reader.ReadAll()
+		file.Close()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to parse CSV %s: %v\n", csvPath, err)
 			continue
 		}
-		testCases = append(testCases, TestCase{
-			ID:             r[0],
-			Category:       r[1],
-			Scenario:       r[2],
-			Method:         r[3],
-			Endpoint:       r[4],
-			RequestBody:    r[5],
-			ExpectedStatus: r[6],
-			Description:    r[7],
-		})
+		for i, r := range records {
+			if i == 0 || len(r) < 8 {
+				continue
+			}
+			testCases = append(testCases, TestCase{
+				ID:             r[0],
+				Category:       r[1],
+				Scenario:       r[2],
+				Method:         r[3],
+				Endpoint:       r[4],
+				RequestBody:    r[5],
+				ExpectedStatus: r[6],
+				Description:    r[7],
+			})
+		}
 	}
-	fmt.Printf("Loaded %d test cases from CSV.\n\n", len(testCases))
+	fmt.Printf("Loaded %d total test cases from CSV suites.\n\n", len(testCases))
 
 	// ── Placeholders ───────────────────────────────────────────────────────
 	placeholders := map[string]string{
@@ -186,14 +155,7 @@ func main() {
 	failedCount := 0
 	knownFailCount := 0
 
-	resultsFileName := getEnv("RESULTS_CSV", "")
-	if resultsFileName == "" {
-		if strings.Contains(csvPath, "admin") {
-			resultsFileName = "rbac_admin_actual_results.csv"
-		} else {
-			resultsFileName = "rbac_root_actual_results.csv"
-		}
-	}
+	resultsFileName := getEnv("RESULTS_CSV", "rbac_actual_results.csv")
 	fmt.Printf("Results will be written to: %s\n", resultsFileName)
 
 	resultsFile, err := os.Create(resultsFileName)
@@ -1020,4 +982,27 @@ func getEnv(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+func loadEnvFile(filename string) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			if os.Getenv(k) == "" {
+				os.Setenv(k, v)
+			}
+		}
+	}
 }

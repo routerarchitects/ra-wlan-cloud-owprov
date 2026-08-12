@@ -1,0 +1,128 @@
+name: Lab & RBAC Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+      - anil-feature
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lab-tests:
+    name: Run Lab Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      kafka:
+        image: bitnami/kafka:3.6
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_CFG_NODE_ID: 0
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@localhost:9093
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+        options: >-
+          --health-cmd "kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Start Mock Services (mock_owsec & mock_fms)
+        run: |
+          echo "Starting mock_owsec on port 16001 (HTTPS)..."
+          PORT=16001 go run tests/mock_services/mock_owsec/main.go &
+
+          echo "Starting mock_owfms on port 16004 (HTTPS)..."
+          PORT=16004 go run tests/mock_services/mock_fms/main.go &
+
+          # Wait for both mock services to be ready
+          echo "Waiting for mock services..."
+          for i in {1..20}; do
+            if curl -k -s https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
+              echo "mock_owsec is up!"
+              break
+            fi
+            sleep 1
+          done
+          for i in {1..20}; do
+            if curl -k -s https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
+              echo "mock_owfms is up!"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Build owprov Docker Image
+        run: docker build -t owprov:test .
+
+      - name: Run owprov Service Container
+        run: |
+          docker run -d \
+            --name owprov \
+            --network host \
+            -e TEMPLATE_CONFIG=true \
+            -e KAFKA_ENABLE=true \
+            -e KAFKA_BROKERLIST=localhost:9092 \
+            -e STORAGE_TYPE=sqlite \
+            -e RESTAPI_HOST_PORT=16005 \
+            -e INTERNAL_RESTAPI_HOST_PORT=17005 \
+            owprov:test
+
+          echo "Waiting for owprov to start..."
+          for i in {1..30}; do
+            if curl -k -s https://localhost:16005/api/v1/system?command=info > /dev/null 2>&1; then
+              echo "owprov is UP!"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Create Kafka Topic & Publish Microservice Join Events
+        run: |
+          # Create the topic (ignore error if it already exists)
+          docker run --rm --network host bitnami/kafka:3.6 \
+            kafka-topics.sh --bootstrap-server localhost:9092 \
+            --create --topic service_events --partitions 1 --replication-factor 1 \
+            --if-not-exists || true
+
+          # Publish owsec and owfms join events so owprov knows they are alive
+          echo '{"event":"join","id":16001,"type":"owsec","publicEndPoint":"https://localhost:16001","privateEndPoint":"https://localhost:16001","key":"testkey","version":"2.1.0"}' | \
+            docker run --rm -i --network host bitnami/kafka:3.6 \
+            kafka-console-producer.sh --bootstrap-server localhost:9092 --topic service_events
+
+          echo '{"event":"join","id":16004,"type":"owfms","publicEndPoint":"https://localhost:16004","privateEndPoint":"https://localhost:16004","key":"testkey","version":"2.1.0"}' | \
+            docker run --rm -i --network host bitnami/kafka:3.6 \
+            kafka-console-producer.sh --bootstrap-server localhost:9092 --topic service_events
+
+          # Give owprov time to process the join events and refresh device type cache
+          echo "Waiting 10s for owprov to process join events..."
+          sleep 10
+
+      - name: Execute Combined Lab Test Suite (Root + Admin)
+        run: |
+          cd tests/lab_tests
+          go run main.go
+
+      - name: Upload Test Result Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-test-results
+          path: tests/lab_tests/rbac_actual_results.csv
