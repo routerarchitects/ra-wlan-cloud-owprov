@@ -38,7 +38,8 @@ jobs:
       # ── Start Kafka (KRaft mode, no ZooKeeper) ───────────────────────────────
       - name: Start Kafka
         run: |
-          set -e
+          set -euo pipefail
+
           docker run -d \
             --name kafka \
             --network host \
@@ -50,20 +51,26 @@ jobs:
             -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
             -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
             -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
-            -e KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
-            apache/kafka:latest
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+            apache/kafka:3.7.1
 
           echo "Waiting for Kafka to be ready..."
+
           for i in {1..30}; do
             if docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-                --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
+              --bootstrap-server localhost:9092 \
+              --list > /dev/null 2>&1; then
               echo "Kafka is ready!"
               exit 0
             fi
-            echo "  attempt $i/30..."
+
+            echo "attempt $i/30..."
             sleep 2
           done
+
           echo "ERROR: Kafka did not start in time!"
+          docker logs kafka | tail -100
           exit 1
 
       # ── Create Kafka topic ───────────────────────────────────────────────────
@@ -181,10 +188,10 @@ jobs:
           echo "Waiting for owprov to start on port 16005..."
 
           for i in {1..40}; do
-            if curl -k -s --fail --max-time 3 \
+            if curl -k -s --max-time 3 \
               "https://localhost:16005/api/v1/system?command=info" \
               > /dev/null 2>&1; then
-              echo "owprov is UP!"
+              echo "owprov HTTPS endpoint is reachable!"
               exit 0
             fi
 
@@ -211,7 +218,7 @@ jobs:
 
           echo "Waiting for mock_owsec (port 16001)..."
           for i in {1..20}; do
-            if curl -k -s --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
+            if curl -k -s --fail --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
               echo "mock_owsec is UP!"
               break
             fi
@@ -224,7 +231,7 @@ jobs:
 
           echo "Waiting for mock_fms (port 16004)..."
           for i in {1..20}; do
-            if curl -k -s --max-time 2 https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
+            if curl -k -s --fail --max-time 2 https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
               echo "mock_fms is UP!"
               break
             fi
@@ -238,16 +245,23 @@ jobs:
       # ── Publish Kafka join events ────────────────────────────────────────────
       - name: Publish owsec + owfms Kafka join events
         run: |
+          set -euo pipefail
+
           echo '{"event":"join","id":16001,"type":"owsec","publicEndPoint":"https://localhost:16001","privateEndPoint":"https://localhost:16001","key":"testkey","version":"2.1.0"}' | \
             docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
-            --bootstrap-server localhost:9092 --topic service_events
+            --bootstrap-server localhost:9092 \
+            --topic service_events
 
           echo '{"event":"join","id":16004,"type":"owfms","publicEndPoint":"https://localhost:16004","privateEndPoint":"https://localhost:16004","key":"testkey","version":"2.1.0"}' | \
             docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
-            --bootstrap-server localhost:9092 --topic service_events
+            --bootstrap-server localhost:9092 \
+            --topic service_events
 
-          echo "Waiting 10s for owprov to process join events..."
+          echo "Waiting for owprov to consume service join events..."
           sleep 10
+
+          echo "Checking owprov logs for Kafka registration problems..."
+          docker logs owprov 2>&1 | tail -50
 
       # ── Run combined test suite ───────────────────────────────────────────────
       - name: Execute Combined Lab Test Suite (Root + Admin)
