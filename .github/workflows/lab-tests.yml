@@ -82,6 +82,22 @@ jobs:
             --partitions 1 --replication-factor 1 \
             --if-not-exists
 
+
+      # ── Build owprov Docker image ─────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build owprov Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: owprov:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
       # ── Build owprov Docker image (with layer cache) ──────────────────────────
       - name: Prepare owprov runtime data
         run: |
