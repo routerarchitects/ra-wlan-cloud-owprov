@@ -38,6 +38,7 @@ jobs:
       # ── Start Kafka (KRaft mode, no ZooKeeper) ───────────────────────────────
       - name: Start Kafka
         run: |
+          set -e
           docker run -d \
             --name kafka \
             --network host \
@@ -56,10 +57,13 @@ jobs:
             if docker exec kafka /opt/bitnami/kafka/bin/kafka-topics.sh \
                 --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
               echo "Kafka is ready!"
-              break
+              exit 0
             fi
+            echo "  attempt $i/30..."
             sleep 2
           done
+          echo "ERROR: Kafka did not start in time!"
+          exit 1
 
       # ── Create Kafka topic ───────────────────────────────────────────────────
       - name: Create Kafka service_events topic
@@ -87,6 +91,7 @@ jobs:
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
         run: |
+          set -e
           docker run -d \
             --name owprov \
             --network host \
@@ -102,15 +107,19 @@ jobs:
           for i in {1..40}; do
             if curl -k -s --max-time 3 https://localhost:16005/api/v1/system?command=info > /dev/null 2>&1; then
               echo "owprov is UP!"
-              break
+              exit 0
             fi
             echo "  attempt $i/40..."
             sleep 3
           done
+          echo "ERROR: owprov did not start in time!"
+          docker logs owprov 2>&1 | tail -50
+          exit 1
 
       # ── Start mock services ───────────────────────────────────────────────────
       - name: Start mock_owsec and mock_fms
         run: |
+          set -e
           PORT=16001 /tmp/mock_owsec &
           PORT=16004 /tmp/mock_fms &
 
@@ -120,6 +129,10 @@ jobs:
               echo "mock_owsec is UP!"
               break
             fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: mock_owsec did not start!"
+              exit 1
+            fi
             sleep 1
           done
 
@@ -128,6 +141,10 @@ jobs:
             if curl -k -s --max-time 2 https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
               echo "mock_fms is UP!"
               break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: mock_fms did not start!"
+              exit 1
             fi
             sleep 1
           done
