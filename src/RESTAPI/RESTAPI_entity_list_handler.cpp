@@ -1,32 +1,324 @@
-//
-//	License type: BSD 3-Clause License
-//	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
-//
-//	Created by Stephane Bourque on 2021-03-04.
-//	Arilia Wireless Inc.
-//
-
 #include "RESTAPI_entity_list_handler.h"
-#include "RESTAPI_db_helpers.h"
+#include "RESTAPI/RESTAPI_db_helpers.h"
 #include "StorageService.h"
+#include <functional>
 
 namespace OpenWifi {
 
 	void RESTAPI_entity_list_handler::DoGet() {
-		if (!QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DB_), ProvObjects::Entity>("entities", DB_, *this);
-		} else if (QB_.CountOnly) {
-			auto C = DB_.Count();
-			return ReturnCountOnly(C);
-		} else if (GetBoolParameter("getTree", false)) {
-			Poco::JSON::Object FullTree;
-			DB_.BuildTree(FullTree);
-			return ReturnObject(FullTree);
-		} else {
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
+			if (QB_.Select.empty()) {
+				if (GetBoolParameter("getTree", false)) {
+					Poco::JSON::Object FullTree;
+					StorageService()->EntityDB().BuildTree(FullTree);
+					return ReturnObject(FullTree);
+				} else if (QB_.CountOnly) {
+					auto C = DB_.Count();
+					return ReturnCountOnly(C);
+				} else {
+					EntityDB::RecordVec Entities;
+					DB_.GetRecords(QB_.Offset, QB_.Limit, Entities);
+					return MakeJSONObjectArray("entities", Entities, *this);
+				}
+			} else {
+				return ReturnRecordList<EntityDB, ProvObjects::Entity>("entities", DB_, *this);
+			}
+		}
+
+		std::vector<ProvObjects::ManagementRole> Roles;
+		std::set<std::string> VisibleEntities;
+		std::set<std::string> VisibleVenues;
+
+		auto policyAllowsGet = [&](const ProvObjects::ManagementRole &role, const std::string &resource) -> bool {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			return PolicyAllows(Policy, resource, Poco::Net::HTTPRequest::HTTP_GET);
+		};
+
+		std::function<void(const std::string &)> addVenueAndDescendants;
+		std::function<void(const std::string &)> addEntityAndDescendants;
+		std::function<void(const std::string &)> addVenueAncestors;
+
+		addVenueAncestors = [&](const std::string &venueId) {
+			ProvObjects::Venue ven;
+			if (StorageService()->VenueDB().GetRecord("id", venueId, ven)) {
+				if (!ven.entity.empty()) {
+					VisibleEntities.insert(ven.entity);
+				}
+				if (!ven.parent.empty() && ven.parent != venueId) {
+					VisibleVenues.insert(ven.parent);
+					addVenueAncestors(ven.parent);
+				}
+			}
+		};
+
+		addVenueAndDescendants = [&](const std::string &venueId) {
+			if (VisibleVenues.count(venueId)) return;
+			VisibleVenues.insert(venueId);
+			ProvObjects::Venue ven;
+			if (StorageService()->VenueDB().GetRecord("id", venueId, ven)) {
+				for (const auto &childId : ven.children) {
+					addVenueAndDescendants(childId);
+				}
+			}
+		};
+
+		addEntityAndDescendants = [&](const std::string &entityId) {
+			if (VisibleEntities.count(entityId)) return;
+			VisibleEntities.insert(entityId);
+			ProvObjects::Entity ent;
+			if (StorageService()->EntityDB().GetRecord("id", entityId, ent)) {
+				for (const auto &venueId : ent.venues) {
+					addVenueAndDescendants(venueId);
+				}
+			}
+		};
+
+		std::set<std::string> DeniedVenues;
+		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
+			for (const auto &role : Roles) {
+				if (!role.venue.empty()) {
+					if (policyAllowsGet(role, "venue")) {
+						VisibleVenues.insert(role.venue);
+						addVenueAncestors(role.venue);
+					} else {
+						ProvObjects::Venue ven;
+						if (StorageService()->VenueDB().GetRecord("id", role.venue, ven)) {
+							DeniedVenues.insert(role.venue);
+						}
+					}
+				} else if (!role.entity.empty() && policyAllowsGet(role, "entity")) {
+					addEntityAndDescendants(role.entity);
+				}
+			}
+			for (const auto &vId : DeniedVenues) {
+				VisibleVenues.erase(vId);
+			}
+		}
+
+		if (VisibleEntities.empty() && VisibleVenues.empty()) {
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(0);
+			}
+			if (GetBoolParameter("getTree", false)) {
+				Poco::JSON::Object EmptyTree;
+				return ReturnObject(EmptyTree);
+			}
 			EntityDB::RecordVec Entities;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, Entities);
 			return MakeJSONObjectArray("entities", Entities, *this);
 		}
+
+		if (!QB_.Select.empty()) {
+			EntityDB::RecordVec SelectedEntities;
+			for (const auto &id : QB_.Select) {
+				ProvObjects::Entity E;
+				if (DB_.GetRecord("id", id, E)) {
+					if (VisibleEntities.count(E.info.id)) {
+						SelectedEntities.push_back(E);
+					}
+				}
+			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(SelectedEntities.size());
+			}
+			return MakeJSONObjectArray("entities", SelectedEntities, *this);
+		}
+
+		auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+			if (ids.empty()) return "";
+			std::string res = field + " IN (";
+			bool first = true;
+			for (const auto &id : ids) {
+				if (!first) res += ",";
+				res += "'" + ORM::Escape(id) + "'";
+				first = false;
+			}
+			res += ")";
+			return res;
+		};
+
+		std::string ScopeWhere = makeInClause("id", VisibleEntities);
+
+		if (QB_.CountOnly) {
+			auto C = DB_.Count(ScopeWhere);
+			return ReturnCountOnly(C);
+		}
+
+		if (GetBoolParameter("getTree", false)) {
+			std::map<std::string, ProvObjects::Entity> EntityRecords;
+			for (const auto &entityId : VisibleEntities) {
+				ProvObjects::Entity Entity;
+				if (StorageService()->EntityDB().GetRecord("id", entityId, Entity)) {
+					EntityRecords[entityId] = Entity;
+				}
+			}
+
+			std::map<std::string, ProvObjects::Venue> VenueRecords;
+			for (const auto &venueId : VisibleVenues) {
+				ProvObjects::Venue Venue;
+				if (StorageService()->VenueDB().GetRecord("id", venueId, Venue)) {
+					VenueRecords[venueId] = Venue;
+				}
+			}
+
+			auto canReadInventoryOnVenue = [&](const std::string &vId) -> bool {
+				if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) return true;
+				for (const auto &role : Roles) {
+					if (role.venue == vId) {
+						return policyAllowsGet(role, "inventory");
+					}
+				}
+				ProvObjects::Venue ven;
+				if (StorageService()->VenueDB().GetRecord("id", vId, ven) && !ven.entity.empty()) {
+					for (const auto &role : Roles) {
+						if (role.entity == ven.entity && (role.venue.empty() || role.venue == "")) {
+							return policyAllowsGet(role, "inventory");
+						}
+					}
+				}
+				return false;
+			};
+
+			auto canReadInventoryOnEntity = [&](const std::string &eId) -> bool {
+				if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) return true;
+				for (const auto &role : Roles) {
+					if (role.entity == eId && (role.venue.empty() || role.venue == "")) {
+						return policyAllowsGet(role, "inventory");
+					}
+				}
+				return false;
+			};
+
+			std::function<Poco::JSON::Object::Ptr(const std::string &)> buildVenueNode;
+			buildVenueNode = [&](const std::string &venueId) -> Poco::JSON::Object::Ptr {
+				auto venueIt = VenueRecords.find(venueId);
+				if (venueIt == VenueRecords.end()) {
+					return nullptr;
+				}
+				Poco::JSON::Object::Ptr Node = new Poco::JSON::Object;
+				Poco::JSON::Array Children;
+				for (const auto &childId : venueIt->second.children) {
+					auto ChildNode = buildVenueNode(childId);
+					if (ChildNode) {
+						Children.add(ChildNode);
+					}
+				}
+				Poco::JSON::Array Devices;
+				if (canReadInventoryOnVenue(venueId)) {
+					for (const auto &devId : venueIt->second.devices) {
+						Devices.add(devId);
+					}
+				}
+				Node->set("type", "venue");
+				Node->set("name", venueIt->second.info.name);
+				Node->set("uuid", venueIt->second.info.id);
+				Node->set("children", Children);
+				Node->set("devices", Devices);
+				return Node;
+			};
+
+			std::function<Poco::JSON::Object::Ptr(const std::string &)> buildEntityNode;
+			buildEntityNode = [&](const std::string &entityId) -> Poco::JSON::Object::Ptr {
+				auto entityIt = EntityRecords.find(entityId);
+				if (entityIt == EntityRecords.end()) {
+					return nullptr;
+				}
+				Poco::JSON::Object::Ptr Node = new Poco::JSON::Object;
+				Poco::JSON::Array Children;
+				for (const auto &childId : entityIt->second.children) {
+					auto ChildNode = buildEntityNode(childId);
+					if (ChildNode) {
+						Children.add(ChildNode);
+					}
+				}
+				Poco::JSON::Array Venues;
+				for (const auto &venueId : entityIt->second.venues) {
+					auto venueIt = VenueRecords.find(venueId);
+					if (venueIt != VenueRecords.end() && venueIt->second.parent.empty()) {
+						auto VenueNode = buildVenueNode(venueId);
+						if (VenueNode) {
+							Venues.add(VenueNode);
+						}
+					}
+				}
+				Poco::JSON::Array Devices;
+				if (canReadInventoryOnEntity(entityId)) {
+					for (const auto &devId : entityIt->second.devices) {
+						Devices.add(devId);
+					}
+				}
+				Node->set("type", "entity");
+				Node->set("name", entityIt->second.info.name);
+				Node->set("uuid", entityIt->second.info.id);
+				Node->set("children", Children);
+				Node->set("venues", Venues);
+				Node->set("devices", Devices);
+				return Node;
+			};
+
+			Poco::JSON::Array RootEntities;
+			size_t rootEntityCount = 0;
+			Poco::JSON::Object::Ptr SingleEntityTree;
+			for (const auto &[entityId, Entity] : EntityRecords) {
+				if (!Entity.parent.empty() && VisibleEntities.count(Entity.parent)) {
+					continue;
+				}
+				auto EntityNode = buildEntityNode(entityId);
+				if (EntityNode) {
+					RootEntities.add(EntityNode);
+					SingleEntityTree = EntityNode;
+					++rootEntityCount;
+				}
+			}
+
+			Poco::JSON::Array RootVenues;
+			size_t rootVenueCount = 0;
+			Poco::JSON::Object::Ptr SingleVenueTree;
+			for (const auto &[venueId, Venue] : VenueRecords) {
+				if (!Venue.parent.empty() && VisibleVenues.count(Venue.parent)) {
+					continue;
+				}
+				if (Venue.parent.empty() && VisibleEntities.count(Venue.entity)) {
+					continue;
+				}
+				auto VenueNode = buildVenueNode(venueId);
+				if (VenueNode) {
+					RootVenues.add(VenueNode);
+					SingleVenueTree = VenueNode;
+					++rootVenueCount;
+				}
+			}
+
+			if (rootEntityCount == 0 && rootVenueCount == 0) {
+				Poco::JSON::Object EmptyTree;
+				return ReturnObject(EmptyTree);
+			}
+
+			if (rootEntityCount == 1 && rootVenueCount == 0 && SingleEntityTree) {
+				return ReturnObject(*SingleEntityTree);
+			}
+
+			if (rootEntityCount == 0 && rootVenueCount == 1 && SingleVenueTree) {
+				return ReturnObject(*SingleVenueTree);
+			}
+
+			Poco::JSON::Object ScopedTree;
+			ScopedTree.set("type", "entity");
+			ScopedTree.set("name", "Assigned Scopes");
+			ScopedTree.set("uuid", "0000-0000-0000");
+			ScopedTree.set("children", RootEntities);
+			ScopedTree.set("venues", RootVenues);
+			return ReturnObject(ScopedTree);
+		}
+
+		EntityDB::RecordVec FilteredEntities;
+		DB_.GetRecords(QB_.Offset, QB_.Limit, FilteredEntities, ScopeWhere);
+		return MakeJSONObjectArray("entities", FilteredEntities, *this);
 	}
 
 	void RESTAPI_entity_list_handler::DoPost() {
@@ -37,4 +329,5 @@ namespace OpenWifi {
 		}
 		BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 	}
+
 } // namespace OpenWifi

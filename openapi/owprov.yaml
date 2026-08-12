@@ -3123,7 +3123,11 @@ paths:
               $ref: '#/components/schemas/ManagementPolicy'
       responses:
         200:
-          $ref: '#/components/schemas/ManagementPolicy'
+          description: Successful creation of a management policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementPolicy'
         400:
           $ref: '#/components/responses/BadRequest'
         403:
@@ -3150,7 +3154,11 @@ paths:
               $ref: '#/components/schemas/ManagementPolicy'
       responses:
         200:
-          $ref: '#/components/schemas/ManagementPolicy'
+          description: Successful modification of a management policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementPolicy'
         400:
           $ref: '#/components/responses/BadRequest'
         403:

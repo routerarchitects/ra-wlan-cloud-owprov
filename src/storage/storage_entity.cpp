@@ -120,9 +120,14 @@ namespace OpenWifi {
 			}
 			Poco::JSON::Array Venues;
 			for (const auto &i : E.venues) {
-				Poco::JSON::Object Venue;
-				AddVenues(Venue, i);
-				Venues.add(Venue);
+				ProvObjects::Venue V;
+				if (StorageService()->VenueDB().GetRecord("id", i, V)) {
+					if (V.parent.empty()) {
+						Poco::JSON::Object Venue;
+						AddVenues(Venue, i);
+						Venues.add(Venue);
+					}
+				}
 			}
 			Tree.set("type", "entity");
 			Tree.set("name", E.info.name);

@@ -1,0 +1,286 @@
+name: Lab & RBAC Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+      - anil-feature
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lab-tests:
+    name: Run Lab Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ── Go setup (for mock services + test runner) ───────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # ── Build mock services ──────────────────────────────────────────────────
+      - name: Build mock_owsec
+        run: go build -o /tmp/mock_owsec .
+        working-directory: ${{ github.workspace }}/tests/mock_services/mock_owsec
+
+      - name: Build mock_fms
+        run: go build -o /tmp/mock_fms .
+        working-directory: ${{ github.workspace }}/tests/mock_services/mock_fms
+
+      # ── Start Kafka (KRaft mode, no ZooKeeper) ───────────────────────────────
+      - name: Start Kafka
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name kafka \
+            --network host \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+            apache/kafka:3.7.1
+
+          echo "Waiting for Kafka to be ready..."
+
+          for i in {1..30}; do
+            if docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server localhost:9092 \
+              --list > /dev/null 2>&1; then
+              echo "Kafka is ready!"
+              exit 0
+            fi
+
+            echo "attempt $i/30..."
+            sleep 2
+          done
+
+          echo "ERROR: Kafka did not start in time!"
+          docker logs kafka | tail -100
+          exit 1
+
+      # ── Create Kafka topic ───────────────────────────────────────────────────
+      - name: Create Kafka service_events topic
+        run: |
+          docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server localhost:9092 \
+            --create --topic service_events \
+            --partitions 1 --replication-factor 1 \
+            --if-not-exists
+
+
+      # ── Build owprov Docker image ─────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build owprov Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: owprov:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+      # ── Build owprov Docker image (with layer cache) ──────────────────────────
+      - name: Prepare owprov runtime data
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/owprov-data/certs
+          mkdir -p /tmp/owprov-data/data
+
+          cat > /tmp/owprov-data/data/registry.json <<'EOF'
+          {
+            "deviceTypes": [
+              "openwrt_generic",
+              "edgecore_eap101",
+              "edgecore_eap102",
+              "edgecore_ecs4100",
+              "indio_um305ac",
+              "cig_wf188",
+              "wlan_ap",
+              "generic",
+              "tplink_archer"
+            ]
+          }
+          EOF
+
+          openssl req \
+            -x509 \
+            -nodes \
+            -days 1 \
+            -newkey rsa:2048 \
+            -keyout /tmp/owprov-data/certs/restapi-key.pem \
+            -out /tmp/owprov-data/certs/restapi-cert.pem \
+            -subj "/CN=localhost"
+
+          cp /tmp/owprov-data/certs/restapi-cert.pem \
+            /tmp/owprov-data/certs/restapi-ca.pem
+
+          chmod 644 /tmp/owprov-data/certs/restapi-key.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-cert.pem
+          chmod 644 /tmp/owprov-data/certs/restapi-ca.pem
+
+          chmod 777 /tmp/owprov-data/data
+          chmod 666 /tmp/owprov-data/data/registry.json
+
+          echo "registry.json:"
+          cat /tmp/owprov-data/data/registry.json
+
+
+      # -- Diagnostic check --
+      - name: Debug owprov image user and mounts
+        run: |
+          set -euo pipefail
+
+          echo "Configured image user:"
+          docker image inspect owprov:test \
+            --format 'User={{.Config.User}}'
+
+          echo "Files as seen from inside container:"
+          docker run --rm \
+            -v /tmp/owprov-data/certs:/owprov-data/certs:ro \
+            -v /tmp/owprov-data/data:/owprov-data/data \
+            owprov:test \
+            sh -c '
+              id
+              echo "--- certs ---"
+              ls -la /owprov-data/certs
+              echo "--- data ---"
+              ls -la /owprov-data/data
+              echo "--- key readability ---"
+              test -r /owprov-data/certs/restapi-key.pem &&
+                echo "KEY READABLE" ||
+                { echo "KEY NOT READABLE"; exit 1; }
+            '
+
+      # ── Start mock services ───────────────────────────────────────────────────
+      - name: Start mock_owsec and mock_fms
+        run: |
+          set -e
+          PORT=16001 /tmp/mock_owsec &
+          PORT=16004 /tmp/mock_fms &
+
+          echo "Waiting for mock_owsec (port 16001)..."
+          for i in {1..20}; do
+            if curl -k -s --fail --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
+              echo "mock_owsec is UP!"
+              break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: mock_owsec did not start!"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Waiting for mock_fms (port 16004)..."
+          for i in {1..20}; do
+            if curl -k -s --fail --max-time 2 https://localhost:16004/api/v1/firmwares > /dev/null 2>&1; then
+              echo "mock_fms is UP!"
+              break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: mock_fms did not start!"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # ── Start owprov container ────────────────────────────────────────────────
+      - name: Start owprov container
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name owprov \
+            --network host \
+            -v /tmp/owprov-data/certs:/owprov-data/certs:ro \
+            -v /tmp/owprov-data/data:/owprov-data/data \
+            -e TEMPLATE_CONFIG=true \
+            -e KAFKA_ENABLE=true \
+            -e KAFKA_BROKERLIST=localhost:9092 \
+            -e STORAGE_TYPE=sqlite \
+            -e RESTAPI_HOST_PORT=16005 \
+            -e INTERNAL_RESTAPI_HOST_PORT=17005 \
+            owprov:test
+
+          echo "Waiting for owprov to start on port 16005..."
+
+          for i in {1..40}; do
+            if curl -k -s --max-time 3 \
+              "https://localhost:16005/api/v1/system?command=info" \
+              > /dev/null 2>&1; then
+              echo "owprov HTTPS endpoint is reachable!"
+              exit 0
+            fi
+
+            if ! docker inspect -f '{{.State.Running}}' owprov 2>/dev/null | grep -q true; then
+              echo "ERROR: owprov container exited!"
+              docker logs owprov
+              exit 1
+            fi
+
+            echo "attempt $i/40..."
+            sleep 3
+          done
+
+          echo "ERROR: owprov did not start in time!"
+          docker logs owprov
+          exit 1
+
+      # ── Publish Kafka join events ────────────────────────────────────────────
+      - name: Publish owsec + owfms Kafka join events
+        run: |
+          set -euo pipefail
+
+          echo '{"event":"join","id":16001,"type":"owsec","publicEndPoint":"https://localhost:16001","privateEndPoint":"https://localhost:16001","key":"testkey","version":"2.1.0"}' | \
+            docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+            --bootstrap-server localhost:9092 \
+            --topic service_events
+
+          echo '{"event":"join","id":16004,"type":"owfms","publicEndPoint":"https://localhost:16004","privateEndPoint":"https://localhost:16004","key":"testkey","version":"2.1.0"}' | \
+            docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+            --bootstrap-server localhost:9092 \
+            --topic service_events
+
+          echo "Waiting for owprov to consume service join events..."
+          sleep 10
+
+          echo "Checking owprov logs for Kafka registration problems..."
+          docker logs owprov 2>&1 | tail -50
+
+      # ── Run combined test suite ───────────────────────────────────────────────
+      - name: Execute Combined Lab Test Suite (Root + Admin)
+        run: go run main.go
+        working-directory: ${{ github.workspace }}/tests/lab_tests
+
+      # ── Upload results ────────────────────────────────────────────────────────
+      - name: Upload Test Result Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-test-results
+          path: tests/lab_tests/rbac_actual_results.csv
+
+      # ── Debug on failure ──────────────────────────────────────────────────────
+      - name: Dump owprov logs on failure
+        if: failure()
+        run: docker logs owprov 2>&1 | tail -100
