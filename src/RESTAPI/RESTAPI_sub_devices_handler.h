@@ -49,10 +49,11 @@ namespace OpenWifi {
 		bool ApplyPutRequest(const SubscriberDeviceDB::RecordName &updateObject,
 							 SubscriberDeviceDB::RecordName &existingObject,
 							 const Poco::JSON::Object::Ptr &rawObject);
-		bool CreateInventoryRecord(const SubscriberDeviceDB::RecordName &newObject);
+		bool CreateInventoryRecord(const SubscriberDeviceDB::RecordName &newObject,
+								   std::string *venueID = nullptr);
 		void CleanupInventoryAssociations(const ProvObjects::InventoryTag &inventoryRecord);
-		void
-		DeleteInventoryForSubscriberDevice(const ProvObjects::SubscriberDevice &existingObject);
+		void DeleteInventoryForSubscriberDevice(const ProvObjects::SubscriberDevice &existingObject,
+												std::string *venueId = nullptr);
 		bool CreateSubscriberDeviceRecord(const SubscriberDeviceDB::RecordName &newObject);
 		void ReturnSubscriberDeviceObject(const ProvObjects::SubscriberDevice &device);
 
