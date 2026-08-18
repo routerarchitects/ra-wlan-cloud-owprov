@@ -136,15 +136,15 @@ jobs:
 
           # 3. Create SAN extension file
           cat > /tmp/owprov-data/certs/san.ext <<'EOF'
-authorityKeyIdentifier=keyid,issuer
-basicConstraints=CA:FALSE
-keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
-subjectAltName = @alt_names
+          authorityKeyIdentifier=keyid,issuer
+          basicConstraints=CA:FALSE
+          keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+          subjectAltName = @alt_names
 
-[alt_names]
-DNS.1 = localhost
-IP.1 = 127.0.0.1
-EOF
+          [alt_names]
+          DNS.1 = localhost
+          IP.1 = 127.0.0.1
+          EOF
 
           # 4. Sign Server Cert using the Test Root CA
           openssl x509 -req -days 1 \
