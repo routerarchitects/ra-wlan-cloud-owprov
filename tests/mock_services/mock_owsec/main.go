@@ -528,9 +528,21 @@ func main() {
 	mux.HandleFunc("/api/v1/subscriber", store.handleSubUser)
 	mux.HandleFunc("/api/v1/subscriber/", store.handleSubUser)
 
-	cert, err := generateSelfSignedCert()
-	if err != nil {
-		log.Fatalf("[mock_owsec] Failed to generate TLS cert: %v", err)
+	var cert tls.Certificate
+	certFile := os.Getenv("CERT_FILE")
+	keyFile := os.Getenv("KEY_FILE")
+	if certFile != "" && keyFile != "" {
+		c, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			log.Fatalf("[mock_owsec] Failed to load TLS cert from %s and %s: %v", certFile, keyFile, err)
+		}
+		cert = c
+	} else {
+		c, err := generateSelfSignedCert()
+		if err != nil {
+			log.Fatalf("[mock_owsec] Failed to generate TLS cert: %v", err)
+		}
+		cert = c
 	}
 
 	server := &http.Server{
