@@ -220,6 +220,7 @@ jobs:
             -e STORAGE_TYPE=sqlite \
             -e RESTAPI_HOST_PORT=16005 \
             -e INTERNAL_RESTAPI_HOST_PORT=17005 \
+            -e OPENWIFI_RESTCLIENT_SECURITY=none \
             owprov:test
 
           echo "Waiting for owprov to start on port 16005..."

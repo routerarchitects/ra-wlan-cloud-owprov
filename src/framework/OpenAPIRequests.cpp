@@ -6,6 +6,7 @@
 
 #include "Poco/JSON/Parser.h"
 #include "Poco/Logger.h"
+#include "Poco/Net/Context.h"
 #include "Poco/Net/HTTPRequest.h"
 #include "Poco/Net/HTTPSClientSession.h"
 #include "Poco/URI.h"
@@ -45,7 +46,12 @@ namespace OpenWifi {
 				}
 
 				if (Secure) {
-					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort());
+					const char *SkipSSL = std::getenv("OPENWIFI_RESTCLIENT_SECURITY");
+					Poco::Net::Context::Ptr Context;
+					if (SkipSSL && std::string(SkipSSL) == "none") {
+						Context = new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "", Poco::Net::Context::VERIFY_NONE);
+					}
+					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort(), Context);
 					Session.setTimeout(Poco::Timespan(msTimeout_ / 1000, msTimeout_ % 1000));
 
 					Session.sendRequest(Request);
@@ -113,7 +119,12 @@ namespace OpenWifi {
 				}
 
 				if (Secure) {
-					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort());
+					const char *SkipSSL = std::getenv("OPENWIFI_RESTCLIENT_SECURITY");
+					Poco::Net::Context::Ptr Context;
+					if (SkipSSL && std::string(SkipSSL) == "none") {
+						Context = new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "", Poco::Net::Context::VERIFY_NONE);
+					}
+					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort(), Context);
 					Session.setTimeout(Poco::Timespan(msTimeout_ / 1000, msTimeout_ % 1000));
 
 					std::ostream &os = Session.sendRequest(Request);
@@ -191,7 +202,12 @@ namespace OpenWifi {
 				}
 
 				if (Secure) {
-					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort());
+					const char *SkipSSL = std::getenv("OPENWIFI_RESTCLIENT_SECURITY");
+					Poco::Net::Context::Ptr Context;
+					if (SkipSSL && std::string(SkipSSL) == "none") {
+						Context = new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "", Poco::Net::Context::VERIFY_NONE);
+					}
+					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort(), Context);
 					Session.setTimeout(Poco::Timespan(msTimeout_ / 1000, msTimeout_ % 1000));
 					std::ostream &os = Session.sendRequest(Request);
 					os << obody.str();
@@ -260,7 +276,12 @@ namespace OpenWifi {
 				}
 
 				if (Secure) {
-					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort());
+					const char *SkipSSL = std::getenv("OPENWIFI_RESTCLIENT_SECURITY");
+					Poco::Net::Context::Ptr Context;
+					if (SkipSSL && std::string(SkipSSL) == "none") {
+						Context = new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "", Poco::Net::Context::VERIFY_NONE);
+					}
+					Poco::Net::HTTPSClientSession Session(URI.getHost(), URI.getPort(), Context);
 					Session.setTimeout(Poco::Timespan(msTimeout_ / 1000, msTimeout_ % 1000));
 					Session.sendRequest(Request);
 					Poco::Net::HTTPResponse Response;
