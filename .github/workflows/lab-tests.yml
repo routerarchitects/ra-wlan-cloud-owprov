@@ -235,7 +235,9 @@ jobs:
             --name owprov \
             --network host \
             -v /tmp/owprov-data/certs:/owprov-data/certs:ro \
+            -v /tmp/owprov-data/certs/restapi-ca.pem:/usr/local/share/ca-certificates/restapi-ca-selfsigned.crt:ro \
             -v /tmp/owprov-data/data:/owprov-data/data \
+            -e SELFSIGNED_CERTS=true \
             -e TEMPLATE_CONFIG=true \
             -e KAFKA_ENABLE=true \
             -e KAFKA_BROKERLIST=localhost:9092 \
