@@ -84,9 +84,21 @@ func main() {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	cert, err := generateSelfSignedCert()
-	if err != nil {
-		log.Fatalf("[mock_owfms] Failed to generate self-signed cert: %v", err)
+	var cert tls.Certificate
+	certFile := os.Getenv("CERT_FILE")
+	keyFile := os.Getenv("KEY_FILE")
+	if certFile != "" && keyFile != "" {
+		c, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			log.Fatalf("[mock_owfms] Failed to load TLS cert from %s and %s: %v", certFile, keyFile, err)
+		}
+		cert = c
+	} else {
+		c, err := generateSelfSignedCert()
+		if err != nil {
+			log.Fatalf("[mock_owfms] Failed to generate self-signed cert: %v", err)
+		}
+		cert = c
 	}
 
 	server := &http.Server{
