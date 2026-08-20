@@ -59,6 +59,7 @@ FROM build-base AS owprov-build
 ADD CMakeLists.txt build /owprov/
 ADD cmake /owprov/cmake
 ADD src /owprov/src
+ADD tests/framework_tests /owprov/tests/framework_tests
 ADD .git /owprov/.git
 
 COPY --from=poco-build /usr/local/include /usr/local/include
@@ -72,6 +73,7 @@ RUN mkdir cmake-build
 WORKDIR /owprov/cmake-build
 RUN cmake ..
 RUN cmake --build . --config Release -j8
+RUN ctest --output-on-failure
 
 FROM debian:$DEBIAN_VERSION
 
