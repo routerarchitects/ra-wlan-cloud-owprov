@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <functional>
 #include <utility>
+#include <vector>
 
 #include "Poco/Data/Session.h"
 #include "Poco/Data/Transaction.h"
@@ -17,11 +19,14 @@ namespace OpenWifi {
 
 	class DbTransaction final {
 	  public:
+		using PostCommitFunc = std::function<void()>;
+
 		// Owns one pooled session and starts a transaction on it.
 		explicit DbTransaction(Poco::Data::Session session, Poco::Logger &logger)
 			: session_(std::move(session)), logger_(logger), transaction_(session_, &logger_) {}
 
 		// Poco::Data::Transaction rolls back automatically if still active.
+		// Pending post-commit actions are discarded on destruction.
 		~DbTransaction() = default;
 
 		DbTransaction(const DbTransaction &) = delete;
@@ -36,6 +41,16 @@ namespace OpenWifi {
 			return session_;
 		}
 
+		// Registers a callback to execute ONLY after the database transaction commits successfully.
+		void AfterCommit(PostCommitFunc fn) {
+			if (!transaction_.isActive()) {
+				throw Poco::IllegalStateException("Database transaction is not active");
+			}
+			if (fn) {
+				after_commit_actions_.push_back(std::move(fn));
+			}
+		}
+
 		[[nodiscard]] bool Commit() noexcept {
 			try {
 				if (!transaction_.isActive()) {
@@ -43,6 +58,18 @@ namespace OpenWifi {
 				}
 
 				transaction_.commit();
+
+				// Execute queued post-commit actions only after DB commit succeeds
+				for (const auto &fn : after_commit_actions_) {
+					try {
+						fn();
+					} catch (const Poco::Exception &e) {
+						logger_.error("Error in post-commit action: " + e.displayText());
+					} catch (...) {
+						logger_.error("Error in post-commit action: unknown exception");
+					}
+				}
+				after_commit_actions_.clear();
 				return true;
 			} catch (const Poco::Exception &e) {
 				logger_.error("Failed to commit database transaction: " + e.displayText());
@@ -50,11 +77,13 @@ namespace OpenWifi {
 				logger_.error("Failed to commit database transaction: unknown exception");
 			}
 
+			after_commit_actions_.clear();
 			return false;
 		}
 
 		[[nodiscard]] bool Rollback() noexcept {
 			try {
+				after_commit_actions_.clear();
 				if (!transaction_.isActive()) {
 					return false;
 				}
@@ -67,6 +96,7 @@ namespace OpenWifi {
 				logger_.error("Failed to roll back database transaction: unknown exception");
 			}
 
+			after_commit_actions_.clear();
 			return false;
 		}
 
@@ -74,6 +104,8 @@ namespace OpenWifi {
 		Poco::Data::Session session_;
 		Poco::Logger &logger_;
 		Poco::Data::Transaction transaction_;
+		std::vector<PostCommitFunc> after_commit_actions_;
 	};
 
 } // namespace OpenWifi
+

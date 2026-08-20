@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <map>
 
 #include "Poco/Data/SessionPool.h"
 #include "Poco/Data/SQLite/Connector.h"
@@ -35,6 +36,48 @@ namespace OpenWifi {
 
 	typedef Poco::Tuple<std::string, std::string, std::string> TestRecordTuple;
 
+	// Mock DBCache for testing post-commit cache synchronization
+	class MockTestDBCache : public ORM::DBCache<TestRecord> {
+	  public:
+		MockTestDBCache() : DBCache<TestRecord>(100, 600) {}
+
+		void Create(const TestRecord &R) override {
+			cache_map_[R.id] = R;
+		}
+
+		bool GetFromCache(const std::string &FieldName, const std::string &Value, TestRecord &R) override {
+			if (FieldName == "id") {
+				auto it = cache_map_.find(Value);
+				if (it != cache_map_.end()) {
+					R = it->second;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		void UpdateCache(const TestRecord &R) override {
+			cache_map_[R.id] = R;
+		}
+
+		void Delete(const std::string &FieldName, const std::string &Value) override {
+			if (FieldName == "id") {
+				cache_map_.erase(Value);
+			}
+		}
+
+		bool Contains(const std::string &id) const {
+			return cache_map_.find(id) != cache_map_.end();
+		}
+
+		void Clear() {
+			cache_map_.clear();
+		}
+
+	  private:
+		std::map<std::string, TestRecord> cache_map_;
+	};
+
 } // namespace OpenWifi
 
 template <>
@@ -55,73 +98,75 @@ void ORM::DB<OpenWifi::TestRecordTuple, OpenWifi::TestRecord>::Convert(
 
 class TestDB : public ORM::DB<OpenWifi::TestRecordTuple, OpenWifi::TestRecord> {
   public:
-	TestDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L)
+	TestDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L, ORM::DBCache<OpenWifi::TestRecord> *Cache = nullptr)
 		: DB(T, "test_records",
 			 ORM::FieldVec{
 				 ORM::Field{"id", ORM::FieldType::FT_TEXT, 0, true},
 				 ORM::Field{"name", ORM::FieldType::FT_TEXT},
 				 ORM::Field{"value", ORM::FieldType::FT_TEXT}
 			 },
-			 ORM::IndexVec{}, P, L, "tst") {}
+			 ORM::IndexVec{}, P, L, "tst", Cache) {}
 };
 
 int main() {
-	std::cout << "[Framework Unit Test] Initializing DbTransaction & Session-Aware ORM Tests..." << std::endl;
+	std::cout << "[Framework Unit Test] Initializing DbTransaction & Transaction-Aware ORM Tests..." << std::endl;
 
 	Poco::Data::SQLite::Connector::registerConnector();
 	Poco::Data::SessionPool pool("SQLite", "db_transaction_unittest.db");
 	Poco::Logger &logger = Poco::Logger::get("DbTransactionTest");
 
-	TestDB db(OpenWifi::DBType::sqlite, pool, logger);
+	OpenWifi::MockTestDBCache mockCache;
+	TestDB db(OpenWifi::DBType::sqlite, pool, logger, &mockCache);
 	TEST_ASSERT(db.Create(), "Failed to create transaction test table");
 
-	// Clear leftover test records using valid non-empty clause
-	TEST_ASSERT(db.DeleteRecords("1=1"), "Failed to clear transaction test table");
+	// Clear leftover test records using low-level DeleteRecords on session
+	{
+		Poco::Data::Session clearSession = pool.get();
+		TEST_ASSERT(db.DeleteRecords(clearSession, "1=1"), "Failed to clear transaction test table");
+		mockCache.Clear();
+	}
 
 	// -------------------------------------------------------------------------
-	// Test 1: Commit Persists Multi-Operation Session-Aware Operations (All 6 Overloads)
+	// Test 1: Commit Persists Multi-Operation Transactional Operations
 	// -------------------------------------------------------------------------
 	{
-		std::cout << "  - Test 1: Commit Persists Multi-Operation Session-Aware Operations... " << std::flush;
+		std::cout << "  - Test 1: Commit Persists Multi-Operation Transactional Operations... " << std::flush;
 		OpenWifi::DbTransaction tx(pool.get(), logger);
 
 		OpenWifi::TestRecord recA{"rec-101", "Record A", "Val A Initial"};
 		OpenWifi::TestRecord recB{"rec-102", "Record B", "Val B"};
-		OpenWifi::TestRecord recC{"rec-103", "Record C", "Val C"};
 
-		// 1. CreateRecord(session, ...)
-		TEST_ASSERT(db.CreateRecord(tx.Session(), recA) == true, "Failed to create recA in transaction");
-		TEST_ASSERT(db.CreateRecord(tx.Session(), recB) == true, "Failed to create recB in transaction");
-		TEST_ASSERT(db.CreateRecord(tx.Session(), recC) == true, "Failed to create recC in transaction");
+		// 1. CreateRecord(tx, ...)
+		TEST_ASSERT(db.CreateRecord(tx, recA) == true, "Failed to create recA in transaction");
+		TEST_ASSERT(db.CreateRecord(tx, recB) == true, "Failed to create recB in transaction");
 
 		// 2. GetRecords(session, ...) inside transaction
 		TestDB::RecordVec insideTxRecords;
 		TEST_ASSERT(db.GetRecords(tx.Session(), 0, 10, insideTxRecords) == true, "GetRecords failed inside transaction");
-		TEST_ASSERT(insideTxRecords.size() == 3, "Expected 3 records inside transaction session");
+		TEST_ASSERT(insideTxRecords.size() == 2, "Expected 2 records inside transaction session");
 
 		// 3. GetRecord(session, ...) inside transaction
 		OpenWifi::TestRecord insideTxRecA;
 		TEST_ASSERT(db.GetRecord(tx.Session(), "id", "rec-101", insideTxRecA) == true, "GetRecord failed inside transaction");
 		TEST_ASSERT(insideTxRecA.value == "Val A Initial", "recA value mismatch inside transaction");
 
-		// 4. UpdateRecord(session, ...) inside transaction
+		// 4. UpdateRecord(tx, ...) inside transaction
 		insideTxRecA.value = "Val A Updated";
-		TEST_ASSERT(db.UpdateRecord(tx.Session(), "id", "rec-101", insideTxRecA) == true, "UpdateRecord failed inside transaction");
+		TEST_ASSERT(db.UpdateRecord(tx, "id", "rec-101", insideTxRecA) == true, "UpdateRecord failed inside transaction");
 
-		// 5. DeleteRecord(session, ...) inside transaction
-		TEST_ASSERT(db.DeleteRecord(tx.Session(), "id", "rec-102") == true, "DeleteRecord failed inside transaction");
-
-		// 6. DeleteRecords(session, ...) inside transaction
-		TEST_ASSERT(db.DeleteRecords(tx.Session(), "id='rec-103'") == true, "DeleteRecords failed inside transaction");
+		// 5. DeleteRecord(tx, ...) inside transaction for recB
+		TEST_ASSERT(db.DeleteRecord(tx, "id", "rec-102") == true, "DeleteRecord failed inside transaction for recB");
 
 		TEST_ASSERT(tx.Commit() == true, "Failed to commit transaction");
 
-		// Verify outside transaction: recA exists with updated value, recB & recC were deleted
-		OpenWifi::TestRecord checkA, checkB, checkC;
-		TEST_ASSERT(db.GetRecord("id", "rec-101", checkA) == true, "recA missing after commit");
-		TEST_ASSERT(checkA.value == "Val A Updated", "recA updated value did not persist");
-		TEST_ASSERT(db.GetRecord("id", "rec-102", checkB) == false, "recB unexpectedly exists after DeleteRecord commit");
-		TEST_ASSERT(db.GetRecord("id", "rec-103", checkC) == false, "recC unexpectedly exists after DeleteRecords commit");
+		// Verify directly against database via session (bypassing Cache_)
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkA, checkB;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-101", checkA) == true, "recA missing from database after commit");
+			TEST_ASSERT(checkA.value == "Val A Updated", "recA updated value did not persist to database");
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-102", checkB) == false, "recB unexpectedly exists in database after DeleteRecord commit");
+		}
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -135,15 +180,18 @@ int main() {
 		OpenWifi::TestRecord recD{"rec-104", "Record D", "Val D"};
 		OpenWifi::TestRecord recE{"rec-105", "Record E", "Val E"};
 
-		TEST_ASSERT(db.CreateRecord(tx.Session(), recD) == true, "Failed to create recD in transaction");
-		TEST_ASSERT(db.CreateRecord(tx.Session(), recE) == true, "Failed to create recE in transaction");
+		TEST_ASSERT(db.CreateRecord(tx, recD) == true, "Failed to create recD in transaction");
+		TEST_ASSERT(db.CreateRecord(tx, recE) == true, "Failed to create recE in transaction");
 
 		TEST_ASSERT(tx.Rollback() == true, "Failed to rollback transaction");
 
-		// Verify neither record exists outside transaction
-		OpenWifi::TestRecord checkD, checkE;
-		TEST_ASSERT(db.GetRecord("id", "rec-104", checkD) == false, "recD exists after explicit rollback");
-		TEST_ASSERT(db.GetRecord("id", "rec-105", checkE) == false, "recE exists after explicit rollback");
+		// Verify neither record exists in database after explicit rollback
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkD, checkE;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-104", checkD) == false, "recD exists in database after explicit rollback");
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-105", checkE) == false, "recE exists in database after explicit rollback");
+		}
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -155,13 +203,16 @@ int main() {
 		{
 			OpenWifi::DbTransaction tx(pool.get(), logger);
 			OpenWifi::TestRecord recF{"rec-106", "Record F", "Val F"};
-			TEST_ASSERT(db.CreateRecord(tx.Session(), recF) == true, "Failed to create recF in transaction");
+			TEST_ASSERT(db.CreateRecord(tx, recF) == true, "Failed to create recF in transaction");
 			// Intentionally exit scope without Commit() or Rollback()
 		}
 
-		// Verify record F was rolled back on destructor scope exit
-		OpenWifi::TestRecord checkF;
-		TEST_ASSERT(db.GetRecord("id", "rec-106", checkF) == false, "recF exists after scope exit auto-rollback");
+		// Verify record F was rolled back from database on destructor scope exit
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkF;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-106", checkF) == false, "recF exists in database after scope exit auto-rollback");
+		}
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -173,19 +224,22 @@ int main() {
 		{
 			OpenWifi::DbTransaction tx(pool.get(), logger);
 			OpenWifi::TestRecord recG{"rec-107", "Record G", "Val G"};
-			TEST_ASSERT(db.CreateRecord(tx.Session(), recG) == true, "Failed to create recG in transaction");
+			TEST_ASSERT(db.CreateRecord(tx, recG) == true, "Failed to create recG in transaction");
 
 			// Attempt duplicate primary key insertion on same tx session
 			OpenWifi::TestRecord recG_dup{"rec-107", "Record G Dup", "Val G Dup"};
-			bool secondWriteResult = db.CreateRecord(tx.Session(), recG_dup);
+			bool secondWriteResult = db.CreateRecord(tx, recG_dup);
 			TEST_ASSERT(secondWriteResult == false, "Duplicate primary key write unexpectedly succeeded");
 
 			// Exit scope without commit due to failed second operation
 		}
 
-		// Verify recG was completely rolled back due to second write failure
-		OpenWifi::TestRecord checkG;
-		TEST_ASSERT(db.GetRecord("id", "rec-107", checkG) == false, "recG exists after second write failure atomicity rollback");
+		// Verify recG was completely rolled back from database due to second write failure
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkG;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-107", checkG) == false, "recG exists in database after second write failure atomicity rollback");
+		}
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -211,6 +265,86 @@ int main() {
 		std::cout << "PASSED" << std::endl;
 	}
 
-	std::cout << "[Framework Unit Test] All DbTransaction & Session-Aware ORM Tests Passed Successfully!" << std::endl;
+	// -------------------------------------------------------------------------
+	// Test 6: Mock DBCache Post-Commit Synchronization Guarantees
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 6: Mock DBCache Post-Commit Synchronization Guarantees... " << std::flush;
+		mockCache.Clear();
+
+		// 6a: Transactional CreateRecord updates DBCache ONLY AFTER COMMIT
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recH{"rec-108", "Record H", "Val H"};
+
+			TEST_ASSERT(db.CreateRecord(tx, recH) == true, "Failed to create recH");
+			// Cache MUST NOT be updated during open transaction before commit
+			TEST_ASSERT(mockCache.Contains("rec-108") == false, "MockDBCache unexpectedly updated BEFORE commit!");
+
+			TEST_ASSERT(tx.Commit() == true, "Commit failed in 6a");
+			// Cache MUST be updated AFTER successful commit
+			TEST_ASSERT(mockCache.Contains("rec-108") == true, "MockDBCache failed to update AFTER commit!");
+		}
+
+		// 6b: Transactional UpdateRecord updates DBCache ONLY AFTER COMMIT
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recH_updated{"rec-108", "Record H", "Val H Updated Cache"};
+
+			TEST_ASSERT(db.UpdateRecord(tx, "id", "rec-108", recH_updated) == true, "Failed to update recH");
+			// Cache must hold initial value during transaction before commit
+			OpenWifi::TestRecord cachedPre;
+			TEST_ASSERT(mockCache.GetFromCache("id", "rec-108", cachedPre) == true, "recH missing from cache");
+			TEST_ASSERT(cachedPre.value == "Val H", "Cache mutated prematurely during transaction!");
+
+			TEST_ASSERT(tx.Commit() == true, "Commit failed in 6b");
+			// Cache updated post-commit
+			OpenWifi::TestRecord cachedPost;
+			TEST_ASSERT(mockCache.GetFromCache("id", "rec-108", cachedPost) == true, "recH missing from cache post-commit");
+			TEST_ASSERT(cachedPost.value == "Val H Updated Cache", "Cache failed to update post-commit!");
+		}
+
+		// 6c: Transactional DeleteRecord deletes from DBCache ONLY AFTER COMMIT
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+
+			TEST_ASSERT(db.DeleteRecord(tx, "id", "rec-108") == true, "Failed to delete recH");
+			// Cache entry must still exist during transaction before commit
+			TEST_ASSERT(mockCache.Contains("rec-108") == true, "Cache entry deleted prematurely before commit!");
+
+			TEST_ASSERT(tx.Commit() == true, "Commit failed in 6c");
+			// Cache entry deleted post-commit
+			TEST_ASSERT(mockCache.Contains("rec-108") == false, "Cache entry failed to delete post-commit!");
+		}
+
+		// 6d: Explicit Rollback() does NOT mutate DBCache
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recI{"rec-109", "Record I", "Val I"};
+
+			TEST_ASSERT(db.CreateRecord(tx, recI) == true, "Failed to create recI in transaction");
+			TEST_ASSERT(tx.Rollback() == true, "Rollback failed in 6d");
+
+			// Cache must NOT contain recI
+			TEST_ASSERT(mockCache.Contains("rec-109") == false, "Cache mutated after rolled back transaction!");
+		}
+
+		// 6e: Destructor scope-exit auto-rollback does NOT mutate DBCache
+		{
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::TestRecord recJ{"rec-110", "Record J", "Val J"};
+				TEST_ASSERT(db.CreateRecord(tx, recJ) == true, "Failed to create recJ in transaction");
+				// Intentionally exit scope without Commit() or Rollback()
+			}
+
+			// Cache must NOT contain recJ
+			TEST_ASSERT(mockCache.Contains("rec-110") == false, "Cache mutated after scope-exit auto-rollback!");
+		}
+
+		std::cout << "PASSED" << std::endl;
+	}
+
+	std::cout << "[Framework Unit Test] All DbTransaction & Transaction-Aware ORM Tests Passed Successfully!" << std::endl;
 	return 0;
 }

@@ -23,6 +23,7 @@
 #include "Poco/Logger.h"
 #include "Poco/StringTokenizer.h"
 #include "Poco/Tuple.h"
+#include "DbTransaction.h"
 #include "StorageClass.h"
 
 #include "fmt/format.h"
@@ -1084,15 +1085,25 @@ namespace ORM {
 			return false;
 		}
 
-		bool CreateRecord(Poco::Data::Session &session, const RecordType &R) {
+		// Transaction-aware ORM operations for caller-owned transactions.
+		// Reads use the transaction session directly (e.g., GetRecord(tx.Session(), ...)).
+		// Create/Update/Delete writes register cache changes that execute
+		// only after a successful DbTransaction::Commit().
+		bool CreateRecord(OpenWifi::DbTransaction &tx, const RecordType &R) {
 			try {
-				Poco::Data::Statement Insert(session);
+				Poco::Data::Statement Insert(tx.Session());
 				RecordTuple RT;
 				Convert(R, RT);
 				std::string St = "insert into  " + TableName_ + " ( " + SelectFields_ +
 				                 " ) values " + SelectList_;
 				Insert << ConvertParams(St), Poco::Data::Keywords::use(RT);
 				Insert.execute();
+				if (Cache_) {
+					tx.AfterCommit([this, R]() {
+						if (Cache_)
+							Cache_->Create(R);
+					});
+				}
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
@@ -1101,11 +1112,11 @@ namespace ORM {
 		}
 
 		template <typename T>
-		bool UpdateRecord(Poco::Data::Session &session, field_name_t FieldName, const T &Value,
+		bool UpdateRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
 		                  const RecordType &R) {
 			try {
 				assert(ValidFieldName(FieldName));
-				Poco::Data::Statement Update(session);
+				Poco::Data::Statement Update(tx.Session());
 				RecordTuple RT;
 				Convert(R, RT);
 				auto tValue(Value);
@@ -1122,6 +1133,12 @@ namespace ORM {
 					);
 					return false;
 				}
+				if (Cache_) {
+					tx.AfterCommit([this, R]() {
+						if (Cache_)
+							Cache_->UpdateCache(R);
+					});
+				}
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
@@ -1130,14 +1147,22 @@ namespace ORM {
 		}
 
 		template <typename T>
-		bool DeleteRecord(Poco::Data::Session &session, field_name_t FieldName, const T &Value) {
+		bool DeleteRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value) {
 			try {
 				assert(ValidFieldName(FieldName));
-				Poco::Data::Statement Delete(session);
+				Poco::Data::Statement Delete(tx.Session());
 				std::string St = "delete from " + TableName_ + " where " + FieldName + "=?";
 				auto tValue{Value};
 				Delete << ConvertParams(St), Poco::Data::Keywords::use(tValue);
 				Delete.execute();
+				if (Cache_) {
+					std::string fieldName{FieldName};
+					std::string valStr{to_string(Value)};
+					tx.AfterCommit([this, fieldName, valStr]() {
+						if (Cache_)
+							Cache_->Delete(fieldName, valStr);
+					});
+				}
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
@@ -1145,6 +1170,7 @@ namespace ORM {
 			return false;
 		}
 
+		// Low-level session operation for bulk deletion. Automatic cache synchronization is not provided for arbitrary bulk deletes.
 		bool DeleteRecords(Poco::Data::Session &session, const std::string &WhereClause) {
 			try {
 				assert(!WhereClause.empty());
