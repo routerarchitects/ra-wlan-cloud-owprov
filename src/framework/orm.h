@@ -1023,6 +1023,142 @@ namespace ORM {
 				F.push_back(field);
 		}
 
+		// Session-aware overloads for caller-owned transactions.
+		// These methods do not acquire a session, manage the transaction,
+		// or update Cache_. Cache changes must happen after a successful commit.
+
+		template <typename T>
+		bool GetRecord(Poco::Data::Session &session, field_name_t FieldName, const T &Value,
+		               RecordType &R) {
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Select(session);
+				RecordTuple RT;
+				std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " +
+				                 FieldName + "=? limit 1";
+				auto tValue{Value};
+				Select << ConvertParams(St), Poco::Data::Keywords::into(RT),
+				    Poco::Data::Keywords::use(tValue);
+				if (Select.execute() == 1) {
+					Convert(RT, R);
+					return true;
+				}
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		bool GetRecords(Poco::Data::Session &session,
+		                uint64_t Offset,
+		                uint64_t HowMany,
+		                RecordVec &Records,
+		                const std::string &Where = "",
+		                const std::string &OrderBy = "") {
+			try {
+				Poco::Data::Statement Select(session);
+				RecordList RL;
+
+				std::string St =
+					"select " + SelectFields_ + " from " + TableName_ +
+					(Where.empty() ? "" : " where " + Where) +
+					OrderBy + ComputeRange(Offset, HowMany);
+
+				Select << St, Poco::Data::Keywords::into(RL);
+				Select.execute();
+
+				if (Select.rowsExtracted() > 0) {
+					for (auto &i : RL) {
+						RecordType R;
+						Convert(i, R);
+						Records.emplace_back(R);
+					}
+					return true;
+				}
+
+				return false;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+
+			return false;
+		}
+
+		bool CreateRecord(Poco::Data::Session &session, const RecordType &R) {
+			try {
+				Poco::Data::Statement Insert(session);
+				RecordTuple RT;
+				Convert(R, RT);
+				std::string St = "insert into  " + TableName_ + " ( " + SelectFields_ +
+				                 " ) values " + SelectList_;
+				Insert << ConvertParams(St), Poco::Data::Keywords::use(RT);
+				Insert.execute();
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		template <typename T>
+		bool UpdateRecord(Poco::Data::Session &session, field_name_t FieldName, const T &Value,
+		                  const RecordType &R) {
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Update(session);
+				RecordTuple RT;
+				Convert(R, RT);
+				auto tValue(Value);
+				std::string St = "update " + TableName_ + " set " + UpdateFields_ +
+				                 " where " + FieldName + "=?";
+				Update << ConvertParams(St), Poco::Data::Keywords::use(RT),
+				    Poco::Data::Keywords::use(tValue);
+				const auto AffectedRows = Update.execute();
+				if (AffectedRows != 1) {
+					Logger_.warning(
+						"UpdateRecord affected " + std::to_string(AffectedRows) +
+						" rows in table '" + TableName_ +
+						"' for field '" + FieldName + "'."
+					);
+					return false;
+				}
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		template <typename T>
+		bool DeleteRecord(Poco::Data::Session &session, field_name_t FieldName, const T &Value) {
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Delete(session);
+				std::string St = "delete from " + TableName_ + " where " + FieldName + "=?";
+				auto tValue{Value};
+				Delete << ConvertParams(St), Poco::Data::Keywords::use(tValue);
+				Delete.execute();
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		bool DeleteRecords(Poco::Data::Session &session, const std::string &WhereClause) {
+			try {
+				assert(!WhereClause.empty());
+				Poco::Data::Statement Delete(session);
+				std::string St = "delete from " + TableName_ + " where " + WhereClause;
+				Delete << St;
+				Delete.execute();
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
 	  protected:
 		std::string TableName_;
 		OpenWifi::DBType Type_;
@@ -1040,3 +1176,4 @@ namespace ORM {
 		std::map<std::string, int> FieldNames_;
 	};
 } // namespace ORM
+
