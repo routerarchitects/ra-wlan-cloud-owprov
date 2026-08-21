@@ -56,7 +56,14 @@ namespace OpenWifi {
 			return false;
 		}
 
+		void SetThrowOnUpdateCache(bool shouldThrow) {
+			throwOnUpdateCache_ = shouldThrow;
+		}
+
 		void UpdateCache(const TestRecord &R) override {
+			if (throwOnUpdateCache_) {
+				throw Poco::Exception("Mock UpdateCache simulated failure");
+			}
 			cache_map_[R.id] = R;
 		}
 
@@ -76,6 +83,7 @@ namespace OpenWifi {
 
 	  private:
 		std::map<std::string, TestRecord> cache_map_;
+		bool throwOnUpdateCache_ = false;
 	};
 
 } // namespace OpenWifi
@@ -345,6 +353,66 @@ int main() {
 		std::cout << "PASSED" << std::endl;
 	}
 
+	// -------------------------------------------------------------------------
+	// Test 7: Targeted Cache Invalidation Fallback When UpdateCache() Fails
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 7: Targeted Cache Invalidation Fallback on UpdateCache() Failure... " << std::flush;
+		mockCache.Clear();
+		mockCache.SetThrowOnUpdateCache(false);
+
+		// Pre-populate database & cache
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recK{"rec-111", "Record K", "Val K Initial"};
+			OpenWifi::TestRecord recL{"rec-112", "Record L", "Val L Unrelated"};
+			TEST_ASSERT(db.CreateRecord(tx, recK) == true, "Failed to create recK");
+			TEST_ASSERT(db.CreateRecord(tx, recL) == true, "Failed to create recL");
+			TEST_ASSERT(tx.Commit() == true, "Failed to commit initial records for Test 7");
+		}
+
+		TEST_ASSERT(mockCache.Contains("rec-111") == true, "recK missing from cache");
+		TEST_ASSERT(mockCache.Contains("rec-112") == true, "recL missing from cache");
+
+		// Perform update inside transaction with mockCache set to throw on UpdateCache
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recK_updated{"rec-111", "Record K", "Val K Updated"};
+			TEST_ASSERT(db.UpdateRecord(tx, "id", "rec-111", recK_updated) == true, "UpdateRecord failed inside tx");
+
+			mockCache.SetThrowOnUpdateCache(true);
+			TEST_ASSERT(tx.Commit() == true, "Commit() must succeed even if post-commit UpdateCache throws");
+		}
+
+		// Verify 1: DB update remains committed
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkK;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-111", checkK) == true, "recK missing from DB");
+			TEST_ASSERT(checkK.value == "Val K Updated", "recK value in DB did not update");
+		}
+
+		// Verify 2: Target cache entry was invalidated due to UpdateCache failure
+		TEST_ASSERT(mockCache.Contains("rec-111") == false, "Stale cache entry rec-111 was not invalidated after UpdateCache failure!");
+
+		// Verify 3: Unrelated cache entry remains intact
+		TEST_ASSERT(mockCache.Contains("rec-112") == true, "Unrelated cache entry rec-112 was unexpectedly removed!");
+
+		// Verify 4: Subsequent GetRecord re-populates cache with fresh DB value
+		mockCache.SetThrowOnUpdateCache(false);
+		OpenWifi::TestRecord reFetchedRec;
+		TEST_ASSERT(db.GetRecord("id", "rec-111", reFetchedRec) == true, "GetRecord failed after cache invalidation");
+		TEST_ASSERT(reFetchedRec.value == "Val K Updated", "GetRecord returned incorrect value after re-populating cache");
+		TEST_ASSERT(mockCache.Contains("rec-111") == true, "Cache was not re-populated after GetRecord miss");
+
+		OpenWifi::TestRecord refreshedCachedRec;
+		TEST_ASSERT(mockCache.GetFromCache("id", "rec-111", refreshedCachedRec) == true, "rec-111 missing from cache after re-population");
+		TEST_ASSERT(refreshedCachedRec.value == "Val K Updated", "Cache was re-populated with stale value");
+
+		std::cout << "PASSED" << std::endl;
+	}
+
 	std::cout << "[Framework Unit Test] All DbTransaction & Transaction-Aware ORM Tests Passed Successfully!" << std::endl;
 	return 0;
 }
+

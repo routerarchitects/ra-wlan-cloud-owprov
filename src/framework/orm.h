@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -1134,9 +1135,10 @@ namespace ORM {
 					return false;
 				}
 				if (Cache_) {
-					tx.AfterCommit([this, R]() {
-						if (Cache_)
-							Cache_->UpdateCache(R);
+					std::string fieldName{FieldName};
+					std::string valStr{to_string(Value)};
+					tx.AfterCommit([this, R, fieldName, valStr]() {
+						UpdateCacheOrInvalidate(R, fieldName, valStr);
 					});
 				}
 				return true;
@@ -1194,6 +1196,39 @@ namespace ORM {
 		DBCache<RecordType> *Cache_ = nullptr;
 
 	  private:
+		void UpdateCacheOrInvalidate(const RecordType &R, const std::string &fieldName,
+		                             const std::string &value) {
+			if (!Cache_)
+				return;
+
+			try {
+				Cache_->UpdateCache(R);
+				return;
+			} catch (const Poco::Exception &E) {
+				Logger_.error(
+					"UpdateCache failed post-commit, invalidating cache entry: " +
+					E.displayText());
+			} catch (const std::exception &E) {
+				Logger_.error(
+					"UpdateCache failed post-commit, invalidating cache entry: " +
+					std::string(E.what()));
+			} catch (...) {
+				Logger_.error(
+					"UpdateCache failed post-commit, invalidating cache entry: unknown exception");
+			}
+
+			try {
+				Cache_->Delete(fieldName, value);
+			} catch (const Poco::Exception &E) {
+				Logger_.error(
+					"Failed to invalidate cache entry after UpdateCache failure: " +
+					E.displayText());
+			} catch (...) {
+				Logger_.error(
+					"Failed to invalidate cache entry after UpdateCache failure: unknown exception");
+			}
+		}
+
 		std::string CreateFields_;
 		std::string SelectFields_;
 		std::string SelectList_;
