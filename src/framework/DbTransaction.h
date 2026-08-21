@@ -7,6 +7,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -24,7 +25,9 @@ namespace OpenWifi {
 
 		// Owns one pooled session and starts a transaction on it.
 		explicit DbTransaction(Poco::Data::Session session, Poco::Logger &logger)
-			: session_(std::move(session)), logger_(logger), transaction_(session_, &logger_) {}
+			: logger_(logger) {
+			resources_.emplace(std::move(session), logger_);
+		}
 
 		// Poco::Data::Transaction rolls back automatically if still active.
 		// Pending post-commit actions are discarded on destruction.
@@ -35,16 +38,19 @@ namespace OpenWifi {
 		DbTransaction(DbTransaction &&) = delete;
 		DbTransaction &operator=(DbTransaction &&) = delete;
 
+		// Returned reference is valid only while the transaction is active.
 		Poco::Data::Session &Session() {
-			if (!transaction_.isActive()) {
+			if (!resources_ || !resources_->transaction.isActive()) {
 				throw Poco::IllegalStateException("Database transaction is not active");
 			}
-			return session_;
+
+			return resources_->session;
 		}
 
-		// Registers a callback to execute ONLY after DB commit succeeds. Callbacks run synchronously and must remain fast/lightweight (e.g. cache sync).
+		// Runs only after a successful DB commit.
+		// Callbacks are synchronous and run after DB resources are released.
 		void AfterCommit(PostCommitFunc fn) {
-			if (!transaction_.isActive()) {
+			if (!resources_ || !resources_->transaction.isActive()) {
 				throw Poco::IllegalStateException("Database transaction is not active");
 			}
 			if (fn) {
@@ -53,60 +59,79 @@ namespace OpenWifi {
 		}
 
 		[[nodiscard]] bool Commit() noexcept {
+			std::vector<PostCommitFunc> actions;
+
 			try {
-				if (!transaction_.isActive()) {
+				if (!resources_ || !resources_->transaction.isActive()) {
 					return false;
 				}
 
-				transaction_.commit();
+				resources_->transaction.commit();
 
-				// Execute queued post-commit actions only after DB commit succeeds
-				for (const auto &fn : after_commit_actions_) {
-					try {
-						fn();
-					} catch (const Poco::Exception &e) {
-						logger_.error("Error in post-commit action: " + e.displayText());
-					} catch (...) {
-						logger_.error("Error in post-commit action: unknown exception");
-					}
-				}
-				after_commit_actions_.clear();
-				return true;
+				actions.swap(after_commit_actions_);
+
+				// Release DB transaction and pooled session before callbacks.
+				resources_.reset();
+
 			} catch (const Poco::Exception &e) {
 				logger_.error("Failed to commit database transaction: " + e.displayText());
+				after_commit_actions_.clear();
+				return false;
 			} catch (...) {
 				logger_.error("Failed to commit database transaction: unknown exception");
+				after_commit_actions_.clear();
+				return false;
 			}
 
-			after_commit_actions_.clear();
-			return false;
+			for (const auto &fn : actions) {
+				try {
+					fn();
+				} catch (const Poco::Exception &e) {
+					logger_.error("Error in post-commit action: " + e.displayText());
+				} catch (...) {
+					logger_.error("Error in post-commit action: unknown exception");
+				}
+			}
+
+			return true;
 		}
 
 		[[nodiscard]] bool Rollback() noexcept {
+			after_commit_actions_.clear();
+
 			try {
-				after_commit_actions_.clear();
-				if (!transaction_.isActive()) {
+				if (!resources_ || !resources_->transaction.isActive()) {
 					return false;
 				}
 
-				transaction_.rollback();
+				resources_->transaction.rollback();
+
+				// Return the session immediately.
+				resources_.reset();
+
 				return true;
+
 			} catch (const Poco::Exception &e) {
 				logger_.error("Failed to roll back database transaction: " + e.displayText());
 			} catch (...) {
 				logger_.error("Failed to roll back database transaction: unknown exception");
 			}
 
-			after_commit_actions_.clear();
 			return false;
 		}
 
 	  private:
-		Poco::Data::Session session_;
+		struct Resources {
+			Resources(Poco::Data::Session dbSession, Poco::Logger &logger)
+				: session(std::move(dbSession)), transaction(session, &logger) {}
+
+			Poco::Data::Session session;
+			Poco::Data::Transaction transaction;
+		};
+
 		Poco::Logger &logger_;
-		Poco::Data::Transaction transaction_;
+		std::optional<Resources> resources_;
 		std::vector<PostCommitFunc> after_commit_actions_;
 	};
 
 } // namespace OpenWifi
-

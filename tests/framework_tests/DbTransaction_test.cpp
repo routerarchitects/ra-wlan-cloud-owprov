@@ -570,6 +570,30 @@ int main() {
 		std::cout << "PASSED" << std::endl;
 	}
 
+	// -------------------------------------------------------------------------
+	// Test 11: DB Session Released Before AfterCommit Callback Execution
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 11: DB Session Released Before AfterCommit Callback... " << std::flush;
+		const auto usedBefore = pool.used();
+		int usedInsideCallback = -1;
+
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+
+			TEST_ASSERT(pool.used() == usedBefore + 1, "Transaction did not acquire one pooled session");
+
+			tx.AfterCommit([&]() {
+				usedInsideCallback = pool.used();
+			});
+
+			TEST_ASSERT(tx.Commit() == true, "Commit failed in Test 11");
+		}
+
+		TEST_ASSERT(usedInsideCallback == usedBefore, "DB session was still checked out during AfterCommit callback");
+		std::cout << "PASSED" << std::endl;
+	}
+
 	std::cout << "[Framework Unit Test] All DbTransaction & Transaction-Aware ORM Tests Passed Successfully!" << std::endl;
 	return 0;
 }
