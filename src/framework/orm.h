@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -23,6 +24,7 @@
 #include "Poco/Logger.h"
 #include "Poco/StringTokenizer.h"
 #include "Poco/Tuple.h"
+#include "DbTransaction.h"
 #include "StorageClass.h"
 
 #include "fmt/format.h"
@@ -197,6 +199,10 @@ namespace ORM {
 								  RecordType &R) = 0;
 		virtual void UpdateCache(const RecordType &R) = 0;
 		virtual void Delete(const std::string &FieldName, const std::string &Value) = 0;
+
+		// Last-resort consistency recovery when targeted cache invalidation fails.
+		// Post-commit cache recovery is best-effort and does not alter a successful DB commit.
+		virtual void InvalidateAll() = 0;
 
 	  private:
 		size_t Size_ = 0;
@@ -1023,6 +1029,175 @@ namespace ORM {
 				F.push_back(field);
 		}
 
+		// Session-aware overloads for caller-owned transactions.
+		// These methods do not acquire a session, manage the transaction,
+		// or update Cache_. Cache changes must happen after a successful commit.
+
+		template <typename T>
+		bool GetRecord(Poco::Data::Session &session, field_name_t FieldName, const T &Value,
+		               RecordType &R) {
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Select(session);
+				RecordTuple RT;
+				std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " +
+				                 FieldName + "=? limit 1";
+				auto tValue{Value};
+				Select << ConvertParams(St), Poco::Data::Keywords::into(RT),
+				    Poco::Data::Keywords::use(tValue);
+				if (Select.execute() == 1) {
+					Convert(RT, R);
+					return true;
+				}
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		bool GetRecords(Poco::Data::Session &session,
+		                uint64_t Offset,
+		                uint64_t HowMany,
+		                RecordVec &Records,
+		                const std::string &Where = "",
+		                const std::string &OrderBy = "") {
+			try {
+				Poco::Data::Statement Select(session);
+				RecordList RL;
+
+				std::string St =
+					"select " + SelectFields_ + " from " + TableName_ +
+					(Where.empty() ? "" : " where " + Where) +
+					OrderBy + ComputeRange(Offset, HowMany);
+
+				Select << St, Poco::Data::Keywords::into(RL);
+				Select.execute();
+
+				if (Select.rowsExtracted() > 0) {
+					for (auto &i : RL) {
+						RecordType R;
+						Convert(i, R);
+						Records.emplace_back(R);
+					}
+					return true;
+				}
+
+				return false;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+
+			return false;
+		}
+
+		// Transaction-aware ORM operations for caller-owned transactions.
+		// Reads use the transaction session directly (e.g., GetRecord(tx.Session(), ...)).
+		// Create/Update/Delete writes register cache changes that execute
+		// only after a successful DbTransaction::Commit().
+		bool CreateRecord(OpenWifi::DbTransaction &tx, const RecordType &R) {
+			try {
+				Poco::Data::Statement Insert(tx.Session());
+				RecordTuple RT;
+				Convert(R, RT);
+				std::string St = "insert into  " + TableName_ + " ( " + SelectFields_ +
+				                 " ) values " + SelectList_;
+				Insert << ConvertParams(St), Poco::Data::Keywords::use(RT);
+				Insert.execute();
+				if (Cache_) {
+					tx.AfterCommit([this, R]() {
+						if (Cache_)
+							Cache_->Create(R);
+					});
+				}
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		template <typename T>
+		bool UpdateRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
+		                  const RecordType &R) {
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Update(tx.Session());
+				RecordTuple RT;
+				Convert(R, RT);
+				auto tValue(Value);
+				std::string St = "update " + TableName_ + " set " + UpdateFields_ +
+				                 " where " + FieldName + "=?";
+				Update << ConvertParams(St), Poco::Data::Keywords::use(RT),
+				    Poco::Data::Keywords::use(tValue);
+				const auto AffectedRows = Update.execute();
+				if (AffectedRows != 1) {
+					Logger_.warning(
+						"UpdateRecord affected " + std::to_string(AffectedRows) +
+						" rows in table '" + TableName_ +
+						"' for field '" + FieldName + "'."
+					);
+					return false;
+				}
+				if (Cache_) {
+					std::string fieldName{FieldName};
+					std::string valStr{to_string(Value)};
+					tx.AfterCommit([this, R, fieldName, valStr]() {
+						UpdateCacheOrInvalidate(R, fieldName, valStr);
+					});
+				}
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		template <typename T>
+		bool DeleteRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value) {
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Delete(tx.Session());
+				std::string St = "delete from " + TableName_ + " where " + FieldName + "=?";
+				auto tValue{Value};
+				Delete << ConvertParams(St), Poco::Data::Keywords::use(tValue);
+				const auto AffectedRows = Delete.execute();
+				if (AffectedRows != 1) {
+					Logger_.warning(
+						"DeleteRecord affected " + std::to_string(AffectedRows) +
+						" rows in table '" + TableName_ +
+						"' for field '" + FieldName + "'."
+					);
+					return false;
+				}
+				if (Cache_) {
+					std::string fieldName{FieldName};
+					std::string valStr{to_string(Value)};
+					tx.AfterCommit([this, fieldName, valStr]() {
+						InvalidateCacheEntry(fieldName, valStr);
+					});
+				}
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
+		// Low-level session operation for bulk deletion. Automatic cache synchronization is not provided for arbitrary bulk deletes.
+		bool DeleteRecords(Poco::Data::Session &session, const std::string &WhereClause) {
+			try {
+				assert(!WhereClause.empty());
+				Poco::Data::Statement Delete(session);
+				std::string St = "delete from " + TableName_ + " where " + WhereClause;
+				Delete << St;
+				Delete.execute();
+				return true;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+			return false;
+		}
+
 	  protected:
 		std::string TableName_;
 		OpenWifi::DBType Type_;
@@ -1032,6 +1207,52 @@ namespace ORM {
 		DBCache<RecordType> *Cache_ = nullptr;
 
 	  private:
+		void InvalidateCacheEntry(const std::string &fieldName, const std::string &value) {
+			if (!Cache_)
+				return;
+
+			try {
+				Cache_->Delete(fieldName, value);
+				return;
+			} catch (const Poco::Exception &E) {
+				Logger_.error("Cache entry invalidation failed: " + E.displayText());
+			} catch (const std::exception &E) {
+				Logger_.error("Cache entry invalidation failed: " + std::string(E.what()));
+			} catch (...) {
+				Logger_.error("Cache entry invalidation failed: unknown exception");
+			}
+
+			Logger_.error("Falling back to full cache invalidation after targeted invalidation failure.");
+
+			try {
+				Cache_->InvalidateAll();
+			} catch (const Poco::Exception &E) {
+				Logger_.error("Full cache invalidation failed: " + E.displayText());
+			} catch (const std::exception &E) {
+				Logger_.error("Full cache invalidation failed: " + std::string(E.what()));
+			} catch (...) {
+				Logger_.error("Full cache invalidation failed: unknown exception");
+			}
+		}
+
+		void UpdateCacheOrInvalidate(const RecordType &R, const std::string &fieldName, const std::string &value) {
+			if (!Cache_)
+				return;
+
+			try {
+				Cache_->UpdateCache(R);
+				return;
+			} catch (const Poco::Exception &E) {
+				Logger_.error("UpdateCache failed post-commit: " + E.displayText());
+			} catch (const std::exception &E) {
+				Logger_.error("UpdateCache failed post-commit: " + std::string(E.what()));
+			} catch (...) {
+				Logger_.error("UpdateCache failed post-commit: unknown exception");
+			}
+
+			InvalidateCacheEntry(fieldName, value);
+		}
+
 		std::string CreateFields_;
 		std::string SelectFields_;
 		std::string SelectList_;
@@ -1040,3 +1261,4 @@ namespace ORM {
 		std::map<std::string, int> FieldNames_;
 	};
 } // namespace ORM
+

@@ -243,3 +243,16 @@ target_link_libraries(owprov PUBLIC
         CppKafka::cppkafka
         resolv
         fmt::fmt)
+
+add_executable(db_transaction_test
+        tests/framework_tests/DbTransaction_test.cpp
+)
+
+target_link_libraries(db_transaction_test PRIVATE
+        ${Poco_LIBRARIES}
+        fmt::fmt)
+
+enable_testing()
+add_test(NAME db_transaction_test COMMAND db_transaction_test)
+
+
