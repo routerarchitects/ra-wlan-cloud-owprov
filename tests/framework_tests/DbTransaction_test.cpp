@@ -60,6 +60,19 @@ namespace OpenWifi {
 			throwOnUpdateCache_ = shouldThrow;
 		}
 
+		void SetThrowOnDelete(bool shouldThrow) {
+			throwOnDelete_ = shouldThrow;
+		}
+
+		bool InvalidateAllCalled() const {
+			return invalidateAllCalled_;
+		}
+
+		void InvalidateAll() override {
+			invalidateAllCalled_ = true;
+			cache_map_.clear();
+		}
+
 		void UpdateCache(const TestRecord &R) override {
 			if (throwOnUpdateCache_) {
 				throw Poco::Exception("Mock UpdateCache simulated failure");
@@ -68,6 +81,9 @@ namespace OpenWifi {
 		}
 
 		void Delete(const std::string &FieldName, const std::string &Value) override {
+			if (throwOnDelete_) {
+				throw Poco::Exception("Mock Delete simulated failure");
+			}
 			if (FieldName == "id") {
 				cache_map_.erase(Value);
 			}
@@ -79,11 +95,16 @@ namespace OpenWifi {
 
 		void Clear() {
 			cache_map_.clear();
+			throwOnUpdateCache_ = false;
+			throwOnDelete_ = false;
+			invalidateAllCalled_ = false;
 		}
 
 	  private:
 		std::map<std::string, TestRecord> cache_map_;
 		bool throwOnUpdateCache_ = false;
+		bool throwOnDelete_ = false;
+		bool invalidateAllCalled_ = false;
 	};
 
 } // namespace OpenWifi
@@ -397,6 +418,7 @@ int main() {
 
 		// Verify 3: Unrelated cache entry remains intact
 		TEST_ASSERT(mockCache.Contains("rec-112") == true, "Unrelated cache entry rec-112 was unexpectedly removed!");
+		TEST_ASSERT(mockCache.InvalidateAllCalled() == false, "InvalidateAll() was unexpectedly called when targeted invalidation succeeded");
 
 		// Verify 4: Subsequent GetRecord re-populates cache with fresh DB value
 		mockCache.SetThrowOnUpdateCache(false);
@@ -408,6 +430,60 @@ int main() {
 		OpenWifi::TestRecord refreshedCachedRec;
 		TEST_ASSERT(mockCache.GetFromCache("id", "rec-111", refreshedCachedRec) == true, "rec-111 missing from cache after re-population");
 		TEST_ASSERT(refreshedCachedRec.value == "Val K Updated", "Cache was re-populated with stale value");
+
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test 8: Transactional Delete Post-Commit Delete Failure Fallback to InvalidateAll()
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 8: Transactional Delete Post-Commit Delete Failure Fallback to InvalidateAll()... " << std::flush;
+		mockCache.Clear();
+
+		// Pre-populate DB & Cache with 2 records
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recM{"rec-113", "Record M", "Val M"};
+			OpenWifi::TestRecord recN{"rec-114", "Record N", "Val N"};
+			TEST_ASSERT(db.CreateRecord(tx, recM) == true, "Failed to create recM");
+			TEST_ASSERT(db.CreateRecord(tx, recN) == true, "Failed to create recN");
+			TEST_ASSERT(tx.Commit() == true, "Failed to commit initial records for Test 8");
+		}
+
+		TEST_ASSERT(mockCache.Contains("rec-113") == true, "recM missing from cache");
+		TEST_ASSERT(mockCache.Contains("rec-114") == true, "recN missing from cache");
+
+		// Perform transactional DeleteRecord with mockCache set to throw on Delete
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			TEST_ASSERT(db.DeleteRecord(tx, "id", "rec-113") == true, "DeleteRecord failed inside tx");
+
+			mockCache.SetThrowOnDelete(true);
+			TEST_ASSERT(tx.Commit() == true, "Commit() must succeed even if post-commit Delete throws");
+		}
+
+		// Verify 1: DB deletion remains committed and unrelated DB records persist
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkM, checkN;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-113", checkM) == false, "recM unexpectedly exists in DB after deletion");
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-114", checkN) == true, "recN unexpectedly missing from DB after cache invalidation fallback");
+		}
+
+		// Verify 2: InvalidateAll() was called as last-resort fallback
+		TEST_ASSERT(mockCache.InvalidateAllCalled() == true, "InvalidateAll() was not called after Delete failure!");
+
+		// Verify 3: Stale target cache entry rec-113 is gone
+		TEST_ASSERT(mockCache.Contains("rec-113") == false, "Stale deleted entry rec-113 was served from cache!");
+
+		// Verify 4: Unrelated cache entry rec-114 is also cleared because full invalidation occurred
+		TEST_ASSERT(mockCache.Contains("rec-114") == false, "Unrelated entry rec-114 was not cleared during InvalidateAll()!");
+
+		// Verify 5: Subsequent GetRecord for deleted recM returns false (does not return stale cache data)
+		mockCache.SetThrowOnDelete(false);
+		OpenWifi::TestRecord reFetchedRecM;
+		TEST_ASSERT(db.GetRecord("id", "rec-113", reFetchedRecM) == false, "GetRecord returned stale data for deleted row");
 
 		std::cout << "PASSED" << std::endl;
 	}

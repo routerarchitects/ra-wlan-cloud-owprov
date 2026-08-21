@@ -200,6 +200,9 @@ namespace ORM {
 		virtual void UpdateCache(const RecordType &R) = 0;
 		virtual void Delete(const std::string &FieldName, const std::string &Value) = 0;
 
+		// Last-resort consistency recovery when targeted cache invalidation fails.
+		virtual void InvalidateAll() = 0;
+
 	  private:
 		size_t Size_ = 0;
 		uint64_t Timeout_ = 0;
@@ -1161,8 +1164,7 @@ namespace ORM {
 					std::string fieldName{FieldName};
 					std::string valStr{to_string(Value)};
 					tx.AfterCommit([this, fieldName, valStr]() {
-						if (Cache_)
-							Cache_->Delete(fieldName, valStr);
+						InvalidateCacheEntry(fieldName, valStr);
 					});
 				}
 				return true;
@@ -1196,8 +1198,35 @@ namespace ORM {
 		DBCache<RecordType> *Cache_ = nullptr;
 
 	  private:
-		void UpdateCacheOrInvalidate(const RecordType &R, const std::string &fieldName,
-		                             const std::string &value) {
+		void InvalidateCacheEntry(const std::string &fieldName, const std::string &value) {
+			if (!Cache_)
+				return;
+
+			try {
+				Cache_->Delete(fieldName, value);
+				return;
+			} catch (const Poco::Exception &E) {
+				Logger_.error("Cache entry invalidation failed: " + E.displayText());
+			} catch (const std::exception &E) {
+				Logger_.error("Cache entry invalidation failed: " + std::string(E.what()));
+			} catch (...) {
+				Logger_.error("Cache entry invalidation failed: unknown exception");
+			}
+
+			Logger_.error("Falling back to full cache invalidation after targeted invalidation failure.");
+
+			try {
+				Cache_->InvalidateAll();
+			} catch (const Poco::Exception &E) {
+				Logger_.error("Full cache invalidation failed: " + E.displayText());
+			} catch (const std::exception &E) {
+				Logger_.error("Full cache invalidation failed: " + std::string(E.what()));
+			} catch (...) {
+				Logger_.error("Full cache invalidation failed: unknown exception");
+			}
+		}
+
+		void UpdateCacheOrInvalidate(const RecordType &R, const std::string &fieldName, const std::string &value) {
 			if (!Cache_)
 				return;
 
@@ -1205,28 +1234,14 @@ namespace ORM {
 				Cache_->UpdateCache(R);
 				return;
 			} catch (const Poco::Exception &E) {
-				Logger_.error(
-					"UpdateCache failed post-commit, invalidating cache entry: " +
-					E.displayText());
+				Logger_.error("UpdateCache failed post-commit: " + E.displayText());
 			} catch (const std::exception &E) {
-				Logger_.error(
-					"UpdateCache failed post-commit, invalidating cache entry: " +
-					std::string(E.what()));
+				Logger_.error("UpdateCache failed post-commit: " + std::string(E.what()));
 			} catch (...) {
-				Logger_.error(
-					"UpdateCache failed post-commit, invalidating cache entry: unknown exception");
+				Logger_.error("UpdateCache failed post-commit: unknown exception");
 			}
 
-			try {
-				Cache_->Delete(fieldName, value);
-			} catch (const Poco::Exception &E) {
-				Logger_.error(
-					"Failed to invalidate cache entry after UpdateCache failure: " +
-					E.displayText());
-			} catch (...) {
-				Logger_.error(
-					"Failed to invalidate cache entry after UpdateCache failure: unknown exception");
-			}
+			InvalidateCacheEntry(fieldName, value);
 		}
 
 		std::string CreateFields_;
