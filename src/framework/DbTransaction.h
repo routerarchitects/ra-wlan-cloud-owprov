@@ -17,6 +17,7 @@
 
 namespace OpenWifi {
 
+	// Note: Keep transactions narrow and DB-only. Perform network/JSON operations before opening DbTransaction to prevent pool exhaustion.
 	class DbTransaction final {
 	  public:
 		using PostCommitFunc = std::function<void()>;
@@ -41,7 +42,7 @@ namespace OpenWifi {
 			return session_;
 		}
 
-		// Registers a callback to execute ONLY after the database transaction commits successfully.
+		// Registers a callback to execute ONLY after DB commit succeeds. Callbacks run synchronously and must remain fast/lightweight (e.g. cache sync).
 		void AfterCommit(PostCommitFunc fn) {
 			if (!transaction_.isActive()) {
 				throw Poco::IllegalStateException("Database transaction is not active");
