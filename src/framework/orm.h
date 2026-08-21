@@ -201,6 +201,7 @@ namespace ORM {
 		virtual void Delete(const std::string &FieldName, const std::string &Value) = 0;
 
 		// Last-resort consistency recovery when targeted cache invalidation fails.
+		// Post-commit cache recovery is best-effort and does not alter a successful DB commit.
 		virtual void InvalidateAll() = 0;
 
 	  private:
@@ -1159,7 +1160,15 @@ namespace ORM {
 				std::string St = "delete from " + TableName_ + " where " + FieldName + "=?";
 				auto tValue{Value};
 				Delete << ConvertParams(St), Poco::Data::Keywords::use(tValue);
-				Delete.execute();
+				const auto AffectedRows = Delete.execute();
+				if (AffectedRows != 1) {
+					Logger_.warning(
+						"DeleteRecord affected " + std::to_string(AffectedRows) +
+						" rows in table '" + TableName_ +
+						"' for field '" + FieldName + "'."
+					);
+					return false;
+				}
 				if (Cache_) {
 					std::string fieldName{FieldName};
 					std::string valStr{to_string(Value)};

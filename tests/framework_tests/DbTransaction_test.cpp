@@ -64,12 +64,19 @@ namespace OpenWifi {
 			throwOnDelete_ = shouldThrow;
 		}
 
+		void SetThrowOnInvalidateAll(bool shouldThrow) {
+			throwOnInvalidateAll_ = shouldThrow;
+		}
+
 		bool InvalidateAllCalled() const {
 			return invalidateAllCalled_;
 		}
 
 		void InvalidateAll() override {
 			invalidateAllCalled_ = true;
+			if (throwOnInvalidateAll_) {
+				throw Poco::Exception("Mock InvalidateAll simulated failure");
+			}
 			cache_map_.clear();
 		}
 
@@ -97,6 +104,7 @@ namespace OpenWifi {
 			cache_map_.clear();
 			throwOnUpdateCache_ = false;
 			throwOnDelete_ = false;
+			throwOnInvalidateAll_ = false;
 			invalidateAllCalled_ = false;
 		}
 
@@ -104,6 +112,7 @@ namespace OpenWifi {
 		std::map<std::string, TestRecord> cache_map_;
 		bool throwOnUpdateCache_ = false;
 		bool throwOnDelete_ = false;
+		bool throwOnInvalidateAll_ = false;
 		bool invalidateAllCalled_ = false;
 	};
 
@@ -485,6 +494,79 @@ int main() {
 		OpenWifi::TestRecord reFetchedRecM;
 		TEST_ASSERT(db.GetRecord("id", "rec-113", reFetchedRecM) == false, "GetRecord returned stale data for deleted row");
 
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test 9: Transactional Delete Missing Row Failure Causes Caller Rollback
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 9: Transactional Delete Missing Row Failure... " << std::flush;
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+
+			OpenWifi::TestRecord recO{"rec-115", "Record O", "Val O"};
+			TEST_ASSERT(db.CreateRecord(tx, recO) == true, "CreateRecord failed in Test 9");
+
+			// Attempt deleting a non-existent row inside the transaction
+			TEST_ASSERT(db.DeleteRecord(tx, "id", "does-not-exist") == false, "DeleteRecord unexpectedly succeeded for missing row");
+
+			// Caller rolls back due to failure of required delete step
+			TEST_ASSERT(tx.Rollback() == true, "Rollback failed after DeleteRecord failure");
+		}
+
+		// Verify earlier write (recO) was rolled back from DB as well
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkO;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-115", checkO) == false, "Earlier write remained in DB after rollback");
+		}
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test 10: Post-Commit Double Cache Failure (Delete & InvalidateAll Throw)
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 10: Post-Commit Double Cache Failure (Delete & InvalidateAll Throw)... " << std::flush;
+		mockCache.Clear();
+
+		// Pre-populate DB & Cache with 1 record
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recP{"rec-116", "Record P", "Val P"};
+			TEST_ASSERT(db.CreateRecord(tx, recP) == true, "Failed to create recP");
+			TEST_ASSERT(tx.Commit() == true, "Failed to commit initial record for Test 10");
+		}
+
+		TEST_ASSERT(mockCache.Contains("rec-116") == true, "recP missing from cache");
+
+		// Perform transactional DeleteRecord with both Delete and InvalidateAll set to throw
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			TEST_ASSERT(db.DeleteRecord(tx, "id", "rec-116") == true, "DeleteRecord failed inside tx");
+
+			mockCache.SetThrowOnDelete(true);
+			mockCache.SetThrowOnInvalidateAll(true);
+
+			// DB commit MUST still return true even when both post-commit cache operations throw
+			TEST_ASSERT(tx.Commit() == true, "DB commit must remain successful when cache recovery fails");
+		}
+
+		// Verify 1: DB deletion remains committed
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkP;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-116", checkP) == false, "recP unexpectedly exists in DB after deletion");
+		}
+
+		// Verify 2: InvalidateAll() was attempted
+		TEST_ASSERT(mockCache.InvalidateAllCalled() == true, "InvalidateAll() was not attempted after Delete failure!");
+
+		// Verify 3: Stale cache entry remains in cache when both Delete and InvalidateAll throw (best-effort behavior)
+		TEST_ASSERT(mockCache.Contains("rec-116") == true, "Expected stale cache entry to remain when both Delete and InvalidateAll throw");
+
+		mockCache.Clear();
 		std::cout << "PASSED" << std::endl;
 	}
 
