@@ -1,8 +1,10 @@
 package rbac_tests
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -192,7 +194,20 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			t.Fatalf("DELETE request failed: %v", err)
 		}
 		if status != http.StatusBadRequest {
-			t.Errorf("Expected 400 Bad Request for in-use policy deletion, got %d. Body: %s", status, string(body))
+			t.Fatalf("Expected 400 Bad Request for in-use policy deletion, got %d. Body: %s", status, string(body))
+		}
+
+		// Acceptance Criteria (Issue #72): Verify explicit error description for in-use policy deletion
+		var errResp struct {
+			ErrorCode        int    `json:"ErrorCode"`
+			ErrorDescription string `json:"ErrorDescription"`
+		}
+		if err := json.Unmarshal(body, &errResp); err != nil {
+			t.Fatalf("Failed to parse error response JSON: %v. Body: %s", err, string(body))
+		}
+		expectedErrSubstr := "Management policy is currently assigned to one or more management roles"
+		if !strings.Contains(errResp.ErrorDescription, expectedErrSubstr) {
+			t.Errorf("Expected ErrorDescription to contain %q, got: %q", expectedErrSubstr, errResp.ErrorDescription)
 		}
 	})
 }
