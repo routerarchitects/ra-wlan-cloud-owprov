@@ -52,8 +52,9 @@ namespace OpenWifi {
 
 			std::string St = "SELECT COUNT(*) FROM (SELECT 1 FROM " + TableName_ +
 							 " WHERE managementPolicy=? LIMIT 1) AS t";
+			auto tPolicyId{PolicyId};
 			Select << ConvertParams(St), Poco::Data::Keywords::into(Count),
-				Poco::Data::Keywords::use(PolicyId);
+				Poco::Data::Keywords::use(tPolicyId);
 			Select.execute();
 
 			InUse = (Count > 0);
