@@ -1,0 +1,47 @@
+TestCaseID,Category,Scenario,Method,Endpoint,ExpectedStatus,ActualStatus,Result,KnownFailureReason,Details
+ROOT-BOOTSTRAP-0001,Bootstrap,Verify Root Entity exists,GET,/api/v1/entity/0000-0000-0000,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/entity/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0003,Bootstrap,Create Level 1 Operator B,POST,/api/v1/operator/0000-0000-0000,200,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/operator/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0004,Bootstrap,Create Level 1 Normal Entity 1,POST,/api/v1/entity/0,200,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/entity/0"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0008,Bootstrap,Create Inventory Tag A,POST,/api/v1/inventory/dc6279652f20,200,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/inventory/dc6279652f20"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0009,Bootstrap,Create Configuration A,POST,/api/v1/configuration/0000-0000-0000,200,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/configuration/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0011,Bootstrap,Create Policy B,POST,/api/v1/managementPolicy/0000-0000-0000,200,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/managementPolicy/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0015,Bootstrap,Create User Admin A,POST,/api/v1/user,200,200,PASS,,
+ROOT-BOOTSTRAP-0016,Bootstrap,Create User Admin B,POST,/api/v1/user,200,200,PASS,,
+ROOT-BOOTSTRAP-0018,Bootstrap,Create Role Admin B on Entity B,POST,/api/v1/managementRole/0000-0000-0000,200,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/managementRole/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-BOOTSTRAP-0020,Bootstrap,Login Admin A,POST,/api/v1/oauth2,200,200,PASS,,
+ROOT-BOOTSTRAP-0021,Bootstrap,Login Admin B,POST,/api/v1/oauth2,200,200,PASS,,
+ROOT-BOOTSTRAP-0022,Bootstrap,Create User Client A,POST,/api/v1/user,200,200,PASS,,
+ROOT-BOOTSTRAP-0024,Bootstrap,Admin A creates user delegated-a,POST,/api/v1/user,200,200,PASS,,
+ROOT-READ-0001,Read,List all entities,GET,/api/v1/entity,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/entity"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0003,Read,List all operators,GET,/api/v1/operator,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/operator"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0005,Read,List all venues,GET,/api/v1/venue,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/venue"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0007,Read,List all policies,GET,/api/v1/managementPolicy,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/managementPolicy"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0009,Read,List all roles,GET,/api/v1/managementRole,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/managementRole"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0011,Read,List all inventory tags,GET,/api/v1/inventory,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/inventory"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0012,Read,Get Inventory Tag A by Serial,GET,/api/v1/inventory/dc6279652f20,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/inventory/dc6279652f20"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0013,Read,List all configurations,GET,/api/v1/configuration,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/configuration"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0014,Read,Get Configuration A by ID,GET,/api/v1/configuration/${config_a_id},200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/configuration/$%7Bconfig_a_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-READ-0017,Read,Admin A reads user Client A,GET,/api/v1/user/ee5fbe2e-0829-7848-4154-36dd39913fd0,200,200,PASS,,
+ROOT-READ-0018,Read,Admin B attempts to read user Client A,GET,/api/v1/user/ee5fbe2e-0829-7848-4154-36dd39913fd0,200,200,PASS,,
+ROOT-UPDATE-0006,Update,Update Inventory Tag A description,PUT,/api/v1/inventory/dc6279652f20,200,ERR,FAIL,,"Put ""https://localhost:16005/api/v1/inventory/dc6279652f20"": http: server gave HTTP response to HTTPS client"
+ROOT-UPDATE-0007,Update,Update Configuration A description,PUT,/api/v1/configuration/${config_a_id},200,ERR,FAIL,,"Put ""https://localhost:16005/api/v1/configuration/$%7Bconfig_a_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-UPDATE-0009,Update,ROOT transfers ownership of Client A to Admin A,PUT,/api/v1/user/ee5fbe2e-0829-7848-4154-36dd39913fd0,200,405,FAIL,,"Expected 200, got 405. Body: Method not allowed
+"
+ROOT-AUTOROLE-0002,Auto Role,ROOT retrieves automatically created role for Admin A,GET,/api/v1/managementRole?user=86b21d1d-c4a1-1db8-4965-3e8d6448a8e2,200,ERR,FAIL,,"Get ""https://localhost:16005/api/v1/managementRole?user=86b21d1d-c4a1-1db8-4965-3e8d6448a8e2"": http: server gave HTTP response to HTTPS client"
+ROOT-CONSTRAINT-0001,Constraint,Reject Operator under Normal Entity,POST,/api/v1/operator/0000-0000-0000,400,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/operator/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-CONSTRAINT-0002,Constraint,Reject Normal Entity Level 3 nesting,POST,/api/v1/entity/0000-0000-0000,400,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/entity/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-CONSTRAINT-0003,Constraint,Reject Normal Entity under Venue,POST,/api/v1/entity/0000-0000-0000,400,ERR,FAIL,,"Post ""https://localhost:16005/api/v1/entity/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-CONSTRAINT-0011,Constraint,Reject deleting Root Entity,DELETE,/api/v1/entity/0000-0000-0000,400,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/entity/0000-0000-0000"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0004,Lifecycle,Reject Venue delete when device exists,DELETE,/api/v1/venue/${venue_l1_1_id},400|409,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/venue/$%7Bvenue_l1_1_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0005,Lifecycle,Clean delete Inventory Tag A,DELETE,/api/v1/inventory/dc6279652f20,200,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/inventory/dc6279652f20"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0010,Lifecycle,Clean delete Configuration A,DELETE,/api/v1/configuration/${config_a_id},200|404,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/configuration/$%7Bconfig_a_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0013,Lifecycle,Clean delete Policy A second attempt,DELETE,/api/v1/managementPolicy/${policy_a_id},404,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/managementPolicy/$%7Bpolicy_a_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0014,Lifecycle,ROOT deletes User Client A,DELETE,/api/v1/user/ee5fbe2e-0829-7848-4154-36dd39913fd0,200,200,PASS,,
+ROOT-LIFECYCLE-0017,Lifecycle,Clean delete User Admin A,DELETE,/api/v1/user/86b21d1d-c4a1-1db8-4965-3e8d6448a8e2,200,200,PASS,,
+ROOT-LIFECYCLE-0018,Lifecycle,Clean delete User Admin B,DELETE,/api/v1/user/bd8bd2a5-e10d-4f42-9bc6-aaa49d29b2c5,200,200,PASS,,
+ROOT-LIFECYCLE-0019,Lifecycle,Clean delete User Delegated A,DELETE,/api/v1/user/8e6fa925-fec6-732f-74c8-21c4598d5caa,200,200,PASS,,
+ROOT-LIFECYCLE-0021,Lifecycle,Clean delete Role Admin B,DELETE,/api/v1/managementRole/${role_admin_b_id},200,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/managementRole/$%7Brole_admin_b_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0022,Lifecycle,Clean delete Role Venue A,DELETE,/api/v1/managementRole/${role_venue_a_id},200|404,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/managementRole/$%7Brole_venue_a_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0023,Lifecycle,Clean delete Policy B,DELETE,/api/v1/managementPolicy/${policy_b_id},200,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/managementPolicy/$%7Bpolicy_b_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0026,Lifecycle,Clean delete Normal Entity 1,DELETE,/api/v1/entity/${entity_l1_1_id},200,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/entity/$%7Bentity_l1_1_id%7D"": http: server gave HTTP response to HTTPS client"
+ROOT-LIFECYCLE-0027,Lifecycle,Clean delete Operator B,DELETE,/api/v1/operator/${operator_b_id},200,ERR,FAIL,,"Delete ""https://localhost:16005/api/v1/operator/$%7Boperator_b_id%7D"": http: server gave HTTP response to HTTPS client"

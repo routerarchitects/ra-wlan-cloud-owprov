@@ -113,3 +113,37 @@ func TestManagementRoleImmutability(t *testing.T) {
 		}
 	})
 }
+
+// ----------------------------------------------------------------------------
+// 4. MANAGEMENT POLICY DELETION PROTECTION TESTS (DELETE /api/v1/managementPolicy/{id})
+// ----------------------------------------------------------------------------
+
+/*
+ * TestManagementPolicyDeletionProtection
+ *
+ * DESCRIPTION:
+ *   Validates Management Policy deletion protection rules.
+ *   On DELETE /api/v1/managementPolicy/{id}:
+ *   - If the policy is currently assigned to one or more Management Roles,
+ *     the backend MUST reject the deletion request with 400 Bad Request (StillInUse).
+ *   - Policies can only be safely deleted when no Management Roles reference them.
+ *
+ * SCENARIOS TESTED:
+ *   1. Negative: Attempting to delete a policy assigned to an active Management Role
+ *      Expected Status: 400 Bad Request ("Management policy is currently assigned to one or more management roles.").
+ */
+func TestManagementPolicyDeletionProtection(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	rootToken := getEnvOrDefault("TOKEN_ROOT", "Bearer root-test-token")
+	assignedPolicyID := getEnvOrDefault("POLICY_STRONG_ID", "6f0e350a-8b7b-4ae1-bbd7-5f559792bc95")
+
+	t.Run("Negative: Deleting in-use policy returns 400 Bad Request", func(t *testing.T) {
+		status, body, err := client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for in-use policy deletion, got %d. Body: %s", status, string(body))
+		}
+	})
+}
