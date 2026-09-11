@@ -78,13 +78,22 @@ TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Ven
 TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Users
 ```
 
-#### **1.5 In-Use Policy Deletion Blocked (Negative)**
+#### **1.5 Unreferenced Policy Deletion Allowed (Positive)**
+- **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Positive: Deleting unreferenced policy succeeds`)
+- **Description**: Verifies that creating and deleting an unreferenced policy (not assigned to any role) succeeds.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+TOKEN_ROOT="Bearer <token>" go test -v . -run TestManagementPolicyDeletionProtection/Positive
+```
+
+#### **1.6 In-Use Policy Deletion Blocked (Negative)**
 - **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Negative: Deleting in-use policy returns 400 Bad Request`)
 - **Description**: Verifies that attempting to delete a policy assigned to an active Management Role is rejected.
 - **Expected Output**: **`400 Bad Request`** (*"Management policy is currently assigned to one or more management roles."*)
 - **Command**:
 ```bash
-TOKEN_ROOT="Bearer <token>" POLICY_STRONG_ID="<policy_id>" go test -v . -run TestManagementPolicyDeletionProtection
+TOKEN_ROOT="Bearer <token>" POLICY_STRONG_ID="<policy_id>" go test -v . -run TestManagementPolicyDeletionProtection/Negative
 ```
 
 ---

@@ -29,3 +29,6 @@ src/ow_version.h
 test_scripts/curl/token.json
 .vscode/c_cpp_properties.json
 test_scripts/curl/result.json
+tests/lab_tests/*actual_results.csv
+tests/owsec_data/
+tests/owprov_data/

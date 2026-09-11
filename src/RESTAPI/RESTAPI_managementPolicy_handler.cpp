@@ -62,9 +62,12 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		std::string WhereRoles = "managementPolicy='" + ORM::Escape(UUID) + "'";
-		ManagementRoleDB::RecordVec MatchingRoles;
-		if (StorageService()->RolesDB().GetRecords(0, 1, MatchingRoles, WhereRoles) && !MatchingRoles.empty()) {
+		bool IsAssignedToRole = false;
+		if (!StorageService()->RolesDB().HasPolicy(UUID, IsAssignedToRole)) {
+			return InternalError(RESTAPI::Errors::InternalError);
+		}
+
+		if (IsAssignedToRole) {
 			return BadRequest(RESTAPI::Errors::StillInUse,
 							  "Management policy is currently assigned to one or more management roles.");
 		}

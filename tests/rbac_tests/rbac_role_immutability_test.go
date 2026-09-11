@@ -124,23 +124,72 @@ func TestManagementRoleImmutability(t *testing.T) {
  * DESCRIPTION:
  *   Validates Management Policy deletion protection rules.
  *   On DELETE /api/v1/managementPolicy/{id}:
+ *   - If the policy is unreferenced (not assigned to any role), deletion succeeds with 200 OK.
  *   - If the policy is currently assigned to one or more Management Roles,
  *     the backend MUST reject the deletion request with 400 Bad Request (StillInUse).
- *   - Policies can only be safely deleted when no Management Roles reference them.
  *
  * SCENARIOS TESTED:
- *   1. Negative: Attempting to delete a policy assigned to an active Management Role
- *      Expected Status: 400 Bad Request ("Management policy is currently assigned to one or more management roles.").
+ *   1. Positive: Deleting an unreferenced policy succeeds (200 OK).
+ *   2. Negative: Deleting a policy assigned to an active Management Role is rejected (400 Bad Request).
  */
 func TestManagementPolicyDeletionProtection(t *testing.T) {
 	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
 	rootToken := getEnvOrDefault("TOKEN_ROOT", "Bearer root-test-token")
+	roleID := getEnvOrDefault("ROLE_ID", "ed7ff809-20d3-48f4-8fe2-c882cd681657")
+	validEntity := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+	validUsers := []string{getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")}
 	assignedPolicyID := getEnvOrDefault("POLICY_STRONG_ID", "6f0e350a-8b7b-4ae1-bbd7-5f559792bc95")
 
+	t.Run("Positive: Deleting unreferenced policy succeeds", func(t *testing.T) {
+		tempPolicyID := "d4e5f6a7-b8c9-4012-9def-123456789abc"
+
+		// 1. Create a standalone unreferenced policy
+		policyPayload := map[string]interface{}{
+			"id":          tempPolicyID,
+			"name":        "test-unreferenced-policy",
+			"description": "Temporary policy for testing deletion of unreferenced policy",
+			"entries":     []map[string]interface{}{},
+		}
+
+		status, _, err := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, policyPayload)
+		if err != nil {
+			t.Fatalf("Failed to create temporary policy: %v", err)
+		}
+		if status != http.StatusOK && status != http.StatusCreated {
+			t.Logf("Notice: Policy creation returned %d, proceeding with delete test", status)
+		}
+
+		// 2. Delete the unreferenced policy -> must succeed with 200 OK
+		status, body, err := client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, nil)
+		if err != nil {
+			t.Fatalf("DELETE request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK when deleting unreferenced policy, got %d. Body: %s", status, string(body))
+		}
+	})
+
 	t.Run("Negative: Deleting in-use policy returns 400 Bad Request", func(t *testing.T) {
+		// 1. Ensure the active role is explicitly linked to assignedPolicyID
+		rolePayload := map[string]interface{}{
+			"id":               roleID,
+			"entity":           validEntity,
+			"venue":            "",
+			"users":            validUsers,
+			"managementPolicy": assignedPolicyID,
+		}
+		status, _, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+		if err != nil {
+			t.Fatalf("Failed to link policy to role: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Logf("Notice: Role update returned %d, proceeding with in-use delete check", status)
+		}
+
+		// 2. Attempt to delete the policy currently in use -> must be rejected with 400 Bad Request
 		status, body, err := client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, nil)
 		if err != nil {
-			t.Fatalf("Request failed: %v", err)
+			t.Fatalf("DELETE request failed: %v", err)
 		}
 		if status != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for in-use policy deletion, got %d. Body: %s", status, string(body))

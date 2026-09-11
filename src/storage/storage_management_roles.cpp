@@ -44,6 +44,26 @@ namespace OpenWifi {
 		return true;
 	}
 
+	bool ManagementRoleDB::HasPolicy(const std::string &PolicyId, bool &InUse) {
+		try {
+			uint64_t Count = 0;
+			Poco::Data::Session Session = Pool_.get();
+			Poco::Data::Statement Select(Session);
+
+			std::string St = "SELECT COUNT(*) FROM (SELECT 1 FROM " + TableName_ +
+							 " WHERE managementPolicy=? LIMIT 1) AS t";
+			Select << ConvertParams(St), Poco::Data::Keywords::into(Count),
+				Poco::Data::Keywords::use(PolicyId);
+			Select.execute();
+
+			InUse = (Count > 0);
+			return true;
+		} catch (const Poco::Exception &E) {
+			Logger_.log(E);
+		}
+		return false;
+	}
+
 } // namespace OpenWifi
 
 template <>
