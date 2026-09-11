@@ -326,10 +326,12 @@ namespace OpenWifi {
 
 		// Validate system policy exists in DB
 		ProvObjects::ManagementPolicy TargetPolicy;
-		if (!NewObject.managementPolicy.empty()) {
-			if (!StorageService()->PolicyDB().GetRecord("id", NewObject.managementPolicy, TargetPolicy)) {
-				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
-			}
+		if (NewObject.managementPolicy.empty()) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+							  "Management policy is required and cannot be empty.");
+		}
+		if (!StorageService()->PolicyDB().GetRecord("id", NewObject.managementPolicy, TargetPolicy)) {
+			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
 		}
 
 		for (const auto &venueId : Scopes) {
@@ -338,8 +340,7 @@ namespace OpenWifi {
 			}
 		}
 
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT &&
-			!NewObject.managementPolicy.empty()) {
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 			for (const auto &venueId : Scopes) {
 				std::string PrivilegeError;
 				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, venueId, TargetPolicy, PrivilegeError)) {
@@ -470,19 +471,22 @@ namespace OpenWifi {
 			EffectivePolicyUUID = RawObject->get("managementPolicy").toString();
 		}
 
+		if (EffectivePolicyUUID.empty()) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+							  "Management policy is required and cannot be empty.");
+		}
+
 		std::string EffectiveEntity = Existing.entity;
 		std::string EffectiveVenue = Existing.venue;
 
 		ProvObjects::ManagementPolicy TargetPolicy;
-		if (!EffectivePolicyUUID.empty()) {
-			if (!StorageService()->PolicyDB().GetRecord("id", EffectivePolicyUUID, TargetPolicy)) {
-				return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
-			}
-			if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
-				std::string PrivilegeError;
-				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, EffectiveEntity, EffectiveVenue, TargetPolicy, PrivilegeError)) {
-					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
-				}
+		if (!StorageService()->PolicyDB().GetRecord("id", EffectivePolicyUUID, TargetPolicy)) {
+			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
+		}
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			std::string PrivilegeError;
+			if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, EffectiveEntity, EffectiveVenue, TargetPolicy, PrivilegeError)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
 			}
 		}
 

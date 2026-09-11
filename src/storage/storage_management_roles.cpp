@@ -35,12 +35,48 @@ namespace OpenWifi {
 									   Poco::Logger &L)
 		: DB(T, "roles", RolesDB_Fields, RolesDB_Indexes, P, L, "rol") {}
 
+	bool ManagementRoleDB::Create() {
+		try {
+			Poco::Data::Session Session = Pool_.get();
+			std::string Statement =
+				"CREATE TABLE IF NOT EXISTS " + TableName_ + " ("
+				"id VARCHAR(64) UNIQUE PRIMARY KEY, "
+				"name TEXT, "
+				"description TEXT, "
+				"notes TEXT, "
+				"created BIGINT, "
+				"modified BIGINT, "
+				"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
+				"users TEXT, "
+				"inUse TEXT, "
+				"tags TEXT, "
+				"entity TEXT, "
+				"venue TEXT"
+				");";
+			Session << Statement, Poco::Data::Keywords::now;
+
+			try {
+				std::string IndexStatement =
+					"CREATE INDEX roles_name_index ON " + TableName_ + " (name);";
+				Session << IndexStatement, Poco::Data::Keywords::now;
+			} catch (...) {
+			}
+		} catch (const Poco::Exception &E) {
+			Logger_.error("Failure to create ManagementRoleDB table resources.");
+			Logger_.log(E);
+		}
+		return DB::Upgrade();
+	}
+
 	bool ManagementRoleDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
 		std::vector<std::string> Statements{
 			"alter table " + TableName_ + " add column entity text;",
-			"alter table " + TableName_ + " add column venue text;"};
+			"alter table " + TableName_ + " add column venue text;",
+			"alter table " + TableName_ + " alter column managementPolicy set not null;",
+			"alter table " + TableName_ + " modify managementPolicy varchar(64) not null;",
+			"alter table " + TableName_ + " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;"};
 		RunScript(Statements);
-		to = 2;
+		to = 3;
 		return true;
 	}
 

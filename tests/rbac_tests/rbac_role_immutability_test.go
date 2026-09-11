@@ -30,18 +30,69 @@ import (
  *      Expected Status: 400 Bad Request.
  *   4. Negative: Request attempts to modify users list -> Rejected with error message.
  *      Expected Status: 400 Bad Request.
+ *   5. Negative: Request attempts to clear managementPolicy (empty string) -> Rejected.
+ *      Expected Status: 400 Bad Request.
+ *   6. Negative: Request attempts to set non-existent managementPolicy UUID -> Rejected.
+ *      Expected Status: 400 Bad Request.
  */
 func TestManagementRoleImmutability(t *testing.T) {
-	client := NewTestClient("https://openwifi.wlan.local:16005/api/v1")
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
 
-	roleID := "ed7ff809-20d3-48f4-8fe2-c882cd681657"
-	rootToken := "Bearer root-test-token"
+	roleID := getEnvOrDefault("ROLE_ID", "ed7ff809-20d3-48f4-8fe2-c882cd681657")
+	rootToken := getEnvOrDefault("TEST_TOKEN", getEnvOrDefault("TOKEN_ROOT", "Bearer root-test-token"))
 
-	validEntity := "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097"
-	newEntity := "8ab2b291-d04d-5c4c-b4bd-c4gcca1gb108"
+	validEntity := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+	newEntity := getEnvOrDefault("OPERATOR_B_ENTITY_UUID", "8ab2b291-d04d-5c4c-b4bd-c4gcca1gb108")
 
-	validUsers := []string{"e6885f03-63db-4e0d-aad4-2b8d1a79a887"}
+	validUsers := []string{getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")}
 	newUsers := []string{"different-user-uuid-999"}
+	validPolicyID := getEnvOrDefault("POLICY_STRONG_ID", "6f0e350a-8b7b-4ae1-bbd7-5f559792bc95")
+
+	// Resolve active role and valid policy from environment
+	var roleResp struct {
+		ID               string   `json:"id"`
+		Entity           string   `json:"entity"`
+		Venue            string   `json:"venue"`
+		Users            []string `json:"users"`
+		ManagementPolicy string   `json:"managementPolicy"`
+	}
+	if statusCheck, bodyRole, errCheck := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", roleID), rootToken, nil); errCheck == nil && statusCheck == http.StatusOK {
+		if err := json.Unmarshal(bodyRole, &roleResp); err == nil {
+			validEntity = roleResp.Entity
+			validUsers = roleResp.Users
+			if roleResp.ManagementPolicy != "" {
+				validPolicyID = roleResp.ManagementPolicy
+			}
+		}
+	} else if statusRoles, bodyRoles, errRoles := client.DoRequest("GET", "/managementRole", rootToken, nil); errRoles == nil && statusRoles == http.StatusOK {
+		var rolesResp struct {
+			Roles []struct {
+				ID               string   `json:"id"`
+				Entity           string   `json:"entity"`
+				Venue            string   `json:"venue"`
+				Users            []string `json:"users"`
+				ManagementPolicy string   `json:"managementPolicy"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(bodyRoles, &rolesResp); err == nil && len(rolesResp.Roles) > 0 {
+			roleID = rolesResp.Roles[0].ID
+			validEntity = rolesResp.Roles[0].Entity
+			validUsers = rolesResp.Roles[0].Users
+		}
+	}
+
+	// Ensure validPolicyID is an existing policy in PolicyDB
+	if statusPolicies, bodyPolicies, errPolicies := client.DoRequest("GET", "/managementPolicy", rootToken, nil); errPolicies == nil && statusPolicies == http.StatusOK {
+		var polResp struct {
+			Policies []struct {
+				ID string `json:"id"`
+			} `json:"managementPolicies"`
+		}
+		if err := json.Unmarshal(bodyPolicies, &polResp); err == nil && len(polResp.Policies) > 0 {
+			validPolicyID = polResp.Policies[0].ID
+		}
+	}
+	t.Logf("Setup resolved: roleID=%s, validEntity=%s, validPolicyID=%s", roleID, validEntity, validPolicyID)
 
 	t.Run("Positive: Updating only Policy ID allowed", func(t *testing.T) {
 		payload := map[string]interface{}{
@@ -49,15 +100,15 @@ func TestManagementRoleImmutability(t *testing.T) {
 			"entity":           validEntity,
 			"venue":            "",
 			"users":            validUsers,
-			"managementPolicy": "6f0e350a-8b7b-4ae1-bbd7-5f559792bc95",
+			"managementPolicy": validPolicyID,
 		}
 
-		status, _, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, payload)
+		status, body, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, payload)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
 		if status != http.StatusOK {
-			t.Errorf("Expected 200 OK for policy ID update, got %d", status)
+			t.Errorf("Expected 200 OK for policy ID update, got %d. Body: %s", status, string(body))
 		}
 	})
 
@@ -114,6 +165,42 @@ func TestManagementRoleImmutability(t *testing.T) {
 			t.Errorf("Expected 400 Bad Request for immutable users modification, got %d. Body: %s", status, string(body))
 		}
 	})
+
+	t.Run("Negative: Updating managementPolicy to empty string returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"id":               roleID,
+			"entity":           validEntity,
+			"venue":            "",
+			"users":            validUsers,
+			"managementPolicy": "", // Empty!
+		}
+
+		status, body, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for empty managementPolicy, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Updating managementPolicy to non-existent UUID returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"id":               roleID,
+			"entity":           validEntity,
+			"venue":            "",
+			"users":            validUsers,
+			"managementPolicy": "00000000-0000-0000-0000-000000000000", // Non-existent!
+		}
+
+		status, body, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for non-existent managementPolicy, got %d. Body: %s", status, string(body))
+		}
+	})
 }
 
 // ----------------------------------------------------------------------------
@@ -161,6 +248,13 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			t.Fatalf("Setup failed: expected 200/201 on policy creation, got %d. Body: %s", status, string(body))
 		}
 
+		var createdPolicy struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(body, &createdPolicy); err == nil && createdPolicy.ID != "" {
+			tempPolicyID = createdPolicy.ID
+		}
+
 		// 2. Delete the unreferenced policy -> must succeed with 200 OK
 		status, body, err = client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, nil)
 		if err != nil {
@@ -172,6 +266,51 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 	})
 
 	t.Run("Negative: Deleting in-use policy returns 400 Bad Request", func(t *testing.T) {
+		// Discover active role and policy from environment
+		var roleResp struct {
+			ID               string   `json:"id"`
+			Entity           string   `json:"entity"`
+			Venue            string   `json:"venue"`
+			Users            []string `json:"users"`
+			ManagementPolicy string   `json:"managementPolicy"`
+		}
+		if statusCheck, bodyRole, errCheck := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", roleID), rootToken, nil); errCheck == nil && statusCheck == http.StatusOK {
+			if err := json.Unmarshal(bodyRole, &roleResp); err == nil {
+				validEntity = roleResp.Entity
+				validUsers = roleResp.Users
+				if roleResp.ManagementPolicy != "" {
+					assignedPolicyID = roleResp.ManagementPolicy
+				}
+			}
+		} else if statusRoles, bodyRoles, errRoles := client.DoRequest("GET", "/managementRole", rootToken, nil); errRoles == nil && statusRoles == http.StatusOK {
+			var rolesResp struct {
+				Roles []struct {
+					ID               string   `json:"id"`
+					Entity           string   `json:"entity"`
+					Venue            string   `json:"venue"`
+					Users            []string `json:"users"`
+					ManagementPolicy string   `json:"managementPolicy"`
+				} `json:"roles"`
+			}
+			if err := json.Unmarshal(bodyRoles, &rolesResp); err == nil && len(rolesResp.Roles) > 0 {
+				roleID = rolesResp.Roles[0].ID
+				validEntity = rolesResp.Roles[0].Entity
+				validUsers = rolesResp.Roles[0].Users
+			}
+		}
+
+		// Ensure assignedPolicyID is an existing policy in PolicyDB
+		if statusPolicies, bodyPolicies, errPolicies := client.DoRequest("GET", "/managementPolicy", rootToken, nil); errPolicies == nil && statusPolicies == http.StatusOK {
+			var polResp struct {
+				Policies []struct {
+					ID string `json:"id"`
+				} `json:"managementPolicies"`
+			}
+			if err := json.Unmarshal(bodyPolicies, &polResp); err == nil && len(polResp.Policies) > 0 {
+				assignedPolicyID = polResp.Policies[0].ID
+			}
+		}
+
 		// 1. Ensure the active role is explicitly linked to assignedPolicyID
 		rolePayload := map[string]interface{}{
 			"id":               roleID,

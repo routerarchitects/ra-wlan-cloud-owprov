@@ -78,7 +78,25 @@ TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Ven
 TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Users
 ```
 
-#### **1.5 Unreferenced Policy Deletion Allowed (Positive)**
+#### **1.5 Empty Policy Assignment Blocked (Negative)**
+- **Test Function**: `TestManagementRoleImmutability` (Sub-test: `Negative: Updating managementPolicy to empty string returns 400 Bad Request`)
+- **Description**: Verifies that attempting to clear the `managementPolicy` field (empty string) on an existing role is rejected.
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/empty
+```
+
+#### **1.6 Non-Existent Policy Assignment Blocked (Negative)**
+- **Test Function**: `TestManagementRoleImmutability` (Sub-test: `Negative: Updating managementPolicy to non-existent UUID returns 400 Bad Request`)
+- **Description**: Verifies that attempting to assign a non-existent `managementPolicy` UUID is rejected by backend referential integrity checks.
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/non-existent
+```
+
+#### **1.7 Unreferenced Policy Deletion Allowed (Positive)**
 - **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Positive: Deleting unreferenced policy succeeds`)
 - **Description**: Verifies that creating and deleting an unreferenced policy (not assigned to any role) succeeds.
 - **Expected Output**: **`200 OK`**
@@ -87,7 +105,7 @@ TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Use
 TOKEN_ROOT="Bearer <token>" go test -v . -run TestManagementPolicyDeletionProtection/Positive
 ```
 
-#### **1.6 In-Use Policy Deletion Blocked (Negative)**
+#### **1.8 In-Use Policy Deletion Blocked (Negative)**
 - **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Negative: Deleting in-use policy returns 400 Bad Request`)
 - **Description**: Verifies that attempting to delete a policy assigned to an active Management Role is rejected.
 - **Expected Output**: **`400 Bad Request`** (*"Management policy is currently assigned to one or more management roles."*)
