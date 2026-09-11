@@ -151,16 +151,16 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			"entries":     []map[string]interface{}{},
 		}
 
-		status, _, err := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, policyPayload)
+		status, body, err := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, policyPayload)
 		if err != nil {
 			t.Fatalf("Failed to create temporary policy: %v", err)
 		}
 		if status != http.StatusOK && status != http.StatusCreated {
-			t.Logf("Notice: Policy creation returned %d, proceeding with delete test", status)
+			t.Fatalf("Setup failed: expected 200/201 on policy creation, got %d. Body: %s", status, string(body))
 		}
 
 		// 2. Delete the unreferenced policy -> must succeed with 200 OK
-		status, body, err := client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, nil)
+		status, body, err = client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", tempPolicyID), rootToken, nil)
 		if err != nil {
 			t.Fatalf("DELETE request failed: %v", err)
 		}
@@ -178,16 +178,16 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			"users":            validUsers,
 			"managementPolicy": assignedPolicyID,
 		}
-		status, _, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+		status, body, err := client.DoRequest("PUT", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
 		if err != nil {
 			t.Fatalf("Failed to link policy to role: %v", err)
 		}
 		if status != http.StatusOK {
-			t.Logf("Notice: Role update returned %d, proceeding with in-use delete check", status)
+			t.Fatalf("Setup failed: expected 200 OK linking policy to role, got %d. Body: %s", status, string(body))
 		}
 
 		// 2. Attempt to delete the policy currently in use -> must be rejected with 400 Bad Request
-		status, body, err := client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, nil)
+		status, body, err = client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, nil)
 		if err != nil {
 			t.Fatalf("DELETE request failed: %v", err)
 		}
