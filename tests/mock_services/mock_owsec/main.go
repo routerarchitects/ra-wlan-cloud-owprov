@@ -37,13 +37,13 @@ type UserRight struct {
 }
 
 type UserInfo struct {
-	ID            string      `json:"id"`
-	Email         string      `json:"email"`
-	UserRole      string      `json:"userRole"`
-	Name          string      `json:"name,omitempty"`
-	UserRights    []UserRight `json:"userRights,omitempty"`
-	OperatorID    string      `json:"operatorId,omitempty"`
-	Registration  string      `json:"registrationId,omitempty"`
+	ID           string      `json:"id"`
+	Email        string      `json:"email"`
+	UserRole     string      `json:"userRole"`
+	Name         string      `json:"name,omitempty"`
+	UserRights   []UserRight `json:"userRights,omitempty"`
+	OperatorID   string      `json:"operatorId,omitempty"`
+	Registration string      `json:"registrationId,omitempty"`
 }
 
 type TokenInfo struct {
@@ -63,14 +63,14 @@ type UserInfoAndPolicy struct {
 }
 
 type UserRecord struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	Username    string    `json:"username"`
-	Password    string    `json:"password"`
-	UserRole    string    `json:"userRole"`
-	Name        string    `json:"name"`
-	OperatorID  string    `json:"operatorId,omitempty"`
-	UserRights  []UserRight `json:"userRights,omitempty"`
+	ID         string      `json:"id"`
+	Email      string      `json:"email"`
+	Username   string      `json:"username"`
+	Password   string      `json:"password"`
+	UserRole   string      `json:"userRole"`
+	Name       string      `json:"name"`
+	OperatorID string      `json:"operatorId,omitempty"`
+	UserRights []UserRight `json:"userRights,omitempty"`
 }
 
 type SubUserRecord struct {
@@ -84,12 +84,12 @@ type SubUserRecord struct {
 // ─── In-Memory Store ──────────────────────────────────────────────────────────
 
 type MockStore struct {
-	mu          sync.Mutex
-	users       map[string]*UserRecord    // key: id or email
-	subUsers    map[string]*SubUserRecord // key: id
-	tokens      map[string]*UserInfoAndPolicy // key: token string
-	rootEmail   string
-	rootPass    string
+	mu        sync.Mutex
+	users     map[string]*UserRecord        // key: id or email
+	subUsers  map[string]*SubUserRecord     // key: id
+	tokens    map[string]*UserInfoAndPolicy // key: token string
+	rootEmail string
+	rootPass  string
 }
 
 func newUUID() string {

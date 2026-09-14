@@ -54,7 +54,10 @@ namespace OpenWifi {
 		}
 		ContactDB_->Create();
 		InventoryDB_->Create();
-		RolesDB_->Create();
+		if (!RolesDB_->Create()) {
+			poco_critical(Logger(), "RolesDB initialization or migration reported failure. Halting daemon startup.");
+			return -1;
+		}
 		ConfigurationDB_->Create();
 		TagsDictionaryDB_->Create();
 		TagsObjectDB_->Create();
