@@ -100,7 +100,15 @@ func TestManagementRoleImmutability(t *testing.T) {
 			"description": "Test policy for immutability tests",
 			"entries":     []map[string]interface{}{},
 		}
-		client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", validPolicyID), rootToken, polPayload)
+		statusCreatePol, bodyCreatePol, _ := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", validPolicyID), rootToken, polPayload)
+		if statusCreatePol == http.StatusOK || statusCreatePol == http.StatusCreated {
+			var createdPol struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(bodyCreatePol, &createdPol); err == nil && createdPol.ID != "" {
+				validPolicyID = createdPol.ID
+			}
+		}
 	}
 
 	// Ensure validEntity is an existing entity in EntityDB
@@ -127,7 +135,15 @@ func TestManagementRoleImmutability(t *testing.T) {
 			"users":            validUsers,
 			"managementPolicy": validPolicyID,
 		}
-		client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+		statusCreateRole, bodyCreateRole, _ := client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+		if statusCreateRole == http.StatusOK || statusCreateRole == http.StatusCreated {
+			var createdRole struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(bodyCreateRole, &createdRole); err == nil && createdRole.ID != "" {
+				roleID = createdRole.ID
+			}
+		}
 	}
 
 	t.Logf("Setup resolved: roleID=%s, validEntity=%s, validVenue=%s, validPolicyID=%s", roleID, validEntity, validVenue, validPolicyID)
@@ -434,7 +450,15 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			"description": "Test policy for deletion protection tests",
 			"entries":     []map[string]interface{}{},
 		}
-		client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, polPayload)
+		statusCreatePol, bodyCreatePol, _ := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, polPayload)
+		if statusCreatePol == http.StatusOK || statusCreatePol == http.StatusCreated {
+			var createdPol struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(bodyCreatePol, &createdPol); err == nil && createdPol.ID != "" {
+				assignedPolicyID = createdPol.ID
+			}
+		}
 	}
 
 	// Ensure validEntity is an existing entity in EntityDB
@@ -461,7 +485,15 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			"users":            validUsers,
 			"managementPolicy": assignedPolicyID,
 		}
-		client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+		statusCreateRole, bodyCreateRole, _ := client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+		if statusCreateRole == http.StatusOK || statusCreateRole == http.StatusCreated {
+			var createdRole struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(bodyCreateRole, &createdRole); err == nil && createdRole.ID != "" {
+				roleID = createdRole.ID
+			}
+		}
 	}
 
 	t.Run("Positive: Deleting unreferenced policy succeeds", func(t *testing.T) {
@@ -686,6 +718,12 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 			client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", multiPolicyID), rootToken, nil)
 			t.Skipf("Skipping multi-role test due to secondary user validation requirement in environment: %v", err)
 			return
+		}
+		var createdRoleB struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(body, &createdRoleB); err == nil && createdRoleB.ID != "" {
+			roleB_ID = createdRoleB.ID
 		}
 
 		// 4. Verify policy cannot be deleted while both roles exist
