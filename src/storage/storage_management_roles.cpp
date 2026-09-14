@@ -55,13 +55,9 @@ namespace OpenWifi {
 				");";
 			Session << Statement, Poco::Data::Keywords::now;
 
-			try {
-				std::string IndexStatement =
-					"CREATE INDEX IF NOT EXISTS roles_name_index ON " + TableName_ + " (name);";
-				Session << IndexStatement, Poco::Data::Keywords::now;
-			} catch (const Poco::Exception &E) {
-				Logger_.log(E);
-			}
+			std::string IndexStatement =
+				"CREATE INDEX IF NOT EXISTS roles_name_index ON " + TableName_ + " (name);";
+			Session << IndexStatement, Poco::Data::Keywords::now;
 		} catch (const Poco::Exception &E) {
 			Logger_.error("Failure to create ManagementRoleDB table resources.");
 			Logger_.log(E);
