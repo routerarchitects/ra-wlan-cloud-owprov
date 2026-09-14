@@ -93,6 +93,43 @@ func TestManagementRoleImmutability(t *testing.T) {
 			validPolicyID = polResp.Policies[0].ID
 		}
 	}
+	if statusPol, _, errPol := client.DoRequest("GET", fmt.Sprintf("/managementPolicy/%s", validPolicyID), rootToken, nil); errPol != nil || statusPol != http.StatusOK {
+		polPayload := map[string]interface{}{
+			"id":          validPolicyID,
+			"name":        "test-immutability-policy",
+			"description": "Test policy for immutability tests",
+			"entries":     []map[string]interface{}{},
+		}
+		client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", validPolicyID), rootToken, polPayload)
+	}
+
+	// Ensure validEntity is an existing entity in EntityDB
+	if statusEnt, _, errEnt := client.DoRequest("GET", fmt.Sprintf("/entity/%s", validEntity), rootToken, nil); errEnt != nil || statusEnt != http.StatusOK {
+		var entResp struct {
+			Entities []struct {
+				ID string `json:"id"`
+			} `json:"entities"`
+		}
+		if statusEntList, bodyEntList, errEntList := client.DoRequest("GET", "/entity", rootToken, nil); errEntList == nil && statusEntList == http.StatusOK {
+			if err := json.Unmarshal(bodyEntList, &entResp); err == nil && len(entResp.Entities) > 0 {
+				validEntity = entResp.Entities[0].ID
+			}
+		}
+	}
+
+	// Ensure roleID exists in ManagementRoleDB
+	if statusRole, _, errRole := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", roleID), rootToken, nil); errRole != nil || statusRole != http.StatusOK {
+		rolePayload := map[string]interface{}{
+			"id":               roleID,
+			"name":             "test-immutability-role",
+			"entity":           validEntity,
+			"venue":            validVenue,
+			"users":            validUsers,
+			"managementPolicy": validPolicyID,
+		}
+		client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
+	}
+
 	t.Logf("Setup resolved: roleID=%s, validEntity=%s, validVenue=%s, validPolicyID=%s", roleID, validEntity, validVenue, validPolicyID)
 
 	t.Run("Positive: Updating only Policy ID allowed", func(t *testing.T) {
@@ -231,6 +268,20 @@ func TestManagementRoleCreationPolicyValidation(t *testing.T) {
 	rootToken := getEnvOrDefault("TOKEN_ROOT", "Bearer root-test-token")
 	validEntity := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
 	validUsers := []string{getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")}
+
+	// Ensure validEntity is an existing entity in EntityDB
+	if statusEnt, _, errEnt := client.DoRequest("GET", fmt.Sprintf("/entity/%s", validEntity), rootToken, nil); errEnt != nil || statusEnt != http.StatusOK {
+		var entResp struct {
+			Entities []struct {
+				ID string `json:"id"`
+			} `json:"entities"`
+		}
+		if statusEntList, bodyEntList, errEntList := client.DoRequest("GET", "/entity", rootToken, nil); errEntList == nil && statusEntList == http.StatusOK {
+			if err := json.Unmarshal(bodyEntList, &entResp); err == nil && len(entResp.Entities) > 0 {
+				validEntity = entResp.Entities[0].ID
+			}
+		}
+	}
 
 	t.Run("Negative: Creating role with empty managementPolicy returns 400 Bad Request", func(t *testing.T) {
 		newRoleID := "ffffffff-1111-2222-3333-000000000001"
@@ -375,6 +426,42 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 		if err := json.Unmarshal(bodyPolicies, &polResp); err == nil && len(polResp.Policies) > 0 {
 			assignedPolicyID = polResp.Policies[0].ID
 		}
+	}
+	if statusPol, _, errPol := client.DoRequest("GET", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, nil); errPol != nil || statusPol != http.StatusOK {
+		polPayload := map[string]interface{}{
+			"id":          assignedPolicyID,
+			"name":        "test-deletion-protection-policy",
+			"description": "Test policy for deletion protection tests",
+			"entries":     []map[string]interface{}{},
+		}
+		client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", assignedPolicyID), rootToken, polPayload)
+	}
+
+	// Ensure validEntity is an existing entity in EntityDB
+	if statusEnt, _, errEnt := client.DoRequest("GET", fmt.Sprintf("/entity/%s", validEntity), rootToken, nil); errEnt != nil || statusEnt != http.StatusOK {
+		var entResp struct {
+			Entities []struct {
+				ID string `json:"id"`
+			} `json:"entities"`
+		}
+		if statusEntList, bodyEntList, errEntList := client.DoRequest("GET", "/entity", rootToken, nil); errEntList == nil && statusEntList == http.StatusOK {
+			if err := json.Unmarshal(bodyEntList, &entResp); err == nil && len(entResp.Entities) > 0 {
+				validEntity = entResp.Entities[0].ID
+			}
+		}
+	}
+
+	// Ensure roleID exists in ManagementRoleDB
+	if statusRole, _, errRole := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", roleID), rootToken, nil); errRole != nil || statusRole != http.StatusOK {
+		rolePayload := map[string]interface{}{
+			"id":               roleID,
+			"name":             "test-deletion-protection-role",
+			"entity":           validEntity,
+			"venue":            validVenue,
+			"users":            validUsers,
+			"managementPolicy": assignedPolicyID,
+		}
+		client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleID), rootToken, rolePayload)
 	}
 
 	t.Run("Positive: Deleting unreferenced policy succeeds", func(t *testing.T) {

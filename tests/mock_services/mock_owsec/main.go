@@ -121,14 +121,30 @@ func newMockStore() *MockStore {
 	s.users[rootID] = rootUser
 	s.users[s.rootEmail] = rootUser
 
+	// Pre-seed TARGET_USER_A used in RBAC integration tests
+	targetUserAID := "e6885f03-63db-4e0d-aad4-2b8d1a79a887"
+	targetUserA := &UserRecord{
+		ID:         targetUserAID,
+		Email:      "target-user-a@openwifi.local",
+		Username:   "target-user-a@openwifi.local",
+		Password:   "openwifi",
+		UserRole:   "subscriber",
+		Name:       "Target User A",
+		UserRights: []UserRight{{Role: "subscriber"}},
+	}
+	s.users[targetUserAID] = targetUserA
+	s.users[targetUserA.Email] = targetUserA
+
 	// Pre-seed root token
 	rootToken := "root-test-token"
 	s.tokens[rootToken] = &UserInfoAndPolicy{
 		TokenInfo: TokenInfo{
-			Token:    rootToken,
-			UserRole: "root",
-			Created:  time.Now().Unix(),
-			Expires:  time.Now().Add(24 * time.Hour).Unix(),
+			Token:       rootToken,
+			AccessToken: rootToken,
+			UserRole:    "root",
+			Created:     time.Now().Unix(),
+			Expires:     time.Now().Add(24 * time.Hour).Unix(),
+			ExpiresIn:   86400,
 		},
 		UserInfo: UserInfo{
 			ID:         rootID,
@@ -142,8 +158,108 @@ func newMockStore() *MockStore {
 			TokenType:   "Bearer",
 			Created:     time.Now().Unix(),
 			Expires:     time.Now().Add(24 * time.Hour).Unix(),
+			ExpiresIn:   86400,
 			ID:          rootID,
 		},
+		ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
+	}
+
+	// Pre-seed read-only / non-root test tokens
+	readOnlyTokens := []string{
+		"user-read-only-token",
+		"user-read-only-operator-token",
+		"user-read-only-subscriber-token",
+		"user-with-venue-role-only-token",
+		"user-venue-shadowed-token",
+	}
+	readOnlyID := "00000000-0000-0000-0000-000000000002"
+	readOnlyUser := &UserRecord{
+		ID:         readOnlyID,
+		Email:      "readonly@openwifi.local",
+		Username:   "readonly@openwifi.local",
+		Password:   "openwifi",
+		UserRole:   "subscriber",
+		Name:       "Read Only User",
+		UserRights: []UserRight{{Role: "subscriber"}},
+	}
+	s.users[readOnlyID] = readOnlyUser
+	s.users[readOnlyUser.Email] = readOnlyUser
+
+	for _, tok := range readOnlyTokens {
+		s.tokens[tok] = &UserInfoAndPolicy{
+			TokenInfo: TokenInfo{
+				Token:       tok,
+				AccessToken: tok,
+				UserRole:    "subscriber",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+			},
+			UserInfo: UserInfo{
+				ID:         readOnlyID,
+				Email:      readOnlyUser.Email,
+				UserRole:   "subscriber",
+				Name:       readOnlyUser.Name,
+				UserRights: []UserRight{{Role: "subscriber"}},
+			},
+			WebToken: WebToken{
+				AccessToken: tok,
+				TokenType:   "Bearer",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+				ID:          readOnlyID,
+			},
+			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
+		}
+	}
+
+	// Pre-seed admin test tokens
+	adminTokens := []string{
+		"user-admin-operator-a-token",
+		"user-admin-operator-b-token",
+		"b6ba0d38b3a438af80a65be2dab666ad95791091d5cfb72264f2a6d1d38e82cb",
+	}
+	adminID := "00000000-0000-0000-0000-000000000003"
+	adminUser := &UserRecord{
+		ID:         adminID,
+		Email:      "admin@openwifi.local",
+		Username:   "admin@openwifi.local",
+		Password:   "openwifi",
+		UserRole:   "admin",
+		Name:       "Admin User",
+		UserRights: []UserRight{{Role: "admin"}},
+	}
+	s.users[adminID] = adminUser
+	s.users[adminUser.Email] = adminUser
+
+	for _, tok := range adminTokens {
+		s.tokens[tok] = &UserInfoAndPolicy{
+			TokenInfo: TokenInfo{
+				Token:       tok,
+				AccessToken: tok,
+				UserRole:    "admin",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+			},
+			UserInfo: UserInfo{
+				ID:         adminID,
+				Email:      adminUser.Email,
+				UserRole:   "admin",
+				Name:       adminUser.Name,
+				UserRights: []UserRight{{Role: "admin"}},
+			},
+			WebToken: WebToken{
+				AccessToken: tok,
+				TokenType:   "Bearer",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+				ID:          adminID,
+			},
+			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
+		}
 	}
 
 	return s
@@ -263,10 +379,12 @@ func (s *MockStore) handleValidateToken(w http.ResponseWriter, r *http.Request) 
 	// If token not in map, generate dynamic valid response for testing
 	info, exists := s.tokens[token]
 	if !exists {
-		// Fallback for root / test tokens
+		// Fallback for test tokens
 		role := "root"
 		if strings.Contains(token, "admin") {
 			role = "admin"
+		} else if strings.Contains(token, "read-only") || strings.Contains(token, "readonly") || strings.Contains(token, "no-access") || strings.Contains(token, "subscriber") || strings.Contains(token, "venue") || strings.Contains(token, "user") {
+			role = "subscriber"
 		}
 		info = &UserInfoAndPolicy{
 			TokenInfo: TokenInfo{
@@ -278,8 +396,8 @@ func (s *MockStore) handleValidateToken(w http.ResponseWriter, r *http.Request) 
 				ExpiresIn:   86400,
 			},
 			UserInfo: UserInfo{
-				ID:         "mock-user-id",
-				Email:      "mock@openwifi.local",
+				ID:         "mock-" + role + "-id",
+				Email:      role + "@openwifi.local",
 				UserRole:   role,
 				UserRights: []UserRight{{Role: role}},
 			},
@@ -289,6 +407,7 @@ func (s *MockStore) handleValidateToken(w http.ResponseWriter, r *http.Request) 
 				Created:     time.Now().Unix(),
 				Expires:     time.Now().Add(24 * time.Hour).Unix(),
 				ExpiresIn:   86400,
+				ID:          "mock-" + role + "-id",
 			},
 			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
 		}
@@ -339,7 +458,32 @@ func (s *MockStore) handleUser(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		http.Error(w, `{"error":"User not found"}`, http.StatusNotFound)
+
+		// Fallback: dynamically create mock user record for test UUIDs
+		role := "subscriber"
+		if strings.Contains(path, "admin") {
+			role = "admin"
+		} else if strings.Contains(path, "root") {
+			role = "root"
+		}
+		mockUser := &UserRecord{
+			ID:         path,
+			Email:      path + "@openwifi.local",
+			Username:   path + "@openwifi.local",
+			UserRole:   role,
+			Name:       "Mock User " + path,
+			UserRights: []UserRight{{Role: role}},
+		}
+		s.users[path] = mockUser
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(UserInfo{
+			ID:         mockUser.ID,
+			Email:      mockUser.Email,
+			UserRole:   mockUser.UserRole,
+			Name:       mockUser.Name,
+			UserRights: mockUser.UserRights,
+		})
+		return
 
 	case http.MethodPost:
 		auth := r.Header.Get("Authorization")

@@ -337,6 +337,7 @@ jobs:
         env:
           OWPROV_URL: "https://localhost:16005/api/v1"
           TOKEN_ROOT: "Bearer root-test-token"
+          TOKEN_NO_ACCESS: "Bearer user-read-only-token"
 
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts

@@ -69,7 +69,7 @@ namespace OpenWifi {
 	}
 
 	bool ManagementRoleDB::Upgrade(uint32_t from, uint32_t &to) {
-		to = 3;
+		to = from;
 
 		// Step 1: Version 1 -> 2 (Add entity & venue columns)
 		if (from < 2) {
@@ -108,9 +108,11 @@ namespace OpenWifi {
 				try {
 					auto Session = Pool_.get();
 					Session << st, Poco::Data::Keywords::now;
-				} catch (...) {
+				} catch (const Poco::Exception &E) {
+					Logger_.log(E);
 				}
 			}
+			to = 2;
 		}
 
 		// Step 2: Version 2 -> 3 (Auto-purge corrupt roles & add FK constraint)
@@ -124,47 +126,64 @@ namespace OpenWifi {
 				auto Session = Pool_.get();
 				Session << PurgeCorruptRoles, Poco::Data::Keywords::now;
 			} catch (const Poco::Exception &E) {
-				Logger_.log(E);
+				Logger_.error(Poco::format("ManagementRoleDB::Upgrade: Auto-purge failed on table %s: %s",
+										   TableName_, E.displayText()));
+				return false;
 			}
 
 			if (Type_ == OpenWifi::DBType::pgsql || Type_ == OpenWifi::DBType::mysql) {
-				bool ConstraintExists = false;
+				// 1. Set NOT NULL on managementPolicy
 				try {
-					std::size_t count = 0;
-					Poco::Data::Session Session = Pool_.get();
-					std::string CheckQ =
-						"SELECT COUNT(*) FROM information_schema.table_constraints "
-						"WHERE lower(table_name) = '" + Poco::toLower(TableName_) +
-						"' AND lower(constraint_name) = 'fk_roles_management_policy';";
-					Session << CheckQ, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
-					ConstraintExists = (count > 0);
-				} catch (...) {
+					auto Session = Pool_.get();
+					std::string NotNullQuery = (Type_ == OpenWifi::DBType::pgsql)
+						? "alter table " + TableName_ + " alter column managementPolicy set not null;"
+						: "alter table " + TableName_ + " modify managementPolicy varchar(64) not null;";
+					Session << NotNullQuery, Poco::Data::Keywords::now;
+				} catch (const Poco::Exception &E) {
+					Logger_.error(Poco::format("ManagementRoleDB::Upgrade: Failed to set NOT NULL on %s.managementPolicy: %s",
+											   TableName_, E.displayText()));
+					return false;
 				}
 
-				std::vector<std::string> v3Statements;
-				if (Type_ == OpenWifi::DBType::pgsql) {
-					v3Statements.push_back("alter table " + TableName_ + " alter column managementPolicy set not null;");
-					if (!ConstraintExists) {
-						v3Statements.push_back("alter table " + TableName_ +
-											   " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;");
+				// 2. Check if constraint already exists in catalog
+				auto HasConstraint = [this](const std::string &ConstraintName) -> bool {
+					try {
+						std::size_t count = 0;
+						Poco::Data::Session Session = Pool_.get();
+						std::string CheckQ =
+							"SELECT COUNT(*) FROM information_schema.table_constraints "
+							"WHERE lower(table_name) = '" + Poco::toLower(TableName_) +
+							"' AND lower(constraint_name) = '" + Poco::toLower(ConstraintName) + "';";
+						Session << CheckQ, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
+						return count > 0;
+					} catch (...) {
+						return false;
 					}
-				} else if (Type_ == OpenWifi::DBType::mysql) {
-					v3Statements.push_back("alter table " + TableName_ + " modify managementPolicy varchar(64) not null;");
-					if (!ConstraintExists) {
-						v3Statements.push_back("alter table " + TableName_ +
-											   " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;");
-					}
-				}
+				};
 
-				for (const auto &st : v3Statements) {
+				// 3. Add constraint if not already present
+				if (!HasConstraint("fk_roles_management_policy")) {
 					try {
 						auto Session = Pool_.get();
-						Session << st, Poco::Data::Keywords::now;
+						std::string AddFkQuery =
+							"alter table " + TableName_ +
+							" add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;";
+						Session << AddFkQuery, Poco::Data::Keywords::now;
 					} catch (const Poco::Exception &E) {
-						Logger_.log(E);
+						Logger_.error(Poco::format("ManagementRoleDB::Upgrade: Failed to add foreign key constraint on table %s: %s",
+												   TableName_, E.displayText()));
+						return false;
 					}
 				}
+
+				// 4. Post-Verification: Confirm constraint is registered in DB catalog
+				if (!HasConstraint("fk_roles_management_policy")) {
+					Logger_.error(Poco::format("ManagementRoleDB::Upgrade: Constraint fk_roles_management_policy is missing after migration on table %s",
+											   TableName_));
+					return false;
+				}
 			}
+			to = 3;
 		}
 
 		return true;
