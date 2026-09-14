@@ -6,7 +6,7 @@ This document defines the requirements OWPROV must satisfy before it can be safe
 
 The purpose of this document is to agree on **what must be true** for OWPROV horizontal scaling before implementation starts.
 
-Exact implementation details, class changes, Kafka registration APIs, database locking strategy, schema updates, and test implementation details will be defined later in `specification.md` and `testcases.md`.
+Exact implementation details, class changes, Kafka registration APIs, database locking strategy and schema updates details will be defined later in `spec.md`.
 
 ---
 
@@ -568,7 +568,7 @@ OWPROV horizontal scaling is acceptable when:
 
 ## 16. Review Checklist
 
-Before `specification.md` or implementation begins, reviewers should confirm:
+Before `spec.md` or implementation begins, reviewers should confirm:
 
 ```text
 1. The requirements correctly describe Docker Compose multi-instance OWPROV.
@@ -593,7 +593,6 @@ This document does not define:
 4. Exact background job table schema, worker implementation, or retry algorithm.
 5. Exact WebSocket fanout mechanism or notification transport.
 6. Exact Docker Compose YAML, reverse proxy configuration, or port mappings.
-7. Detailed test steps or test automation code; those belong in `testcases.md`.
 8. Kubernetes, Helm, or Kubernetes-specific deployment behavior.
 9. Request stickiness between the load balancer and OWPROV instances.
 10. Replacing PostgreSQL as the source of truth for OWPROV API reads and writes.
@@ -601,7 +600,7 @@ This document does not define:
 12. A shared data directory for runtime-downloaded files, as long as each instance independently downloads and validates equivalent files.
 13. Enabling rate limiting for every OWPROV API.
 14. Performance tuning, benchmarking targets, or capacity planning.
-15. Public API behavior changes unless later required by `specification.md`.
+15. Public API behavior changes unless later required by `spec.md`.
 
 
 
