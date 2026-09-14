@@ -5,7 +5,8 @@ ARG VALIJASON_VERSION=tip-v1
 
 FROM debian:$DEBIAN_VERSION AS build-base
 
-RUN apt-get update && apt-get install --no-install-recommends -y \
+RUN sed -i '/bullseye-security/d' /etc/apt/sources.list && \
+    apt-get update && apt-get install --no-install-recommends -y \
     make cmake g++ git \
     libpq-dev libmariadb-dev libmariadbclient-dev-compat \
     librdkafka-dev libboost-all-dev libssl-dev \
@@ -85,7 +86,8 @@ RUN mkdir /openwifi
 RUN mkdir -p "$OWPROV_ROOT" "$OWPROV_CONFIG" && \
     chown "$OWPROV_USER": "$OWPROV_ROOT" "$OWPROV_CONFIG"
 
-RUN apt-get update && apt-get install --no-install-recommends -y \
+RUN sed -i '/bullseye-security/d' /etc/apt/sources.list && \
+    apt-get update && apt-get install --no-install-recommends -y \
     librdkafka++1 gosu gettext ca-certificates bash jq curl wget \
     libmariadb-dev-compat libpq5 postgresql-client libfmt7 tzdata
 
