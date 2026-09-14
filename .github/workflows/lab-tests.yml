@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-      - anil-feature
-      - inUse-policy-deletion-prevention
   pull_request:
     branches:
       - main
