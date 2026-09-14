@@ -35,13 +35,89 @@ namespace OpenWifi {
 									   Poco::Logger &L)
 		: DB(T, "roles", RolesDB_Fields, RolesDB_Indexes, P, L, "rol") {}
 
+	bool ManagementRoleDB::Create() {
+		try {
+			Poco::Data::Session Session = Pool_.get();
+			std::string Statement =
+				"CREATE TABLE IF NOT EXISTS " + TableName_ + " ("
+				"id VARCHAR(64) UNIQUE PRIMARY KEY, "
+				"name TEXT, "
+				"description TEXT, "
+				"notes TEXT, "
+				"created BIGINT, "
+				"modified BIGINT, "
+				"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
+				"users TEXT, "
+				"inUse TEXT, "
+				"tags TEXT, "
+				"entity TEXT, "
+				"venue TEXT"
+				");";
+			Session << Statement, Poco::Data::Keywords::now;
+
+			try {
+				std::string IndexStatement =
+					"CREATE INDEX IF NOT EXISTS roles_name_index ON " + TableName_ + " (name);";
+				Session << IndexStatement, Poco::Data::Keywords::now;
+			} catch (...) {
+			}
+		} catch (const Poco::Exception &E) {
+			Logger_.error("Failure to create ManagementRoleDB table resources.");
+			Logger_.log(E);
+		}
+		return DB::Upgrade();
+	}
+
 	bool ManagementRoleDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
-		std::vector<std::string> Statements{
-			"alter table " + TableName_ + " add column entity text;",
-			"alter table " + TableName_ + " add column venue text;"};
+		std::vector<std::string> Statements;
+		// Auto-purge any legacy corrupted roles that have null, empty, or non-existent policy references
+		std::string PurgeCorruptRoles =
+			"DELETE FROM " + TableName_ +
+			" WHERE managementPolicy IS NULL OR managementPolicy = '' OR managementPolicy NOT IN (SELECT id FROM policies);";
+
+		if (Type_ == OpenWifi::DBType::pgsql) {
+			Statements = {
+				"alter table " + TableName_ + " add column if not exists entity text;",
+				"alter table " + TableName_ + " add column if not exists venue text;",
+				PurgeCorruptRoles,
+				"alter table " + TableName_ + " alter column managementPolicy set not null;",
+				"alter table " + TableName_ + " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;"};
+		} else if (Type_ == OpenWifi::DBType::mysql) {
+			Statements = {
+				"alter table " + TableName_ + " add column entity text;",
+				"alter table " + TableName_ + " add column venue text;",
+				PurgeCorruptRoles,
+				"alter table " + TableName_ + " modify managementPolicy varchar(64) not null;",
+				"alter table " + TableName_ + " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;"};
+		} else {
+			Statements = {
+				"alter table " + TableName_ + " add column entity text;",
+				"alter table " + TableName_ + " add column venue text;"};
+		}
 		RunScript(Statements);
-		to = 2;
+		to = 3;
 		return true;
+	}
+
+	bool ManagementRoleDB::HasPolicy(const std::string &PolicyId, bool &InUse) {
+		try {
+			uint64_t Count = 0;
+			Poco::Data::Session Session = Pool_.get();
+			Poco::Data::Statement Select(Session);
+
+			std::string St = "SELECT COUNT(*) FROM (SELECT 1 FROM " + TableName_ +
+							 " WHERE managementPolicy=? LIMIT 1) AS t";
+			auto tPolicyId{PolicyId};
+			Select << ConvertParams(St), Poco::Data::Keywords::into(Count),
+				Poco::Data::Keywords::use(tPolicyId);
+			Select.execute();
+
+			InUse = (Count > 0);
+			return true;
+		} catch (const Poco::Exception &E) {
+			Logger_.log(E);
+		}
+		return false;
 	}
 
 } // namespace OpenWifi

@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - anil-feature
+      - inUse-policy-deletion-prevention
   pull_request:
     branches:
       - main
@@ -295,6 +296,15 @@ jobs:
       - name: Execute Combined Lab Test Suite (Root + Admin)
         run: go run main.go
         working-directory: ${{ github.workspace }}/tests/lab_tests
+
+      # ── Run RBAC immutability and policy protection tests ─────────────────────
+      - name: Execute RBAC Immutability and Policy Protection Tests
+        run: |
+          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection"
+        working-directory: ${{ github.workspace }}/tests/rbac_tests
+        env:
+          OWPROV_URL: "https://localhost:16005/api/v1"
+          TOKEN_ROOT: "Bearer root-test-token"
 
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts
