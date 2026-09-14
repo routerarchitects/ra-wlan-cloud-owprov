@@ -172,15 +172,22 @@ namespace OpenWifi {
 					return false;
 				}
 
-				// 2. Check if constraint already exists in catalog
+				// 2. Check if constraint already exists in catalog for active schema/database
 				auto HasConstraint = [this](const std::string &ConstraintName) -> bool {
 					try {
 						std::size_t count = 0;
 						Poco::Data::Session Session = Pool_.get();
+						std::string SchemaFilter;
+						if (Type_ == OpenWifi::DBType::pgsql) {
+							SchemaFilter = " AND table_schema = current_schema()";
+						} else if (Type_ == OpenWifi::DBType::mysql) {
+							SchemaFilter = " AND table_schema = DATABASE()";
+						}
 						std::string CheckQ =
 							"SELECT COUNT(*) FROM information_schema.table_constraints "
 							"WHERE lower(table_name) = '" + Poco::toLower(TableName_) +
-							"' AND lower(constraint_name) = '" + Poco::toLower(ConstraintName) + "';";
+							"' AND lower(constraint_name) = '" + Poco::toLower(ConstraintName) + "'" +
+							SchemaFilter + ";";
 						Session << CheckQ, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
 						return count > 0;
 					} catch (...) {
