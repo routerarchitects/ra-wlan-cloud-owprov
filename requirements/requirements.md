@@ -1,0 +1,607 @@
+# OWPROV Horizontal Scaling Requirements
+
+## 1. Purpose
+
+This document defines the requirements OWPROV must satisfy before it can be safely run as multiple active instances in a Docker Compose deployment.
+
+The purpose of this document is to agree on **what must be true** for OWPROV horizontal scaling before implementation starts.
+
+Exact implementation details, class changes, Kafka registration APIs, database locking strategy, schema updates, and test implementation details will be defined later in `specification.md` and `testcases.md`.
+
+---
+
+## 2. Current Position
+
+OWPROV can already be placed behind a load balancer at the HTTP/deployment layer.
+
+However, being reachable through a load balancer is not the same as being safe for multi-instance operation.
+
+Before OWPROV can be considered horizontally scalable, the service must not depend on per-process memory, per-process background jobs, per-process WebSocket state, unsafe Kafka delivery semantics, or unsafe concurrent database writes for correctness.
+
+---
+
+## 3. Target Multi-Instance Model
+
+The target deployment model is:
+
+```text
+                +-------------------------+
+API request --->|      Load balancer      |
+                +-------------------------+
+                    |        |        |
+                    v        v        v
+                owprov-1  owprov-2  owprov-3
+                    |        |        |
+                    +--------+--------+
+                             |
+              +--------------+--------------+
+              |                             |
+              v                             v
+          PostgreSQL                      Kafka
+     authoritative DB state        events / service discovery
+```
+
+**The expected behavior is**:
+
+```text
+1. More than one OWPROV instance can run at the same time.
+2. Any incoming API request can be routed to any healthy OWPROV instance.
+3. No user, device, job, or API request requires permanent routing to one specific OWPROV process.
+4. Shared state is stored in PostgreSQL.
+5. Kafka delivery behavior is defined per topic.
+```
+
+---
+
+## 4. Scope
+
+This requirements document covers OWPROV application behavior required for Docker Compose based horizontal scaling.
+
+In scope:
+
+```text
+1. Multi-instance API correctness.
+2. Database-first read correctness.
+3. Removal of API dependency on stale local in-memory caches.
+4. Authorization correctness across replicas.
+5. Kafka topic delivery semantics.
+6. Database startup and schema initialization coordination.
+7. Background job ownership and recovery.
+8. Database write concurrency protection.
+9. WebSocket and UI notification behavior across instances.
+10. Runtime files and generated assets.
+```
+---
+
+
+## 5. Global Requirements
+
+### 5.1: Any healthy instance must be able to serve any API request
+
+OWPROV must not require request stickiness for correctness.
+
+**Required behavior**:
+
+```text
+1. A request for a device, venue, entity, subscriber, configuration, job, or user must not require routing to the instance that previously handled related work.
+2. If a previous event was handled by owprov-1, a later read request routed to owprov-2 must still return correct shared state.
+3. Load balancing across active OWPROV instances must not create correctness differences.
+```
+
+**Acceptance criteria**:
+
+```text
+1. Two OWPROV instances are running.
+2. A operation is performed through one instance.
+3. A read or follow-up operation through another instance observes correct shared state.
+```
+
+---
+### 5.2: PostgreSQL must be the source of truth for OWPROV API reads and writes
+
+OWPROV must use PostgreSQL as the authoritative source of truth for API data in multi-instance mode.
+
+**Required behavior**:
+
+```text
+1. Read APIs must fetch required service data from PostgreSQL.
+2. Write/update/delete APIs must persist changes to PostgreSQL.
+3. API behavior must be based on committed PostgreSQL state, not on which OWPROV instance receives the request.
+```
+
+**Acceptance criteria**:
+
+```text
+1. Data created/updated through owprov-1 is readable through owprov-2 from PostgreSQL.
+2. Restarting one OWPROV instance does not change the data view of another instance.
+3. API behavior is the same regardless of which OWPROV replica receives the request.
+```
+
+---
+
+## 6. Local In-Memory Cache Requirements
+
+### 6.1: API behavior must not depend on process-local in-memory caches
+
+OWPROV currently has process-local in-memory caches such as `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar cache structures.
+
+For multi-instance operation, these caches may exist only as performance helpers. API reads, validation, authorization, search, and API response decisions must use shared authoritative state instead of stale process-local cache state.
+
+The API paths that currently depend on these caches must be changed so a stale local cache cannot change the API result.
+
+**Required behavior:**
+
+```text
+1. API read paths must not rely on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches as the only source for required API data.
+2. API write/update/delete paths must persist required state to PostgreSQL
+3. Authorization-related API checks must fetch required authorization data from PostgreSQL-backed state instead of local AuthCache.
+4. Serial number existence, uniqueness, and search behavior must use PostgreSQL-backed data instead of local SerialNumberCache.
+5. Device type validation used by APIs must use PostgreSQL-backed data instead of local DeviceTypeCache.
+```
+
+**Acceptance criteria:**
+
+```text
+1. API reads that previously used local caches are changed to fetch required data from PostgreSQL.
+2. Creating or updating data through owprov-1 does not require updating a local cache on owprov-2 for owprov-2 to return the correct API result.
+3. Restarting an OWPROV instance does not require rebuilding local API caches before API reads work correctly.
+4. A permission change, serial number change, or device type change is reflected through PostgreSQL-backed reads, not through local cache synchronization.
+5. No API response depends on stale process-local cache state.
+```
+
+---
+
+### 6.2: Authorization decisions must use PostgreSQL-backed state
+
+Authorization must not depend on which OWPROV instance receives the request.
+For multi-instance operation, authorization-related API checks must not depend on process-local `AuthCache` state. If a permission, role, policy, token, or management-scope value is changed through one OWPROV instance, later authorization checks handled by another OWPROV instance must use PostgreSQL-backed state.
+
+
+**Required behavior:**
+
+```text
+1. Authorization-related API checks must fetch required authorization data from PostgreSQL-backed state.
+2. Permission, role, policy, token, and management-scope changes must be persisted in PostgreSQL.
+3. Authorization behavior must not require local cache synchronization between OWPROV instances.
+```
+
+**Acceptance criteria:**
+
+```text
+1. Start owprov-1 and owprov-2.
+2. Change or revoke a user's permission through owprov-1.
+3. Confirm the permission change is persisted in PostgreSQL.
+4. Send an API request that requires that permission to owprov-2.
+5. owprov-2 authorizes or rejects the request using PostgreSQL-backed authorization state, not local AuthCache state.
+```
+
+---
+
+### 6.3: Serial number and inventory behavior must be database-first
+
+Serial number and inventory correctness must be enforced through PostgreSQL.
+
+**Required behavior:**
+
+```text
+1. Serial number existence checks must use PostgreSQL or PostgreSQL constraints.
+2. Duplicate prevention must not depend on local process memory.
+3. Inventory read/search behavior must return consistent results across replicas.
+4. Database constraints must be authoritative where uniqueness matters.
+```
+
+**Acceptance criteria:**
+
+```text
+1. A serial created through owprov-1 cannot be duplicated through owprov-2.
+2. A serial removed through owprov-1 is not treated as valid by owprov-2 only because of stale memory.
+3. Inventory search results are consistent across replicas for the same committed database state.
+```
+
+---
+
+## 7. Database Requirements
+
+### 7.1: Database startup and schema initialization must be single-owner coordinated
+
+When multiple OWPROV instances start at the same time, database initialization and schema setup must not race.
+
+**Required behavior:**
+
+```text
+1. Only one OWPROV instance may run the protected database startup/initialization section at a time.
+2. Other instances must wait or fail readiness cleanly until the database is safe to use.
+3. If the owner instance crashes before completing startup, another instance must be able to retry safely.
+4. The coordination mechanism must be based on PostgreSQL/shared database ownership, not Kafka group leadership.
+```
+
+**Acceptance criteria:**
+
+```text
+1. Starting two or more OWPROV instances concurrently does not cause schema or initialization races.
+2. Only one instance performs a schema transition at a time.
+3. Other instances do not accept traffic before required database initialization is safe.
+4. Startup failure is visible.
+```
+
+---
+
+### 7.2: Concurrent database writes must not silently lose updates
+
+OWPROV must protect correctness-sensitive read-modify-write paths.
+
+Problem example:
+
+```text
+Initial Venue.devices = [DeviceX]
+
+owprov-1 reads old state and adds DeviceA
+owprov-2 reads old state and adds DeviceB
+
+owprov-1 writes [DeviceX, DeviceA]
+owprov-2 writes [DeviceX, DeviceB]
+
+Final state can lose DeviceA.
+```
+
+**Required behavior:**
+
+```text
+1. Relationship updates must be concurrency-safe.
+2. Check-then-write paths must be protected by database constraints, transactions, row locks, optimistic versions, atomic updates, or equivalent.
+3. Multi-record operations must define transaction boundaries.
+4. Retryable conflicts must be handled explicitly and not converted into false success.
+```
+
+**Acceptance criteria:**
+
+```text
+1. Two concurrent writes to the same relationship cannot silently lose either update.
+2. Duplicate or conflicting writes are rejected, retried, or resolved according to explicit rules.
+3. Database constraints, not local memory, are authoritative for uniqueness where correctness requires it.
+```
+
+---
+
+## 8. Kafka Requirements
+
+### 8.1: Kafka topic delivery semantics must be explicit
+
+Every Kafka topic consumed by OWPROV must be assigned to the correct Kafka consumer type before multi-instance deployment is enabled.
+
+OWPROV must support two consumer types:
+
+```text
+1. GroupConsumer:
+   Used for work-queue topics.
+   One replica processes each message in the shared service group.
+
+2. BroadcastConsumer:
+   Used for broadcast/fan-out topics.
+   Every replica receives each message through its own instance-specific consumer group.
+```
+
+**Required behavior:**
+
+```text
+1. Each consumed Kafka topic must be assigned to either GroupConsumer or BroadcastConsumer.
+2. "service_events" must be registered on BroadcastConsumer.
+3. "connection" must be registered on GroupConsumer.
+4. GroupConsumer must use the shared group.id so one message is processed by one instance.
+5. BroadcastConsumer must use an instance-unique group.id so every instance receives broadcast messages.
+6. Kafka client.id must also be unique per instance for logs and observability.
+```
+
+**Acceptance criteria:**
+
+```text
+1. "service_events" is assigned to BroadcastConsumer.
+2. Every running instance receives service_events messages.
+3. "connection" is assigned to GroupConsumer.
+4. Each "connection" message is processed by only one instance in the service group.
+5. State written as a result of connection processing is stored in PostgreSQL and can be read by any OWPROV instance.
+6. No OWPROV-consumed Kafka topic is left without an explicitly assigned consumer type.
+```
+
+---
+
+### 8.2: service_events must be delivered to every instance
+
+`service_events` is a broadcast topic.
+
+**Required behavior:**
+
+```text
+1. Every instance must receive service join, keep-alive, leave, and remove-token events.
+2. Every instance must maintain a compatible service discovery view.
+3. Token invalidation events must reach every instance that may hold relevant token/auth state.
+4. One instance consuming a service event must not prevent other instances from receiving it.
+```
+
+**Acceptance criteria:**
+
+```text
+1. Start owprov-1 and owprov-2.
+2. Publish or trigger service_events.
+3. Verify both instances receive and process the same service event.
+4. Verify internal service lookup does not fail on one replica only because another replica consumed the event.
+```
+
+---
+
+### 8.3: connection events must be safe for work-queue processing
+
+The `connection` topic may be processed as a work-queue topic only if OWPROV writes the durable result to shared state and later API calls read from shared state.
+
+**Required behavior:**
+
+```text
+1. Each connection event should be processed by one instance in the OWPROV service group.
+2. The processing instance must write required durable device/inventory state to PostgreSQL.
+3. Later API calls for that device must be routable to any instance.
+4. No device should become permanently owned by the instance that processed its connection event.
+5. Connection processing must be idempotent under retry, rebalance, or duplicate delivery.
+```
+
+**Acceptance criteria:**
+
+```text
+1. A connection event processed by owprov-1 is visible through API reads served by owprov-2.
+2. Replaying the same connection event does not create duplicate inventory or conflicting state.
+3. Rebalancing consumers does not create inconsistent device state.
+```
+
+---
+
+### 8.4: Kafka producer partitioning must support scale-out where required
+
+Kafka producer behavior must not prevent partition-based scale-out for scalable work topics.
+
+**Required behavior:**
+
+```text
+1. Work topics that require ordering per device should use a stable message key such as serial number, MAC address, or device UUID.
+2. Messages for the same device should preserve ordering when required.
+3. Messages for different devices should be able to distribute across partitions.
+4. Forcing all scalable topic messages to one partition must not be used unless explicitly justified.
+```
+
+**Acceptance criteria:**
+
+```text
+1. connection events for the same device are ordered through the same partition where ordering is required.
+2. connection events for different devices can be distributed across multiple partitions.
+3. Multiple OWPROV instances can actively consume work when the topic has enough partitions.
+```
+
+---
+
+## 9. Service Identity Requirements
+
+### 9.1: Service identity must distinguish logical service identity from instance identity
+
+Horizontal scaling requires a clear distinction between shared service identity and individual instance identity.
+
+**Required behavior:**
+
+```text
+1. Each instance must have a unique instance identity for logs, metrics, Kafka client id, and broadcast group identity.
+2. The public OWPROV service endpoint must remain stable behind the load balancer.
+3. If private per-instance endpoints are advertised, they must not collide and must be reachable by intended peers.
+4. Internal API key/hash behavior must remain consistent where it depends on shared public endpoint configuration.
+```
+
+**Acceptance criteria:**
+
+```text
+1. Logs clearly identify which OWPROV instance produced each entry.
+2. Kafka clients can be distinguished per running instance.
+3. Service discovery does not accidentally collapse multiple replicas into ambiguous or conflicting records.
+```
+
+---
+
+## 10. Runtime Downloaded File Requirements
+
+### 10.1: Runtime downloaded files must remain consistent across OWPROV instances
+
+OWPROV may download required files into its local data directory during startup or runtime.
+
+In a multi-instance Docker Compose deployment, each OWPROV container may have its own local data directory. This is acceptable as long as every instance downloads the same required files from the same configured source.
+
+A shared data directory is not required for this requirement.
+
+**Required behavior:**
+
+```text
+1. Each OWPROV instance may download required files into its own local data directory.
+2. All OWPROV instances must use the same configured download source for these files.
+3. Downloaded files must not be manually changed differently on different OWPROV instances.
+4. If a required file cannot be downloaded or validated, that OWPROV instance must not become ready to serve dependent API behavior.
+5. A newly started OWPROV instance must be able to download the required files independently without needing files copied from another OWPROV instance.
+```
+
+Acceptance criteria:
+
+```text
+1. Start owprov-1 and owprov-2 with the same download source configuration.
+2. Both instances download the required files into their own local data directories.
+3. The downloaded files used by both instances are equivalent.
+4. Requests depending on those files behave the same regardless of which OWPROV instance receives the request.
+5. If one instance fails to download a required file, it does not become ready for API behavior that depends on that file.
+```
+
+---
+
+## 11. Conditional Rate Limiting Requirements
+
+### 11.1: Rate limiting must be multi-instance safe when enabled
+
+Rate limiting is not a default requirement for every OWPROV API. This requirement applies only to APIs where rate limiting is enabled or where rate limiting is used as a security, abuse-prevention, or user/API protection mechanism.
+
+A process-local rate limiter gives each OWPROV instance independent counters. In a multi-instance deployment, this means the effective limit can change when traffic is spread across multiple OWPROV replicas.
+
+**Required behavior:**
+
+```text
+1. APIs with rate limiting enabled must clearly define whether the limit is local per-process protection or global user/API protection.
+2. Local per-process rate limiting may be used only for local overload protection.
+3. Global user/API rate limiting must not rely only on per-process OWPROV memory.
+4. If global rate limiting is required, it must be enforced at the load balancer layer.
+```
+
+**Acceptance criteria:**
+
+```text
+1. APIs without rate limiting enabled are not blocked by this requirement.
+2. Any API with rate limiting enabled documents whether the limit is local or global.
+3. If an API requires global rate limiting, the effective limit does not change when OWPROV instance count changes.
+4. If the limit is only local overload protection, the documentation clearly says it is not a global user/API limit.
+```
+
+---
+
+## 12. Background Job Requirements
+
+### 12.1: Background jobs must have durable ownership, recovery, and idempotency
+
+Background jobs must not be owned only by the OWPROV process that received the REST request.
+
+Required behavior:
+
+```text
+1. Long-running actions must create durable job state in PostgreSQL.
+2. Job state must include job id, job type, parameters, status, result details etc.
+3. Instances must claim pending jobs through an atomic shared-state operation.
+4. Only one instance may own a job at a time.
+5. A crashed or stopped owner must not lose the job permanently.
+6. Another instance may retry a pending job.
+7. Kafka may be used to wake workers, but Kafka group leadership must not be the source of truth for job ownership.
+```
+
+Acceptance criteria:
+
+```text
+1. A job created through owprov-1 can be queried through owprov-2.
+2. If owprov-1 stops while owning a job, owprov-2 can observe and handle the job according to durable state.
+3. A job is not blindly executed twice during restart, rebalance, or retry.
+4. Job progress and terminal state survive process restart.
+```
+
+---
+
+## 13. WebSocket And Notification Requirements
+
+### 13.1: UI notifications must work when WebSocket owner and work owner are different instances
+
+A browser may be connected to one OWPROV instance while an API action or background job runs on another instance.
+
+Required behavior:
+
+```text
+1. A notification generated on owprov-2 must be deliverable to a user whose WebSocket is connected to owprov-1.
+2. WebSocket connection locality must not cause required notifications to be silently lost.
+3. Sticky WebSocket routing may help connection stability but must not be the only correctness mechanism.
+4. Notification delivery expectations must be documented for each important event type.
+```
+
+Acceptance criteria:
+
+```text
+1. Connect a UI WebSocket to owprov-1.
+2. Trigger a job or action through owprov-2.
+3. Verify required progress/completion notification reaches the UI connected to owprov-1.
+```
+
+---
+
+
+## 14. Docker Compose Deployment Requirements
+
+### 14.1: Docker Compose deployment must support active-active OWPROV safely
+
+The target deployment environment for this phase is Docker Compose.
+
+Required behavior:
+
+```text
+1. Multiple OWPROV containers must be able to run at the same time.
+2. All OWPROV instances must use the same PostgreSQL database.
+3. All OWPROV instances must use the same Kafka cluster.
+4. Each OWPROV instance must have unique instance identity where required.
+5. The public OWPROV endpoint must be load-balanced through a reverse proxy or equivalent.
+6. Health/readiness behavior must prevent unsafe instances from receiving traffic.
+7. Shutdown must stop accepting new traffic before terminating long-running work where possible.
+8. Instance-specific environment values must not conflict across replicas.
+```
+
+Acceptance criteria:
+
+```text
+1. At least two OWPROV instances run in Docker Compose.
+2. Requests can be routed to either instance.
+3. The same correctness-critical request returns consistent results from either instance.
+4. Restarting one instance does not corrupt shared state or lose durable work.
+```
+
+---
+
+## 15. High-Level Acceptance Criteria
+
+OWPROV horizontal scaling is acceptable when:
+
+```text
+1. Multiple OWPROV instances can run at the same time in Docker Compose.
+2. Any healthy OWPROV instance can serve API requests without sticky routing.
+3. API reads and writes use PostgreSQL as the source of truth.
+4. API behavior does not depend on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches.
+5. Kafka topics consumed by OWPROV are registered on the correct consumer type.
+6. service_events is received by every OWPROV instance.
+7. connection messages are processed by only one OWPROV instance in the service group.
+8. Database startup and schema initialization do not race between instances.
+9. Concurrent database writes do not silently lose updates.
+10. Background jobs can be observed and recovered through durable state.
+11. Runtime-downloaded files remain consistent across instances.
+12. Conditional rate limiting behavior is defined only for APIs where rate limiting is enabled.
+```
+---
+
+## 16. Review Checklist
+
+Before `specification.md` or implementation begins, reviewers should confirm:
+
+```text
+1. The requirements correctly describe Docker Compose multi-instance OWPROV.
+2. Kubernetes/Helm topics are intentionally excluded.
+3. DB-first behavior is accepted for correctness-critical reads.
+4. Removing correctness dependency on local caches is accepted.
+5. Kafka Group vs Broadcast semantics are accepted as a requirement.
+6. Background job durable ownership is accepted as a requirement.
+7. Database startup coordination is accepted as a requirement.
+8. Database write concurrency protection is accepted as a requirement.
+9. WebSocket/notification cross-instance behavior is accepted as a requirement.
+10. Runtime file handling is accepted as a requirement.
+
+```
+## 17. Non-Goals
+
+This document does not define:
+
+1. Exact code changes, class changes, method names, or implementation order.
+2. Exact database schema, migration SQL, or locking implementation.
+3. Exact KafkaManager class changes, Kafka registration APIs, or consumer internals.
+4. Exact background job table schema, worker implementation, or retry algorithm.
+5. Exact WebSocket fanout mechanism or notification transport.
+6. Exact Docker Compose YAML, reverse proxy configuration, or port mappings.
+7. Detailed test steps or test automation code; those belong in `testcases.md`.
+8. Kubernetes, Helm, or Kubernetes-specific deployment behavior.
+9. Request stickiness between the load balancer and OWPROV instances.
+10. Replacing PostgreSQL as the source of truth for OWPROV API reads and writes.
+11. Adding a shared cache layer for normal OWPROV API read/write correctness.
+12. A shared data directory for runtime-downloaded files, as long as each instance independently downloads and validates equivalent files.
+13. Enabling rate limiting for every OWPROV API.
+14. Performance tuning, benchmarking targets, or capacity planning.
+15. Public API behavior changes unless later required by `specification.md`.
+
+
+
