@@ -44,6 +44,7 @@ type UserInfo struct {
 	UserRights   []UserRight `json:"userRights,omitempty"`
 	OperatorID   string      `json:"operatorId,omitempty"`
 	Registration string      `json:"registrationId,omitempty"`
+	CreatedBy    string      `json:"createdBy,omitempty"`
 }
 
 type TokenInfo struct {
@@ -63,14 +64,16 @@ type UserInfoAndPolicy struct {
 }
 
 type UserRecord struct {
-	ID         string      `json:"id"`
-	Email      string      `json:"email"`
-	Username   string      `json:"username"`
-	Password   string      `json:"password"`
-	UserRole   string      `json:"userRole"`
-	Name       string      `json:"name"`
-	OperatorID string      `json:"operatorId,omitempty"`
-	UserRights []UserRight `json:"userRights,omitempty"`
+	ID           string      `json:"id"`
+	Email        string      `json:"email"`
+	Username     string      `json:"username"`
+	Password     string      `json:"password"`
+	UserRole     string      `json:"userRole"`
+	Name         string      `json:"name"`
+	OperatorID   string      `json:"operatorId,omitempty"`
+	Registration string      `json:"registrationId,omitempty"`
+	CreatedBy    string      `json:"createdBy,omitempty"`
+	UserRights   []UserRight `json:"userRights,omitempty"`
 }
 
 type SubUserRecord struct {
@@ -121,20 +124,6 @@ func newMockStore() *MockStore {
 	s.users[rootID] = rootUser
 	s.users[s.rootEmail] = rootUser
 
-	// Pre-seed TARGET_USER_A used in RBAC integration tests
-	targetUserAID := "e6885f03-63db-4e0d-aad4-2b8d1a79a887"
-	targetUserA := &UserRecord{
-		ID:         targetUserAID,
-		Email:      "target-user-a@openwifi.local",
-		Username:   "target-user-a@openwifi.local",
-		Password:   "openwifi",
-		UserRole:   "subscriber",
-		Name:       "Target User A",
-		UserRights: []UserRight{{Role: "subscriber"}},
-	}
-	s.users[targetUserAID] = targetUserA
-	s.users[targetUserA.Email] = targetUserA
-
 	// Pre-seed root token
 	rootToken := "root-test-token"
 	s.tokens[rootToken] = &UserInfoAndPolicy{
@@ -171,6 +160,7 @@ func newMockStore() *MockStore {
 		"user-read-only-subscriber-token",
 		"user-with-venue-role-only-token",
 		"user-venue-shadowed-token",
+		"user-subscriber-only-token",
 	}
 	readOnlyID := "00000000-0000-0000-0000-000000000002"
 	readOnlyUser := &UserRecord{
@@ -214,26 +204,26 @@ func newMockStore() *MockStore {
 		}
 	}
 
-	// Pre-seed admin test tokens
-	adminTokens := []string{
-		"user-admin-operator-a-token",
-		"user-admin-operator-b-token",
-		"b6ba0d38b3a438af80a65be2dab666ad95791091d5cfb72264f2a6d1d38e82cb",
-	}
-	adminID := "00000000-0000-0000-0000-000000000003"
-	adminUser := &UserRecord{
-		ID:         adminID,
-		Email:      "admin@openwifi.local",
-		Username:   "admin@openwifi.local",
+	// Pre-seed Admin A user & tokens
+	adminAID := "00000000-0000-0000-0000-000000000003"
+	adminAUser := &UserRecord{
+		ID:         adminAID,
+		Email:      "admin-a@openwifi.local",
+		Username:   "admin-a@openwifi.local",
 		Password:   "openwifi",
 		UserRole:   "admin",
-		Name:       "Admin User",
+		Name:       "Admin User A",
 		UserRights: []UserRight{{Role: "admin"}},
 	}
-	s.users[adminID] = adminUser
-	s.users[adminUser.Email] = adminUser
+	s.users[adminAID] = adminAUser
+	s.users[adminAUser.Email] = adminAUser
 
-	for _, tok := range adminTokens {
+	adminATokens := []string{
+		"user-admin-operator-a-token",
+		"b6ba0d38b3a438af80a65be2dab666ad95791091d5cfb72264f2a6d1d38e82cb",
+		"user-admin-token",
+	}
+	for _, tok := range adminATokens {
 		s.tokens[tok] = &UserInfoAndPolicy{
 			TokenInfo: TokenInfo{
 				Token:       tok,
@@ -244,10 +234,10 @@ func newMockStore() *MockStore {
 				ExpiresIn:   86400,
 			},
 			UserInfo: UserInfo{
-				ID:         adminID,
-				Email:      adminUser.Email,
+				ID:         adminAID,
+				Email:      adminAUser.Email,
 				UserRole:   "admin",
-				Name:       adminUser.Name,
+				Name:       adminAUser.Name,
 				UserRights: []UserRight{{Role: "admin"}},
 			},
 			WebToken: WebToken{
@@ -256,11 +246,113 @@ func newMockStore() *MockStore {
 				Created:     time.Now().Unix(),
 				Expires:     time.Now().Add(24 * time.Hour).Unix(),
 				ExpiresIn:   86400,
-				ID:          adminID,
+				ID:          adminAID,
 			},
 			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
 		}
 	}
+
+	// Pre-seed Admin B user & tokens
+	adminBID := "00000000-0000-0000-0000-000000000004"
+	adminBUser := &UserRecord{
+		ID:         adminBID,
+		Email:      "admin-b@openwifi.local",
+		Username:   "admin-b@openwifi.local",
+		Password:   "openwifi",
+		UserRole:   "admin",
+		Name:       "Admin User B",
+		UserRights: []UserRight{{Role: "admin"}},
+	}
+	s.users[adminBID] = adminBUser
+	s.users[adminBUser.Email] = adminBUser
+
+	adminBTokens := []string{
+		"user-admin-operator-b-token",
+	}
+	for _, tok := range adminBTokens {
+		s.tokens[tok] = &UserInfoAndPolicy{
+			TokenInfo: TokenInfo{
+				Token:       tok,
+				AccessToken: tok,
+				UserRole:    "admin",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+			},
+			UserInfo: UserInfo{
+				ID:         adminBID,
+				Email:      adminBUser.Email,
+				UserRole:   "admin",
+				Name:       adminBUser.Name,
+				UserRights: []UserRight{{Role: "admin"}},
+			},
+			WebToken: WebToken{
+				AccessToken: tok,
+				TokenType:   "Bearer",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+				ID:          adminBID,
+			},
+			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
+		}
+	}
+
+	// Pre-seed TARGET_USER_A used in RBAC integration tests (created by Admin A)
+	targetUserA_IDs := []string{
+		"e6885f03-63db-4e0d-aad4-2b8d1a79a887",
+		"user-a-uuid",
+		"user-created-by-admin-a-uuid",
+		"1abbeb1a-a057-44fe-96b1-92b33dc8f0fe",
+	}
+	for _, id := range targetUserA_IDs {
+		u := &UserRecord{
+			ID:         id,
+			Email:      id + "@openwifi.local",
+			Username:   id + "@openwifi.local",
+			Password:   "openwifi",
+			UserRole:   "subscriber",
+			Name:       "Target User A",
+			CreatedBy:  adminAID,
+			UserRights: []UserRight{{Role: "subscriber"}},
+		}
+		s.users[id] = u
+		s.users[u.Email] = u
+	}
+
+	// Pre-seed TARGET_USER_B used in RBAC integration tests (created by Admin B)
+	targetUserB_IDs := []string{
+		"user-b-uuid",
+		"user-created-by-admin-b-uuid",
+	}
+	for _, id := range targetUserB_IDs {
+		u := &UserRecord{
+			ID:         id,
+			Email:      id + "@openwifi.local",
+			Username:   id + "@openwifi.local",
+			Password:   "openwifi",
+			UserRole:   "subscriber",
+			Name:       "Target User B",
+			CreatedBy:  adminBID,
+			UserRights: []UserRight{{Role: "subscriber"}},
+		}
+		s.users[id] = u
+		s.users[u.Email] = u
+	}
+
+	// Pre-seed secondary user for multi-role deletion test (created by Root)
+	secUser := &UserRecord{
+		ID:         "user-secondary-uuid-888",
+		Email:      "user-secondary-uuid-888@openwifi.local",
+		Username:   "user-secondary-uuid-888@openwifi.local",
+		Password:   "openwifi",
+		UserRole:   "subscriber",
+		Name:       "Secondary User 888",
+		CreatedBy:  rootID,
+		UserRights: []UserRight{{Role: "subscriber"}},
+	}
+	s.users[secUser.ID] = secUser
+	s.users[secUser.Email] = secUser
 
 	return s
 }
@@ -432,12 +524,14 @@ func (s *MockStore) handleUser(w http.ResponseWriter, r *http.Request) {
 			var userList []UserInfo
 			for _, u := range s.users {
 				userList = append(userList, UserInfo{
-					ID:         u.ID,
-					Email:      u.Email,
-					UserRole:   u.UserRole,
-					Name:       u.Name,
-					OperatorID: u.OperatorID,
-					UserRights: u.UserRights,
+					ID:           u.ID,
+					Email:        u.Email,
+					UserRole:     u.UserRole,
+					Name:         u.Name,
+					OperatorID:   u.OperatorID,
+					Registration: u.Registration,
+					CreatedBy:    u.CreatedBy,
+					UserRights:   u.UserRights,
 				})
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -449,41 +543,19 @@ func (s *MockStore) handleUser(w http.ResponseWriter, r *http.Request) {
 		if u, ok := s.users[path]; ok {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(UserInfo{
-				ID:         u.ID,
-				Email:      u.Email,
-				UserRole:   u.UserRole,
-				Name:       u.Name,
-				OperatorID: u.OperatorID,
-				UserRights: u.UserRights,
+				ID:           u.ID,
+				Email:        u.Email,
+				UserRole:     u.UserRole,
+				Name:         u.Name,
+				OperatorID:   u.OperatorID,
+				Registration: u.Registration,
+				CreatedBy:    u.CreatedBy,
+				UserRights:   u.UserRights,
 			})
 			return
 		}
 
-		// Fallback: dynamically create mock user record for test UUIDs
-		role := "subscriber"
-		if strings.Contains(path, "admin") {
-			role = "admin"
-		} else if strings.Contains(path, "root") {
-			role = "root"
-		}
-		mockUser := &UserRecord{
-			ID:         path,
-			Email:      path + "@openwifi.local",
-			Username:   path + "@openwifi.local",
-			UserRole:   role,
-			Name:       "Mock User " + path,
-			UserRights: []UserRight{{Role: role}},
-		}
-		s.users[path] = mockUser
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(UserInfo{
-			ID:         mockUser.ID,
-			Email:      mockUser.Email,
-			UserRole:   mockUser.UserRole,
-			Name:       mockUser.Name,
-			UserRights: mockUser.UserRights,
-		})
-		return
+		http.Error(w, `{"error":"User not found"}`, http.StatusNotFound)
 
 	case http.MethodPost:
 		auth := r.Header.Get("Authorization")
@@ -520,12 +592,14 @@ func (s *MockStore) handleUser(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(UserInfo{
-			ID:         u.ID,
-			Email:      u.Email,
-			UserRole:   u.UserRole,
-			Name:       u.Name,
-			OperatorID: u.OperatorID,
-			UserRights: u.UserRights,
+			ID:           u.ID,
+			Email:        u.Email,
+			UserRole:     u.UserRole,
+			Name:         u.Name,
+			OperatorID:   u.OperatorID,
+			Registration: u.Registration,
+			CreatedBy:    u.CreatedBy,
+			UserRights:   u.UserRights,
 		})
 
 	case http.MethodPut:

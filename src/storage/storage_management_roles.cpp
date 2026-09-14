@@ -38,26 +38,55 @@ namespace OpenWifi {
 	bool ManagementRoleDB::Create() {
 		try {
 			Poco::Data::Session Session = Pool_.get();
-			std::string Statement =
-				"CREATE TABLE IF NOT EXISTS " + TableName_ + " ("
-				"id VARCHAR(64) UNIQUE PRIMARY KEY, "
-				"name TEXT, "
-				"description TEXT, "
-				"notes TEXT, "
-				"created BIGINT, "
-				"modified BIGINT, "
-				"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
-				"users TEXT, "
-				"inUse TEXT, "
-				"tags TEXT, "
-				"entity TEXT, "
-				"venue TEXT"
-				");";
-			Session << Statement, Poco::Data::Keywords::now;
+			if (Type_ == OpenWifi::DBType::mysql) {
+				std::string Statement =
+					"CREATE TABLE IF NOT EXISTS " + TableName_ + " ("
+					"id VARCHAR(64) UNIQUE PRIMARY KEY, "
+					"name TEXT, "
+					"description TEXT, "
+					"notes TEXT, "
+					"created BIGINT, "
+					"modified BIGINT, "
+					"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
+					"users TEXT, "
+					"inUse TEXT, "
+					"tags TEXT, "
+					"entity TEXT, "
+					"venue TEXT, "
+					"INDEX roles_name_index (name(255))"
+					");";
+				Session << Statement, Poco::Data::Keywords::now;
 
-			std::string IndexStatement =
-				"CREATE INDEX IF NOT EXISTS roles_name_index ON " + TableName_ + " (name);";
-			Session << IndexStatement, Poco::Data::Keywords::now;
+				uint64_t HasIndex = 0;
+				std::string CheckIndex =
+					"SELECT COUNT(*) FROM information_schema.statistics "
+					"WHERE table_schema = DATABASE() AND table_name = '" + TableName_ + "' AND index_name = 'roles_name_index'";
+				Session << CheckIndex, Poco::Data::Keywords::into(HasIndex), Poco::Data::Keywords::now;
+				if (HasIndex == 0) {
+					Session << "CREATE INDEX roles_name_index ON " + TableName_ + " (name(255));", Poco::Data::Keywords::now;
+				}
+			} else {
+				std::string Statement =
+					"CREATE TABLE IF NOT EXISTS " + TableName_ + " ("
+					"id VARCHAR(64) UNIQUE PRIMARY KEY, "
+					"name TEXT, "
+					"description TEXT, "
+					"notes TEXT, "
+					"created BIGINT, "
+					"modified BIGINT, "
+					"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
+					"users TEXT, "
+					"inUse TEXT, "
+					"tags TEXT, "
+					"entity TEXT, "
+					"venue TEXT"
+					");";
+				Session << Statement, Poco::Data::Keywords::now;
+
+				std::string IndexStatement =
+					"CREATE INDEX IF NOT EXISTS roles_name_index ON " + TableName_ + " (name);";
+				Session << IndexStatement, Poco::Data::Keywords::now;
+			}
 		} catch (const Poco::Exception &E) {
 			Logger_.error("Failure to create ManagementRoleDB table resources.");
 			Logger_.log(E);
