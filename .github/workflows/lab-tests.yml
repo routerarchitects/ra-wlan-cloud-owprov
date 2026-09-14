@@ -227,6 +227,33 @@ jobs:
             sleep 1
           done
 
+      # ── Start PostgreSQL container ───────────────────────────────────────────
+      - name: Start PostgreSQL container
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name postgres \
+            --network host \
+            -e POSTGRES_USER=owprov \
+            -e POSTGRES_PASSWORD=owprov \
+            -e POSTGRES_DB=owprov \
+            postgres:15
+
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if docker exec postgres pg_isready -U owprov > /dev/null 2>&1; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: PostgreSQL did not start in time!"
+              docker logs postgres
+              exit 1
+            fi
+            sleep 1
+          done
+
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
         run: |
@@ -242,7 +269,12 @@ jobs:
             -e TEMPLATE_CONFIG=true \
             -e KAFKA_ENABLE=true \
             -e KAFKA_BROKERLIST=localhost:9092 \
-            -e STORAGE_TYPE=sqlite \
+            -e STORAGE_TYPE=postgresql \
+            -e STORAGE_TYPE_POSTGRESQL_HOST=localhost \
+            -e STORAGE_TYPE_POSTGRESQL_PORT=5432 \
+            -e STORAGE_TYPE_POSTGRESQL_USERNAME=owprov \
+            -e STORAGE_TYPE_POSTGRESQL_PASSWORD=owprov \
+            -e STORAGE_TYPE_POSTGRESQL_DATABASE=owprov \
             -e RESTAPI_HOST_PORT=16005 \
             -e INTERNAL_RESTAPI_HOST_PORT=17005 \
             owprov:test
@@ -317,4 +349,6 @@ jobs:
       # ── Debug on failure ──────────────────────────────────────────────────────
       - name: Dump owprov logs on failure
         if: failure()
-        run: docker logs owprov 2>&1 | tail -100
+        run: |
+          docker logs owprov 2>&1 | tail -100
+          docker logs postgres 2>&1 | tail -50 || true

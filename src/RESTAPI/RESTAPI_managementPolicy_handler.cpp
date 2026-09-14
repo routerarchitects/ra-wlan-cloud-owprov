@@ -63,7 +63,11 @@ namespace OpenWifi {
 		}
 
 		bool InUse = false;
-		if (StorageService()->RolesDB().HasPolicy(UUID, InUse) && InUse) {
+		if (!StorageService()->RolesDB().HasPolicy(UUID, InUse)) {
+			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+		}
+
+		if (InUse) {
 			return BadRequest(RESTAPI::Errors::StillInUse,
 							  "Management policy is currently assigned to one or more management roles.");
 		}

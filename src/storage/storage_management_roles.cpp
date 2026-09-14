@@ -68,34 +68,105 @@ namespace OpenWifi {
 		return DB::Upgrade();
 	}
 
-	bool ManagementRoleDB::Upgrade([[maybe_unused]] uint32_t from, uint32_t &to) {
-		std::vector<std::string> Statements;
-		// Auto-purge any legacy corrupted roles that have null, empty, or non-existent policy references
-		std::string PurgeCorruptRoles =
-			"DELETE FROM " + TableName_ +
-			" WHERE managementPolicy IS NULL OR managementPolicy = '' OR managementPolicy NOT IN (SELECT id FROM policies);";
-
-		if (Type_ == OpenWifi::DBType::pgsql) {
-			Statements = {
-				"alter table " + TableName_ + " add column if not exists entity text;",
-				"alter table " + TableName_ + " add column if not exists venue text;",
-				PurgeCorruptRoles,
-				"alter table " + TableName_ + " alter column managementPolicy set not null;",
-				"alter table " + TableName_ + " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;"};
-		} else if (Type_ == OpenWifi::DBType::mysql) {
-			Statements = {
-				"alter table " + TableName_ + " add column entity text;",
-				"alter table " + TableName_ + " add column venue text;",
-				PurgeCorruptRoles,
-				"alter table " + TableName_ + " modify managementPolicy varchar(64) not null;",
-				"alter table " + TableName_ + " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;"};
-		} else {
-			Statements = {
-				"alter table " + TableName_ + " add column entity text;",
-				"alter table " + TableName_ + " add column venue text;"};
-		}
-		RunScript(Statements);
+	bool ManagementRoleDB::Upgrade(uint32_t from, uint32_t &to) {
 		to = 3;
+
+		// Step 1: Version 1 -> 2 (Add entity & venue columns)
+		if (from < 2) {
+			std::vector<std::string> v2Statements;
+			if (Type_ == OpenWifi::DBType::pgsql) {
+				v2Statements = {
+					"alter table " + TableName_ + " add column if not exists entity text;",
+					"alter table " + TableName_ + " add column if not exists venue text;"};
+			} else if (Type_ == OpenWifi::DBType::mysql) {
+				auto HasCol = [this](const std::string &col) -> bool {
+					try {
+						std::size_t count = 0;
+						Poco::Data::Session Session = Pool_.get();
+						std::string Q = "SELECT COUNT(*) FROM information_schema.columns "
+										"WHERE table_schema = database() AND lower(table_name) = '" +
+										Poco::toLower(TableName_) + "' AND lower(column_name) = '" +
+										Poco::toLower(col) + "';";
+						Session << Q, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
+						return count > 0;
+					} catch (...) {
+						return false;
+					}
+				};
+				if (!HasCol("entity")) {
+					v2Statements.push_back("alter table " + TableName_ + " add column entity text;");
+				}
+				if (!HasCol("venue")) {
+					v2Statements.push_back("alter table " + TableName_ + " add column venue text;");
+				}
+			} else {
+				v2Statements = {
+					"alter table " + TableName_ + " add column entity text;",
+					"alter table " + TableName_ + " add column venue text;"};
+			}
+			for (const auto &st : v2Statements) {
+				try {
+					auto Session = Pool_.get();
+					Session << st, Poco::Data::Keywords::now;
+				} catch (...) {
+				}
+			}
+		}
+
+		// Step 2: Version 2 -> 3 (Auto-purge corrupt roles & add FK constraint)
+		if (from < 3) {
+			std::string PurgeCorruptRoles =
+				"DELETE FROM " + TableName_ +
+				" WHERE managementPolicy IS NULL OR managementPolicy = '' OR "
+				"managementPolicy NOT IN (SELECT id FROM policies);";
+
+			try {
+				auto Session = Pool_.get();
+				Session << PurgeCorruptRoles, Poco::Data::Keywords::now;
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+
+			if (Type_ == OpenWifi::DBType::pgsql || Type_ == OpenWifi::DBType::mysql) {
+				bool ConstraintExists = false;
+				try {
+					std::size_t count = 0;
+					Poco::Data::Session Session = Pool_.get();
+					std::string CheckQ =
+						"SELECT COUNT(*) FROM information_schema.table_constraints "
+						"WHERE lower(table_name) = '" + Poco::toLower(TableName_) +
+						"' AND lower(constraint_name) = 'fk_roles_management_policy';";
+					Session << CheckQ, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
+					ConstraintExists = (count > 0);
+				} catch (...) {
+				}
+
+				std::vector<std::string> v3Statements;
+				if (Type_ == OpenWifi::DBType::pgsql) {
+					v3Statements.push_back("alter table " + TableName_ + " alter column managementPolicy set not null;");
+					if (!ConstraintExists) {
+						v3Statements.push_back("alter table " + TableName_ +
+											   " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;");
+					}
+				} else if (Type_ == OpenWifi::DBType::mysql) {
+					v3Statements.push_back("alter table " + TableName_ + " modify managementPolicy varchar(64) not null;");
+					if (!ConstraintExists) {
+						v3Statements.push_back("alter table " + TableName_ +
+											   " add constraint fk_roles_management_policy foreign key (managementPolicy) references policies(id) on delete restrict;");
+					}
+				}
+
+				for (const auto &st : v3Statements) {
+					try {
+						auto Session = Pool_.get();
+						Session << st, Poco::Data::Keywords::now;
+					} catch (const Poco::Exception &E) {
+						Logger_.log(E);
+					}
+				}
+			}
+		}
+
 		return true;
 	}
 
