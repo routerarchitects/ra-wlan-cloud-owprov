@@ -690,10 +690,8 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 		}
 		status, body, err = client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleA_ID), rootToken, roleA)
 		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
-			// If role creation requires specific constraints, skip sub-test cleanly
 			client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", multiPolicyID), rootToken, nil)
-			t.Skipf("Skipping multi-role test due to role creation constraint in environment: status=%d, body=%s, err=%v", status, string(body), err)
-			return
+			t.Fatalf("Failed to create Role A for multi-role test: status=%d, body=%s, err=%v", status, string(body), err)
 		}
 		var createdRoleA struct {
 			ID string `json:"id"`
@@ -713,11 +711,9 @@ func TestManagementPolicyDeletionProtection(t *testing.T) {
 		}
 		status, body, err = client.DoRequest("POST", fmt.Sprintf("/managementRole/%s", roleB_ID), rootToken, roleB)
 		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
-			// If secondary user validation fails, delete Role A and clean up
 			client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", roleA_ID), rootToken, nil)
 			client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", multiPolicyID), rootToken, nil)
-			t.Skipf("Skipping multi-role test due to secondary user validation requirement in environment: %v", err)
-			return
+			t.Fatalf("Failed to create Role B for multi-role test: status=%d, body=%s, err=%v", status, string(body), err)
 		}
 		var createdRoleB struct {
 			ID string `json:"id"`
