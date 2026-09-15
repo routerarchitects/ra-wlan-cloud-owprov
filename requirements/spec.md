@@ -31,10 +31,9 @@ The horizontal scaling implementation must provide:
 ```text
 - active-active OWPROV instances
 - no REST/API request stickiness requirement
-- PostgreSQL as the source of truth for API data
-- Redis-backed shared cached reads with PostgreSQL fallback on cache miss
+- shared Redis cache-aside model with PostgreSQL as the source of truth
 - no API dependency on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches
-- Redis cache invalidation after committed POST/PUT/DELETE operations
+- cache invalidation after committed POST/PUT/DELETE operations
 - explicit Kafka delivery behavior per topic
 - safe database startup coordination
 - safe database writes under concurrent access
@@ -97,7 +96,7 @@ This implementation must not introduce the following assumptions:
 ```text
 - API request stickiness is required for normal API behavior.
 - A user, device, job, or WebSocket permanently belongs to one OWPROV instance.
-- Process-local memory is used as the source for API read, validation, authorization, search, or response decisions. Shared cached reads must use Redis, with PostgreSQL fallback on cache miss.
+- Process-local memory is used as the source for API read, validation, authorization, search, or response decisions. Cached API reads must follow the shared cache-aside model defined in Section 6.
 - Process-local background jobs are the only source of job state.
 - Local disk from one OWPROV container is required by another OWPROV container.
 - Kafka consumer group leadership is used as the owner of database startup or background jobs.
@@ -184,9 +183,7 @@ openwifi.redis.host=redis
 openwifi.redis.port=6379
 ```
 
-Redis is used as a shared cache layer.
-
-PostgreSQL remains the source of truth.
+Redis is used only as the shared cache layer; PostgreSQL remains the source of truth.
 
 Required behavior:
 
@@ -272,7 +269,7 @@ Implementation rules:
 
 In multi-instance mode, OWPROV API paths must not use process-local caches for API decisions.
 
-API handlers that currently depend on `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar in-memory structures must be changed to use Redis shared cache with PostgreSQL fallback.
+API handlers that currently depend on `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar in-memory structures must be changed to use the shared cache-aside model defined in Sections 6.2 and 6.3.
 
 If any of these cache classes remain in the codebase, they may be refactored to wrap Redis/PostgreSQL-backed behavior, but they must not keep process-local authoritative API decision state.
 
@@ -296,7 +293,7 @@ In multi-instance mode, OWPROV authorization-related API checks must not use pro
 
 Authorization checks may use Redis shared cache.
 
-If required authorization data is not present in Redis, the API path must read from PostgreSQL-backed state where OWPROV owns the data, or from the authoritative security source where that source owns the data.
+If required authorization data is not present in Redis, the API path must read from PostgreSQL-backed state.
 
 `AuthCache` may remain only if it is refactored to use Redis/PostgreSQL-backed state and does not control authorization from process-local memory.
 
@@ -304,7 +301,7 @@ Required behavior:
 
 ```text
 1. Authorization checks read from Redis shared cache where available.
-2. Redis cache misses read from PostgreSQL-backed state or the authoritative security source.
+2. Redis cache misses read from PostgreSQL-backed state.
 3. Permission, role, policy, token, and management-scope changes are persisted in PostgreSQL-backed state where OWPROV owns the data.
 4. After successful authorization-related writes, affected Redis authorization cache keys are invalidated.
 5. Authorization results must not depend on which OWPROV instance receives the request.
@@ -319,21 +316,21 @@ Required behavior:
 ```text
 1. A permission change handled by owprov-1 must affect a later API request requiring that permission when the request is handled by owprov-2.
 2. Revoked privileges must not remain accepted because owprov-2 has old process-local authorization state.
-3. Token removal or revocation must update PostgreSQL-backed state or the authoritative security source.
+3. Token removal or revocation must update PostgreSQL-backed state where OWPROV owns the affected token state.
 4. Affected Redis authorization cache keys must be invalidated after the committed change.
 5. Authorization checks must not rely on process-local cache synchronization between OWPROV instances.
 ```
 
 ### 7.3 Implementation direction
 
-For the first implementation, use Redis shared cache for cached authorization reads and PostgreSQL/authoritative-source fallback on cache miss.
+For the first implementation, use Redis shared cache for cached authorization reads and PostgreSQL reload on cache miss.
 
 Implementation rules:
 
 ```text
 1. Identify API handlers that currently use AuthCache for permission, role, policy, token, or management-scope decisions.
 2. Replace process-local AuthCache decision behavior with Redis shared cache reads.
-3. On Redis miss, reload authorization data from PostgreSQL-backed state or the authoritative security source.
+3. On Redis miss, reload authorization data from PostgreSQL-backed state.
 4. Persist permission, role, policy, token, and management-scope changes to PostgreSQL-backed state where OWPROV owns the data.
 5. Invalidate affected Redis authorization keys after successful PostgreSQL commit.
 6. Do not add a process-local AuthCache synchronization system between OWPROV instances.
@@ -396,7 +393,7 @@ For this phase, the preferred implementation is PostgreSQL-backed device type st
 
 The implementation should add or identify PostgreSQL-backed state that represents the accepted device type set or current accepted device type version.
 
-This state may be populated from the existing firmware/service-registry/download source, but API validation must read through Redis shared cache or PostgreSQL fallback instead of process-local `DeviceTypeCache`.
+This state may be populated from the existing firmware/service-registry/download source, but API validation must read through the shared cache-aside model instead of process-local `DeviceTypeCache`.
 
 Required behavior:
 
@@ -668,7 +665,7 @@ Required handler behavior:
    remove or mark stale only the announcing service instance.
 
 4. EVENT_REMOVE_TOKEN:
-   update PostgreSQL-backed token/auth state or the authoritative security source if OWPROV owns this token state, then invalidate affected Redis authorization cache keys after the committed change.
+   update PostgreSQL-backed token/auth state where OWPROV owns the affected token state, then invalidate affected Redis authorization cache keys after the committed change.
 ```
 
 Local `Services_` state may remain process-local only if every OWPROV instance receives every required `service_events` message through BroadcastConsumer.
@@ -690,7 +687,7 @@ Required behavior:
 
 2. The processing instance writes required durable state to PostgreSQL.
 
-3. Later API reads for that device can be served by any OWPROV instance through Redis shared cache or PostgreSQL fallback.
+3. Later API reads for that device can be served by any OWPROV instance through the shared cache-aside model.
 
 4. The device does not become permanently owned by the processing instance.
 
