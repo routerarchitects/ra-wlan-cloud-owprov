@@ -417,6 +417,15 @@ jobs:
             exit 1
           fi
 
+          # 5b. Verify roles_management_policy_idx index exists in catalog
+          INDEX_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND lower(tablename) = 'roles' AND lower(indexname) = 'roles_management_policy_idx';")
+          echo "roles_management_policy_idx index count: ${INDEX_COUNT}"
+          if [ "${INDEX_COUNT}" -ne 1 ]; then
+            echo "ERROR: roles_management_policy_idx index missing from catalog!"
+            exit 1
+          fi
+
           # 6. Verify FK enforcement: deleting referenced policy must fail
           echo "Testing foreign key enforcement on DELETE..."
           set +e

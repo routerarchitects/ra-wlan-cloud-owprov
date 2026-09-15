@@ -53,7 +53,8 @@ namespace OpenWifi {
 					"tags TEXT, "
 					"entity TEXT, "
 					"venue TEXT, "
-					"INDEX roles_name_index (name(255))"
+					"INDEX roles_name_index (name(255)), "
+					"INDEX roles_management_policy_idx (managementPolicy)"
 					");";
 				Session << Statement, Poco::Data::Keywords::now;
 
@@ -64,6 +65,15 @@ namespace OpenWifi {
 				Session << CheckIndex, Poco::Data::Keywords::into(HasIndex), Poco::Data::Keywords::now;
 				if (HasIndex == 0) {
 					Session << "CREATE INDEX roles_name_index ON " + TableName_ + " (name(255));", Poco::Data::Keywords::now;
+				}
+
+				uint64_t HasPolicyIndex = 0;
+				std::string CheckPolicyIndex =
+					"SELECT COUNT(*) FROM information_schema.statistics "
+					"WHERE table_schema = DATABASE() AND table_name = '" + TableName_ + "' AND index_name = 'roles_management_policy_idx'";
+				Session << CheckPolicyIndex, Poco::Data::Keywords::into(HasPolicyIndex), Poco::Data::Keywords::now;
+				if (HasPolicyIndex == 0) {
+					Session << "CREATE INDEX roles_management_policy_idx ON " + TableName_ + " (managementPolicy);", Poco::Data::Keywords::now;
 				}
 			} else {
 				std::string Statement =
@@ -86,6 +96,10 @@ namespace OpenWifi {
 				std::string IndexStatement =
 					"CREATE INDEX IF NOT EXISTS roles_name_index ON " + TableName_ + " (name);";
 				Session << IndexStatement, Poco::Data::Keywords::now;
+
+				std::string PolicyIndexStatement =
+					"CREATE INDEX IF NOT EXISTS roles_management_policy_idx ON " + TableName_ + " (managementPolicy);";
+				Session << PolicyIndexStatement, Poco::Data::Keywords::now;
 			}
 		} catch (const Poco::Exception &E) {
 			Logger_.error("Failure to create ManagementRoleDB table resources.");
@@ -217,6 +231,30 @@ namespace OpenWifi {
 					return false;
 				}
 			}
+
+			// 5. Ensure index on managementPolicy exists for fast FK checks and HasPolicy lookups
+			try {
+				auto Session = Pool_.get();
+				if (Type_ == OpenWifi::DBType::mysql) {
+					uint64_t HasPolicyIndex = 0;
+					std::string CheckPolicyIndex =
+						"SELECT COUNT(*) FROM information_schema.statistics "
+						"WHERE table_schema = DATABASE() AND table_name = '" + TableName_ + "' AND index_name = 'roles_management_policy_idx'";
+					Session << CheckPolicyIndex, Poco::Data::Keywords::into(HasPolicyIndex), Poco::Data::Keywords::now;
+					if (HasPolicyIndex == 0) {
+						Session << "CREATE INDEX roles_management_policy_idx ON " + TableName_ + " (managementPolicy);", Poco::Data::Keywords::now;
+					}
+				} else {
+					std::string PolicyIndexStatement =
+						"CREATE INDEX IF NOT EXISTS roles_management_policy_idx ON " + TableName_ + " (managementPolicy);";
+					Session << PolicyIndexStatement, Poco::Data::Keywords::now;
+				}
+			} catch (const Poco::Exception &E) {
+				Logger_.error(Poco::format("ManagementRoleDB::Upgrade: Failed to create index roles_management_policy_idx on table %s: %s",
+										   TableName_, E.displayText()));
+				return false;
+			}
+
 			to = 3;
 		}
 
