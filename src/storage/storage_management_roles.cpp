@@ -47,12 +47,13 @@ namespace OpenWifi {
 					"notes TEXT, "
 					"created BIGINT, "
 					"modified BIGINT, "
-					"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
+					"managementPolicy VARCHAR(64) NOT NULL, "
 					"users TEXT, "
 					"inUse TEXT, "
 					"tags TEXT, "
 					"entity TEXT, "
 					"venue TEXT, "
+					"CONSTRAINT fk_roles_management_policy FOREIGN KEY (managementPolicy) REFERENCES policies(id) ON DELETE RESTRICT, "
 					"INDEX roles_name_index (name(255)), "
 					"INDEX roles_management_policy_idx (managementPolicy)"
 					");";
@@ -84,12 +85,13 @@ namespace OpenWifi {
 					"notes TEXT, "
 					"created BIGINT, "
 					"modified BIGINT, "
-					"managementPolicy VARCHAR(64) NOT NULL REFERENCES policies(id) ON DELETE RESTRICT, "
+					"managementPolicy VARCHAR(64) NOT NULL, "
 					"users TEXT, "
 					"inUse TEXT, "
 					"tags TEXT, "
 					"entity TEXT, "
-					"venue TEXT"
+					"venue TEXT, "
+					"CONSTRAINT fk_roles_management_policy FOREIGN KEY (managementPolicy) REFERENCES policies(id) ON DELETE RESTRICT"
 					");";
 				Session << Statement, Poco::Data::Keywords::now;
 
@@ -209,8 +211,33 @@ namespace OpenWifi {
 					}
 				};
 
+				auto HasPolicyForeignKey = [this]() -> bool {
+					try {
+						std::size_t count = 0;
+						Poco::Data::Session Session = Pool_.get();
+						std::string SchemaFilter;
+						if (Type_ == OpenWifi::DBType::pgsql) {
+							SchemaFilter = " AND tc.table_schema = current_schema()";
+						} else if (Type_ == OpenWifi::DBType::mysql) {
+							SchemaFilter = " AND tc.table_schema = DATABASE()";
+						}
+						std::string CheckQ =
+							"SELECT COUNT(*) FROM information_schema.table_constraints tc "
+							"JOIN information_schema.key_column_usage kcu "
+							"ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema "
+							"WHERE lower(tc.table_name) = '" + Poco::toLower(TableName_) + "' "
+							"AND tc.constraint_type = 'FOREIGN KEY' "
+							"AND lower(kcu.column_name) = 'managementpolicy'" +
+							SchemaFilter + ";";
+						Session << CheckQ, Poco::Data::Keywords::into(count), Poco::Data::Keywords::now;
+						return count > 0;
+					} catch (...) {
+						return false;
+					}
+				};
+
 				// 3. Add constraint if not already present
-				if (!HasConstraint("fk_roles_management_policy")) {
+				if (!HasConstraint("fk_roles_management_policy") && !HasPolicyForeignKey()) {
 					try {
 						auto Session = Pool_.get();
 						std::string AddFkQuery =
@@ -225,7 +252,7 @@ namespace OpenWifi {
 				}
 
 				// 4. Post-Verification: Confirm constraint is registered in DB catalog
-				if (!HasConstraint("fk_roles_management_policy")) {
+				if (!HasConstraint("fk_roles_management_policy") && !HasPolicyForeignKey()) {
 					Logger_.error(Poco::format("ManagementRoleDB::Upgrade: Constraint fk_roles_management_policy is missing after migration on table %s",
 											   TableName_));
 					return false;
