@@ -16,7 +16,7 @@ OWPROV can already be placed behind a load balancer at the HTTP/deployment layer
 
 However, being reachable through a load balancer is not the same as being safe for multi-instance operation.
 
-Before OWPROV can be considered horizontally scalable, the service must not depend on per-process memory, per-process background jobs, per-process WebSocket state, unsafe Kafka delivery semantics, or unsafe concurrent database writes for correctness.
+Before OWPROV can be considered horizontally scalable, the service must not depend on process-local memory as an API decision source, per-process background jobs, per-process WebSocket state, unsafe Kafka delivery semantics, or unsafe concurrent database writes for correctness. Cached API reads must use a shared Redis cache, with PostgreSQL remaining the source of truth.
 
 ---
 
@@ -61,15 +61,17 @@ In scope:
 
 ```text
 1. Multi-instance API correctness.
-2. Database-first read correctness.
-3. Removal of API dependency on stale local in-memory caches.
-4. Authorization correctness across replicas.
-5. Kafka topic delivery semantics.
-6. Database startup and schema initialization coordination.
-7. Background job ownership and recovery.
-8. Database write concurrency protection.
-9. WebSocket and UI notification behavior across instances.
-10. Runtime files and generated assets.
+2. PostgreSQL source-of-truth behavior.
+3. Shared Redis cache-aside behavior for cached API reads.
+4. Removal of API dependency on stale process-local in-memory caches.
+5. Cache invalidation after committed POST/PUT/DELETE operations.
+6. Authorization correctness across replicas.
+7. Kafka topic delivery semantics.
+8. Database startup and schema initialization coordination.
+9. Background job ownership and recovery.
+10. Database write concurrency protection.
+11. WebSocket and UI notification behavior across instances.
+12. Runtime files and generated assets.
 ```
 ---
 
@@ -97,72 +99,133 @@ OWPROV must not require request stickiness for correctness.
 ```
 
 ---
-### 5.2: PostgreSQL must be the source of truth for OWPROV API reads and writes
+### 5.2: PostgreSQL must remain the source of truth, with Redis used for shared cached reads
 
 OWPROV must use PostgreSQL as the authoritative source of truth for API data in multi-instance mode.
+
+For API paths that require caching, OWPROV must use a shared Redis cache instead of process-local memory.
+
+The required read model is:
+
+```text
+API read request
+  -> check Redis shared cache
+  -> if cache hit, use cached value
+  -> if cache miss, read PostgreSQL
+  -> populate Redis
+  -> return result
+```
+
+The required write model is:
+
+```text
+POST / PUT / DELETE
+  -> write PostgreSQL inside the required transaction boundary
+  -> commit database change
+  -> invalidate related Redis cache keys
+  -> future reads reload fresh state from PostgreSQL on cache miss
+```
+
+Redis is a shared cache layer. PostgreSQL remains the permanent source of record.
 
 **Required behavior**:
 
 ```text
-1. Read APIs must fetch required service data from PostgreSQL.
-2. Write/update/delete APIs must persist changes to PostgreSQL.
-3. API behavior must be based on committed PostgreSQL state, not on which OWPROV instance receives the request.
+1. Cached API read paths must use Redis as the shared cache across all OWPROV instances.
+2. If a required record is not present in Redis, the API path must read the record from PostgreSQL.
+3. PostgreSQL results loaded on cache miss may be written back to Redis using deterministic cache keys.
+4. Write/update/delete APIs must persist changes to PostgreSQL before returning success.
+5. After a successful PostgreSQL commit, OWPROV must invalidate all Redis cache keys affected by that write.
+6. Redis must not be updated before the PostgreSQL transaction commits.
+7. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
 ```
 
 **Acceptance criteria**:
 
 ```text
-1. Data created/updated through owprov-1 is readable through owprov-2 from PostgreSQL.
-2. Restarting one OWPROV instance does not change the data view of another instance.
-3. API behavior is the same regardless of which OWPROV replica receives the request.
+1. Data created/updated through owprov-1 is persisted in PostgreSQL.
+2. Related Redis cache keys are invalidated after the PostgreSQL commit.
+3. A later read through owprov-2 either reads fresh data from Redis or reloads it from PostgreSQL on cache miss.
+4. Restarting one OWPROV instance does not change the data view of another instance.
+5. API behavior is the same regardless of which OWPROV replica receives the request.
 ```
 
 ---
 
-## 6. Local In-Memory Cache Requirements
+## 6. Shared Redis Cache Requirements
 
 ### 6.1: API behavior must not depend on process-local in-memory caches
 
 OWPROV currently has process-local in-memory caches such as `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar cache structures.
 
-For multi-instance operation, these caches may exist only as performance helpers. API reads, validation, authorization, search, and API response decisions must use shared authoritative state instead of stale process-local cache state.
+For multi-instance operation, these caches must not be used as process-local API decision sources.
 
-The API paths that currently depend on these caches must be changed so a stale local cache cannot change the API result.
+API paths that require cached reads must use a shared Redis-backed cache-aside model.
+
+The required model is:
+
+```text
+Read path:
+1. Check Redis shared cache.
+2. If the record exists in Redis, use it.
+3. If the record does not exist in Redis, read it from PostgreSQL.
+4. Populate Redis from the PostgreSQL result where caching is allowed.
+5. Return the API result.
+```
+
+```text
+Write path:
+1. Validate the request.
+2. Write the change to PostgreSQL inside the required transaction boundary.
+3. Commit the PostgreSQL transaction.
+4. Invalidate affected Redis cache keys.
+5. Return the API response.
+```
+
+PostgreSQL remains the source of truth.
+
+Redis is a shared cache layer used by all OWPROV instances.
 
 **Required behavior:**
 
 ```text
-1. API read paths must not rely on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches as the only source for required API data.
-2. API write/update/delete paths must persist required state to PostgreSQL
-3. Authorization-related API checks must fetch required authorization data from PostgreSQL-backed state instead of local AuthCache.
-4. Serial number existence, uniqueness, and search behavior must use PostgreSQL-backed data instead of local SerialNumberCache.
-5. Device type validation used by APIs must use PostgreSQL-backed data instead of local DeviceTypeCache.
+1. API read paths must not rely on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches as the decision source.
+2. Cached API reads must use Redis as the shared cache across OWPROV instances.
+3. Cache misses must be loaded from PostgreSQL.
+4. API write/update/delete paths must persist required state to PostgreSQL.
+5. After successful PostgreSQL commit, affected Redis cache keys must be invalidated.
+6. Redis invalidation must not happen before the PostgreSQL transaction commits.
+7. API behavior must not require local cache synchronization between OWPROV instances.
 ```
 
 **Acceptance criteria:**
 
 ```text
-1. API reads that previously used local caches are changed to fetch required data from PostgreSQL.
-2. Creating or updating data through owprov-1 does not require updating a local cache on owprov-2 for owprov-2 to return the correct API result.
-3. Restarting an OWPROV instance does not require rebuilding local API caches before API reads work correctly.
-4. A permission change, serial number change, or device type change is reflected through PostgreSQL-backed reads, not through local cache synchronization.
+1. API reads that previously used local caches are changed to use Redis shared cache with PostgreSQL fallback.
+2. Creating or updating data through owprov-1 does not require updating a process-local cache on owprov-2.
+3. A read through owprov-2 observes fresh data through Redis or reloads from PostgreSQL on cache miss.
+4. Restarting an OWPROV instance does not require rebuilding local API caches before API reads work correctly.
 5. No API response depends on stale process-local cache state.
 ```
 
 ---
 
-### 6.2: Authorization decisions must use PostgreSQL-backed state
+### 6.2: Authorization decisions must use Redis shared cache with PostgreSQL
 
 Authorization must not depend on which OWPROV instance receives the request.
-For multi-instance operation, authorization-related API checks must not depend on process-local `AuthCache` state. If a permission, role, policy, token, or management-scope value is changed through one OWPROV instance, later authorization checks handled by another OWPROV instance must use PostgreSQL-backed state.
 
+For multi-instance operation, authorization-related API checks must not depend on process-local `AuthCache` state.
+
+Authorization data may be cached in Redis, but the fallback/source-of-truth data must come from PostgreSQL-backed state where OWPROV owns the data.
 
 **Required behavior:**
 
 ```text
-1. Authorization-related API checks must fetch required authorization data from PostgreSQL-backed state.
-2. Permission, role, policy, token, and management-scope changes must be persisted in PostgreSQL.
-3. Authorization behavior must not require local cache synchronization between OWPROV instances.
+1. Authorization-related API checks may read from Redis shared cache.
+2. If required authorization data is not present in Redis, the API path must read from PostgreSQL-backed state.
+3. Permission, role, policy, token, and management-scope changes owned by OWPROV must be persisted in PostgreSQL.
+4. After a successful authorization-related write, affected Redis authorization cache keys must be invalidated.
+5. Authorization behavior must not require process-local AuthCache synchronization between OWPROV instances.
 ```
 
 **Acceptance criteria:**
@@ -171,32 +234,40 @@ For multi-instance operation, authorization-related API checks must not depend o
 1. Start owprov-1 and owprov-2.
 2. Change or revoke a user's permission through owprov-1.
 3. Confirm the permission change is persisted in PostgreSQL.
-4. Send an API request that requires that permission to owprov-2.
-5. owprov-2 authorizes or rejects the request using PostgreSQL-backed authorization state, not local AuthCache state.
+4. Confirm affected Redis authorization cache keys are invalidated.
+5. Send an API request that requires that permission to owprov-2.
+6. owprov-2 authorizes or rejects the request using Redis shared cache or a PostgreSQL/authoritative-source reload, not local AuthCache state.
 ```
 
 ---
 
-### 6.3: Serial number and inventory behavior must be database-first
+### 6.3: Serial number and inventory behavior must use Redis cache with PostgreSQL-enforced correctness
 
-Serial number and inventory correctness must be enforced through PostgreSQL.
+Serial number and inventory read/search behavior may use Redis shared cache.
+
+Serial number uniqueness, duplicate prevention, and durable inventory correctness must still be enforced through PostgreSQL.
 
 **Required behavior:**
 
 ```text
-1. Serial number existence checks must use PostgreSQL or PostgreSQL constraints.
-2. Duplicate prevention must not depend on local process memory.
-3. Inventory read/search behavior must return consistent results across replicas.
-4. Database constraints must be authoritative where uniqueness matters.
+1. Serial number read/search paths may use Redis shared cache.
+2. Redis cache misses must be loaded from PostgreSQL.
+3. Serial number uniqueness checks must be enforced through PostgreSQL constraints, transactions, or safe database-level checks.
+4. Duplicate prevention must not depend on local process memory or Redis alone.
+5. Inventory write/update/delete paths must persist to PostgreSQL and invalidate affected Redis keys after commit.
+6. Database constraints must be authoritative where uniqueness matters.
 ```
 
 **Acceptance criteria:**
 
 ```text
 1. A serial created through owprov-1 cannot be duplicated through owprov-2.
-2. A serial removed through owprov-1 is not treated as valid by owprov-2 only because of stale memory.
+2. A serial removed through owprov-1 is not treated as valid by owprov-2 because of stale local memory.
 3. Inventory search results are consistent across replicas for the same committed database state.
+4. Redis cache misses reload serial/inventory data from PostgreSQL.
+5. Redis keys affected by inventory writes are invalidated after PostgreSQL commit.
 ```
+
 
 ---
 
@@ -553,16 +624,18 @@ OWPROV horizontal scaling is acceptable when:
 ```text
 1. Multiple OWPROV instances can run at the same time in Docker Compose.
 2. Any healthy OWPROV instance can serve API requests without sticky routing.
-3. API reads and writes use PostgreSQL as the source of truth.
-4. API behavior does not depend on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches.
-5. Kafka topics consumed by OWPROV are registered on the correct consumer type.
-6. service_events is received by every OWPROV instance.
-7. connection messages are processed by only one OWPROV instance in the service group.
-8. Database startup and schema initialization do not race between instances.
-9. Concurrent database writes do not silently lose updates.
-10. Background jobs can be observed and recovered through durable state.
-11. Runtime-downloaded files remain consistent across instances.
-12. Conditional rate limiting behavior is defined only for APIs where rate limiting is enabled.
+3. PostgreSQL remains the source of truth for API data.
+4. Cached API reads use Redis shared cache with PostgreSQL fallback on cache miss.
+5. API write/update/delete operations commit to PostgreSQL and invalidate affected Redis keys after commit.
+6. API behavior does not depend on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches.
+7. Kafka topics consumed by OWPROV are registered on the correct consumer type.
+8. service_events is received by every OWPROV instance.
+9. connection messages are processed by only one OWPROV instance in the service group.
+10. Database startup and schema initialization do not race between instances.
+11. Concurrent database writes do not silently lose updates.
+12. Background jobs can be observed and recovered through durable state.
+13. Runtime-downloaded files remain consistent across instances.
+14. Conditional rate limiting behavior is defined only for APIs where rate limiting is enabled.
 ```
 ---
 
@@ -573,14 +646,16 @@ Before `spec.md` or implementation begins, reviewers should confirm:
 ```text
 1. The requirements correctly describe Docker Compose multi-instance OWPROV.
 2. Kubernetes/Helm topics are intentionally excluded.
-3. DB-first behavior is accepted for correctness-critical reads.
-4. Removing correctness dependency on local caches is accepted.
-5. Kafka Group vs Broadcast semantics are accepted as a requirement.
-6. Background job durable ownership is accepted as a requirement.
-7. Database startup coordination is accepted as a requirement.
-8. Database write concurrency protection is accepted as a requirement.
-9. WebSocket/notification cross-instance behavior is accepted as a requirement.
-10. Runtime file handling is accepted as a requirement.
+3. PostgreSQL source-of-truth behavior is accepted.
+4. Redis shared cache-aside behavior is accepted for cached API reads.
+5. Cache invalidation after committed POST/PUT/DELETE operations is accepted.
+6. Removing correctness dependency on process-local caches is accepted.
+7. Kafka Group vs Broadcast semantics are accepted as a requirement.
+8. Background job durable ownership is accepted as a requirement.
+9. Database startup coordination is accepted as a requirement.
+10. Database write concurrency protection is accepted as a requirement.
+11. WebSocket/notification cross-instance behavior is accepted as a requirement.
+12. Runtime file handling is accepted as a requirement.
 
 ```
 ## 17. Non-Goals
@@ -596,7 +671,7 @@ This document does not define:
 7. Kubernetes, Helm, or Kubernetes-specific deployment behavior.
 8. Request stickiness between the load balancer and OWPROV instances.
 9. Replacing PostgreSQL as the source of truth for OWPROV API reads and writes.
-10. Adding a shared cache layer for normal OWPROV API read/write correctness.
+10. Using Redis as the durable source of truth instead of PostgreSQL.
 11. A shared data directory for runtime-downloaded files, as long as each instance independently downloads and validates equivalent files.
 12. Enabling rate limiting for every OWPROV API.
 13. Performance tuning, benchmarking targets, or capacity planning.

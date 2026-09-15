@@ -30,8 +30,10 @@ The horizontal scaling implementation must provide:
 ```text
 - active-active OWPROV instances
 - no REST/API request stickiness requirement
-- PostgreSQL-backed API reads and writes
+- PostgreSQL as the source of truth for API data
+- Redis-backed shared cached reads with PostgreSQL fallback on cache miss
 - no API dependency on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches
+- Redis cache invalidation after committed POST/PUT/DELETE operations
 - explicit Kafka delivery behavior per topic
 - safe database startup coordination
 - safe database writes under concurrent access
@@ -70,6 +72,7 @@ Each OWPROV instance must use the same:
 
 ```text
 - PostgreSQL database
+- Redis shared cache
 - Kafka cluster
 - shared public OWPROV endpoint
 - shared service configuration where logical service identity is required
@@ -93,7 +96,7 @@ This implementation must not introduce the following assumptions:
 ```text
 - API request stickiness is required for normal API behavior.
 - A user, device, job, or WebSocket permanently belongs to one OWPROV instance.
-- Process-local memory is used as the source for API read, validation, authorization, search, or response decisions.
+- Process-local memory is used as the source for API read, validation, authorization, search, or response decisions. Shared cached reads must use Redis, with PostgreSQL fallback on cache miss.
 - Process-local background jobs are the only source of job state.
 - Local disk from one OWPROV container is required by another OWPROV container.
 - Kafka consumer group leadership is used as the owner of database startup or background jobs.
@@ -169,49 +172,116 @@ owprov-2-producer
 
 `client.id` is for observability and must not be used as a substitute for delivery semantics.
 
----
+### 5.5 Redis shared cache configuration
 
-## 6. API Data Access Specification
+All OWPROV instances must use the same Redis instance or Redis cluster for shared cached API reads.
 
-### 6.1 PostgreSQL-backed API behavior
-
-OWPROV API reads and writes must use PostgreSQL as the authoritative source for OWPROV API data in multi-instance mode.
-
-Implementation rules:
+Example:
 
 ```text
-1. API read handlers must fetch required domain data from PostgreSQL.
-
-2. API write/update/delete handlers must persist required domain changes to PostgreSQL before returning success.
-
-3. A follow-up request routed to another OWPROV instance must observe the committed PostgreSQL state.
-
-4. API behavior must not depend on which OWPROV instance handled the previous request.
-
-5. Restarting one OWPROV instance must not change the API data visible from another OWPROV instance.
+openwifi.redis.host=redis
+openwifi.redis.port=6379
 ```
 
-### 6.2 Process-local cache usage
+Redis is used as a shared cache layer.
 
-In multi-instance mode, OWPROV API paths must not use process-local caches for API decisions.
-
-API handlers that currently depend on `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar in-memory structures must be changed to fetch the required data from PostgreSQL-backed state.
-
-For the first implementation, `AuthCache`, `SerialNumberCache`, and `DeviceTypeCache` must be removed from API read, validation, authorization, search, and response decision paths.
-
-If any of these cache classes remain in the codebase, they must not be used by API handlers to decide the API result.
+PostgreSQL remains the source of truth.
 
 Required behavior:
 
 ```text
-1. Authorization checks must not use AuthCache as the decision source.
+1. Every OWPROV instance uses the same Redis cache namespace.
+2. Redis keys are deterministic and do not include process-local instance identity unless the data is intentionally instance-scoped.
+3. Cache misses reload data from PostgreSQL.
+4. POST/PUT/DELETE handlers invalidate affected Redis keys only after successful PostgreSQL commit.
+5. Redis failure must not cause stale process-local cache fallback.
+``` 
 
-2. Serial-number existence, uniqueness, and search behavior must not use SerialNumberCache as the decision source.
+---
 
-3. Device type validation must not use DeviceTypeCache as the decision source.
+## 6. API Data Access And Shared Cache Specification
 
-4. API response decisions must be based on PostgreSQL-backed state.
+### 6.1 PostgreSQL source of truth
 
+PostgreSQL remains the authoritative source of truth for OWPROV API data in multi-instance mode.
+
+Redis may be used for shared cached reads, but Redis must not become the durable source of OWPROV data.
+
+Implementation rules:
+
+```text
+1. API write/update/delete handlers must persist required domain changes to PostgreSQL before returning success.
+2. PostgreSQL transaction boundaries must be defined before related Redis cache invalidation happens.
+3. A follow-up request routed to another OWPROV instance must observe the committed PostgreSQL state through Redis or PostgreSQL fallback.
+4. API behavior must not depend on which OWPROV instance handled the previous request.
+5. Restarting one OWPROV instance must not change the API data visible from another OWPROV instance.
+```
+
+### 6.2 Redis cache-aside read behavior
+
+Cached API read paths must use Redis as a shared cache across OWPROV instances.
+
+Read path:
+
+```text
+1. Build deterministic Redis cache key.
+2. Read from Redis.
+3. If Redis has the value, use it.
+4. If Redis does not have the value, read from PostgreSQL.
+5. Store the PostgreSQL result in Redis where caching is allowed.
+6. Return the API result.
+```
+
+Implementation rules:
+
+```text
+1. Redis keys must be deterministic and shared across OWPROV instances.
+2. Cache values must represent PostgreSQL-backed data or data derived from PostgreSQL-backed state.
+3. Cache misses must reload from PostgreSQL.
+4. Cache TTLs must be defined per data type.
+5. API behavior must not fall back to process-local cache state when Redis misses.
+```
+
+### 6.3 Write behavior and cache invalidation
+
+Write paths must update PostgreSQL first and invalidate Redis after successful commit.
+
+Write path:
+
+```text
+1. Validate request.
+2. Start required PostgreSQL transaction.
+3. Write PostgreSQL changes.
+4. Commit PostgreSQL transaction.
+5. Invalidate affected Redis cache keys.
+6. Return API response.
+```
+
+Implementation rules:
+
+```text
+1. Redis must not be updated before PostgreSQL commit.
+2. Failed PostgreSQL writes must not invalidate or overwrite Redis cache entries.
+3. POST/PUT/DELETE handlers must identify affected Redis keys.
+4. The preferred first implementation is cache invalidation, not direct Redis mutation.
+5. The next read repopulates Redis from PostgreSQL on cache miss.
+```
+
+### 6.4 Process-local cache usage
+
+In multi-instance mode, OWPROV API paths must not use process-local caches for API decisions.
+
+API handlers that currently depend on `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar in-memory structures must be changed to use Redis shared cache with PostgreSQL fallback.
+
+If any of these cache classes remain in the codebase, they may be refactored to wrap Redis/PostgreSQL-backed behavior, but they must not keep process-local authoritative API decision state.
+
+Required behavior:
+
+```text
+1. Authorization checks must not use process-local AuthCache as the decision source.
+2. Serial-number existence, uniqueness, and search behavior must not use process-local SerialNumberCache as the decision source.
+3. Device type validation must not use process-local DeviceTypeCache as the decision source.
+4. API response decisions must use Redis shared cache or PostgreSQL-backed state.
 5. Updating one OWPROV instance must not require updating another instance's local cache before the second instance can return the correct API result.
 ```
 
@@ -221,56 +291,51 @@ Required behavior:
 
 ### 7.1 AuthCache behavior
 
-In multi-instance mode, OWPROV authorization-related API checks must not use `AuthCache` as the decision source.
+In multi-instance mode, OWPROV authorization-related API checks must not use process-local `AuthCache` as the decision source.
 
-Any API path that currently depends on `AuthCache` for permission, role, policy, token, or management-scope decisions must be changed to read the required authorization state from PostgreSQL-backed state or the authoritative security source during the request.
+Authorization checks may use Redis shared cache.
 
-`AuthCache` must be removed from authorization decision paths. If any `AuthCache` code remains, it must not control API authorization results in multi-instance mode.
+If required authorization data is not present in Redis, the API path must read from PostgreSQL-backed state where OWPROV owns the data, or from the authoritative security source where that source owns the data.
+
+`AuthCache` may remain only if it is refactored to use Redis/PostgreSQL-backed state and does not control authorization from process-local memory.
 
 Required behavior:
 
 ```text
-1. Authorization checks read required authorization state from PostgreSQL-backed state or the authoritative security source.
-
-2. Permission, role, policy, token, and management-scope changes are visible to later requests handled by any OWPROV instance.
-
-3. A request handled by owprov-2 must not be allowed only because owprov-2 still has old AuthCache state.
-
-4. Authorization results must not depend on which OWPROV instance receives the request.
+1. Authorization checks read from Redis shared cache where available.
+2. Redis cache misses read from PostgreSQL-backed state or the authoritative security source.
+3. Permission, role, policy, token, and management-scope changes are persisted in PostgreSQL-backed state where OWPROV owns the data.
+4. After successful authorization-related writes, affected Redis authorization cache keys are invalidated.
+5. Authorization results must not depend on which OWPROV instance receives the request.
 ```
 
 ### 7.2 Revocation behavior
 
-Permission, role, policy, token, or management-scope changes must be visible to all OWPROV instances through PostgreSQL-backed state or the authoritative security source.
+Permission, role, policy, token, or management-scope changes must be visible to all OWPROV instances.
 
 Required behavior:
 
 ```text
 1. A permission change handled by owprov-1 must affect a later API request requiring that permission when the request is handled by owprov-2.
-
 2. Revoked privileges must not remain accepted because owprov-2 has old process-local authorization state.
-
 3. Token removal or revocation must update PostgreSQL-backed state or the authoritative security source.
-
-4. Authorization checks must not rely on local cache synchronization between OWPROV instances.
+4. Affected Redis authorization cache keys must be invalidated after the committed change.
+5. Authorization checks must not rely on process-local cache synchronization between OWPROV instances.
 ```
 
 ### 7.3 Implementation direction
 
-For the first implementation, use database/shared-state reads for authorization decisions.
+For the first implementation, use Redis shared cache for cached authorization reads and PostgreSQL/authoritative-source fallback on cache miss.
 
 Implementation rules:
 
 ```text
 1. Identify API handlers that currently use AuthCache for permission, role, policy, token, or management-scope decisions.
-
-2. Replace those reads with PostgreSQL-backed queries or calls to the authoritative security source.
-
-3. Persist permission, role, policy, token, and management-scope changes to PostgreSQL-backed state where OWPROV owns the data.
-
-4. Do not add a cluster-wide AuthCache invalidation system in this phase.
-
-5. Any remaining AuthCache usage must be outside authorization decision paths.
+2. Replace process-local AuthCache decision behavior with Redis shared cache reads.
+3. On Redis miss, reload authorization data from PostgreSQL-backed state or the authoritative security source.
+4. Persist permission, role, policy, token, and management-scope changes to PostgreSQL-backed state where OWPROV owns the data.
+5. Invalidate affected Redis authorization keys after successful PostgreSQL commit.
+6. Do not add a process-local AuthCache synchronization system between OWPROV instances.
 ```
 
 ---
@@ -279,36 +344,37 @@ Implementation rules:
 
 ### 8.1 SerialNumberCache behavior
 
-In multi-instance mode, OWPROV API paths must not use `SerialNumberCache` as the decision source for serial-number existence, duplicate prevention, or inventory search behavior.
+In multi-instance mode, OWPROV API paths must not use process-local `SerialNumberCache` as the decision source for serial-number existence, duplicate prevention, or inventory search behavior.
+
+Serial number and inventory cached reads may use Redis shared cache.
+
+Redis cache misses must reload from PostgreSQL.
 
 Implementation rules:
 
 ```text
-1. Serial-number existence checks must query PostgreSQL or rely on PostgreSQL constraints.
-
-2. Duplicate serial creation must be prevented by PostgreSQL constraints or transactional checks.
-
-3. Inventory search/read behavior must return results from committed PostgreSQL state.
-
-4. API handlers must not update SerialNumberCache as part of making API state valid.
-
-5. If SerialNumberCache code remains, it must not control API results in multi-instance mode.
+1. Serial-number read/search paths may use Redis shared cache.
+2. Redis cache misses must query PostgreSQL.
+3. Duplicate serial creation must be prevented by PostgreSQL constraints or transactional checks.
+4. Inventory read/search behavior must return results from Redis shared cache or committed PostgreSQL state.
+5. API handlers must not update process-local SerialNumberCache as part of making API state valid.
+6. After inventory writes, affected Redis serial/inventory keys must be invalidated after PostgreSQL commit.
 ```
 
 ### 8.2 Required database enforcement
 
 The implementation must audit the inventory table/index behavior and ensure serial-number uniqueness rules are enforced at the database layer where the product requires uniqueness.
 
-If serial numbers must be unique, the implementation must add or verify a PostgreSQL unique constraint or equivalent safe transactional protection.
+Redis must not be the only protection for uniqueness.
 
 Required behavior:
 
 ```text
 1. A serial created through owprov-1 cannot be duplicated through owprov-2.
-
-2. A serial removed through owprov-1 is not treated as valid by owprov-2 because of old local memory.
-
-3. Inventory search results are based on the same committed PostgreSQL state across replicas.
+2. A serial removed through owprov-1 is not treated as valid by owprov-2 because of old process-local memory.
+3. Inventory search results are based on Redis shared cache or the same committed PostgreSQL state across replicas.
+4. Redis cache misses reload inventory data from PostgreSQL.
+5. Redis keys affected by serial/inventory changes are invalidated after PostgreSQL commit.
 ```
 
 ---
@@ -317,30 +383,30 @@ Required behavior:
 
 ### 9.1 DeviceTypeCache behavior
 
-In multi-instance mode, OWPROV API paths must not use `DeviceTypeCache` as the decision source for device type validation.
+In multi-instance mode, OWPROV API paths must not use process-local `DeviceTypeCache` as the decision source for device type validation.
 
-The first implementation must make device type validation read from PostgreSQL-backed state.
+Device type validation may use Redis shared cache.
 
-For this phase, the preferred implementation is PostgreSQL-backed device type state.
+Redis cache misses must reload the accepted device type data from PostgreSQL-backed state.
 
-### 9.2 PostgreSQL-backed device type state
+For this phase, the preferred implementation is PostgreSQL-backed device type state with Redis shared cache in front of it.
+
+### 9.2 PostgreSQL-backed device type state with Redis cache
 
 The implementation should add or identify PostgreSQL-backed state that represents the accepted device type set or current accepted device type version.
 
-This state may be populated from the existing firmware/service-registry/download source, but API validation must read from the shared state instead of `DeviceTypeCache`.
+This state may be populated from the existing firmware/service-registry/download source, but API validation must read through Redis shared cache or PostgreSQL fallback instead of process-local `DeviceTypeCache`.
 
 Required behavior:
 
 ```text
-1. Every OWPROV instance validates device types against the same PostgreSQL-backed accepted device type state.
-
+1. Every OWPROV instance validates device types against Redis shared cache or the same PostgreSQL-backed accepted device type state.
 2. Device type updates are persisted before API validation depends on them.
-
-3. Device type validation does not require local cache synchronization between OWPROV instances.
-
-4. A failed device type refresh is visible in logs or health/debug output.
-
-5. If device type data is downloaded or fetched from another service, the fetched version/checksum must be stored or compared so all instances converge on the same version.
+3. Device type cache misses reload from PostgreSQL-backed state.
+4. Device type changes invalidate affected Redis keys after PostgreSQL commit.
+5. Device type validation does not require process-local cache synchronization between OWPROV instances.
+6. A failed device type refresh is visible in logs or health/debug output.
+7. If device type data is downloaded or fetched from another service, the fetched version/checksum must be stored or compared so all instances converge on the same version.
 ```
 
 ---
@@ -810,35 +876,29 @@ Long-running jobs must be represented in PostgreSQL.
 Examples:
 
 ```text
-- venue configuration update
-- firmware upgrade
-- device reboot
-- other long-running device operations
+- venue configuration update (VenueConfigUpdater)
+- firmware upgrade (VenueUpgrade)
+- device reboot (VenueRebooter)
 ```
 
 ### 15.2 Job table
 
-The first implementation should add a durable job/operation table.
+The implementation adds a durable job table in PostgreSQL.
 
 Minimum fields:
 
 ```text
-id
-job_type
-parameters
-status
-owner_instance_id
-lease_expires_at
-retry_count
-max_retries
-progress
-result
-error_message
-created_at
-updated_at
-started_at
-completed_at
-correlation_id
+id                  -- UUID primary key
+job_type            -- "VenueRebooter", "VenueUpgrade", "VenueConfigUpdater"
+user_id             -- User email who initiated the job
+parameters          -- JSON array/object of parameters (e.g. venueId, revision)
+status              -- pending, running, succeeded, failed
+owner_instance_id   -- ID of OWPROV instance executing the job
+result              -- JSON result details (e.g. success/failed device lists)
+error_message       -- Error text if the job failed
+created_at          -- Timestamp when job was submitted
+started_at          -- Timestamp when execution began
+completed_at        -- Timestamp when finished
 ```
 
 Allowed statuses:
@@ -848,97 +908,29 @@ pending
 running
 succeeded
 failed
-cancelled
-retry_wait
 ```
 
-### 15.3 Job creation
+### 15.3 Job lifecycle
 
 When a REST request starts a long-running action:
 
 ```text
 1. Validate the request.
-2. Create a durable job row in PostgreSQL.
-3. Return the job id to the caller.
-4. Optionally publish a Kafka wake-up event.
+2. Insert a row into the jobs table with status 'running', owner_instance_id, and user_id.
+3. Return the jobId to the caller immediately via HTTP.
+4. Execute the operation in the background thread.
+5. Upon completion, update status to 'succeeded' or 'failed', record the result, and deliver the notification (via Option A or Option B in Section 16).
 ```
 
-Kafka may wake workers, but Kafka is not the source of job ownership.
+### 15.4 Job query endpoint
 
-### 15.4 Job claiming
-
-Each OWPROV instance may run a worker loop.
-
-A worker claims jobs through an atomic PostgreSQL update.
-
-Example pattern:
+Any OWPROV instance can serve job status queries from PostgreSQL:
 
 ```text
-UPDATE jobs
-SET
-  status = 'running',
-  owner_instance_id = :instance_id,
-  lease_expires_at = :now + :lease_interval,
-  started_at = COALESCE(started_at, :now),
-  updated_at = :now
-WHERE id = :job_id
-  AND status IN ('pending', 'retry_wait')
-RETURNING *;
+GET /api/v1/jobs/{id}
 ```
 
-Only the instance that receives a returned row owns the job.
-
-### 15.5 Lease renewal
-
-While running a job, the owner must renew the lease.
-
-Required behavior:
-
-```text
-1. Running jobs have a lease expiry.
-
-2. The owner periodically updates lease_expires_at.
-
-3. If the owner stops renewing the lease, another instance may reclaim the job after expiry.
-
-4. A job must not be immediately duplicated while the original owner may still be alive.
-```
-
-### 15.6 Reclaim behavior
-
-Expired running jobs may be reclaimed only according to durable retry rules.
-
-Required behavior:
-
-```text
-1. Reclaim checks status and lease expiry in PostgreSQL.
-
-2. Retry count is incremented durably.
-
-3. Reclaim is logged with old owner, new owner, job id, and reason.
-
-4. Device-side operations are not blindly repeated unless idempotent.
-```
-
-### 15.7 Device-side idempotency
-
-Device-side actions should include a stable correlation id where possible.
-
-Examples:
-
-```text
-job_id
-correlation_id
-operation_id
-```
-
-The job row must record enough execution state to decide whether retry is safe.
-
-### 15.8 Job query behavior
-
-Any OWPROV instance must be able to serve job status queries from PostgreSQL.
-
-The UI must not need to query the instance that created or owns the job.
+The UI or API client can query any instance to inspect job status and results directly from PostgreSQL without requiring affinity to the instance that created or executed the job.
 
 ---
 
@@ -950,9 +942,13 @@ A browser may have a WebSocket connected to `owprov-1`, while the action or job 
 
 Therefore, local WebSocket maps are not enough for multi-instance notification delivery.
 
-### 16.2 Notification bus
+Progress and completion may be delivered via either real-time cross-instance notification push (Option A) or durable queryable job status polling (Option B).
 
-The first implementation should use Kafka as the cross-instance notification bus.
+### 16.2 Delivery options
+
+#### Option A: Kafka-based notification bus (Real-time push)
+
+The primary push-based implementation uses Kafka as the cross-instance notification bus.
 
 Recommended topic:
 
@@ -968,30 +964,57 @@ broadcast/fan-out
 
 Each OWPROV instance must consume notification events through BroadcastConsumer so it can deliver relevant notifications to its own local WebSocket clients.
 
-### 16.3 Notification event format
+#### Option B: Non-Kafka durable job status polling (REST pull alternative)
 
-Minimum fields:
-
-```text
-event_id
-event_type
-user_id
-tenant/entity/venue context, if applicable
-job_id, if applicable
-payload
-created_at
-source_instance_id
-delivery_expectation
-```
-
-Allowed delivery expectation values:
+If Kafka is not used for cross-instance UI notification delivery:
 
 ```text
-best_effort
-durable_status_backed
+1. Background workers record job progress and completion exclusively in the shared PostgreSQL jobs table.
+2. The UI client automatically polls the job status endpoint (e.g., GET /api/v1/jobs/{id}) in the background every 2–3 seconds until a terminal state is reached.
+3. Any OWPROV instance can serve status queries directly from PostgreSQL.
+4. No Kafka notification topic or cross-instance WebSocket fan-out is required for this approach.
 ```
 
-### 16.4 Delivery behavior
+### 16.3 Notification event format (Option A)
+
+The Kafka notification message should directly wrap OWPROV's existing `WebSocketNotification` payload:
+
+```text
+user: target user email (or empty string for broadcast to all users)
+type_id: notification type id (e.g. 1000 = fw_upgrade, 2000 = config_update, 3000 = rebooter)
+payload: JSON object containing { notification_id, type_id, content }
+source_instance_id: instance identifier that generated the event
+created_at: timestamp
+```
+
+Example Kafka JSON message:
+
+```json
+{
+  "user": "user@example.com",
+  "type_id": 3000,
+  "source_instance_id": "owprov-2",
+  "created_at": 1726400000,
+  "payload": {
+    "notification_id": 105,
+    "type_id": 3000,
+    "content": {
+      "title": "Venue Reboot",
+      "jobId": "a1b2c3d4-...",
+      "details": "Job Completed: 50 rebooted, 0 failed.",
+      "timeStamp": 1726400000,
+      "success": ["001122334455"],
+      "warning": []
+    }
+  }
+}
+```
+
+When an OWPROV instance consumes this message:
+- If `user` is non-empty: calls `UI_WebSocketClientServer()->SendToUser(user, type_id, payload_str)`
+- If `user` is empty: calls `UI_WebSocketClientServer()->SendToAll(type_id, payload_str)`
+
+### 16.4 Delivery behavior (Option A)
 
 Required behavior:
 
@@ -1008,6 +1031,15 @@ Required behavior:
 ```
 
 Sticky WebSocket routing may be used for connection stability, but it is not the notification delivery mechanism.
+
+### 16.5 Solution comparison
+
+| Attribute | Option A: Kafka Notification Bus (Push) | Option B: PostgreSQL Job Polling (Pull) |
+| :--- | :--- | :--- |
+| **Delivery Model** | Real-time WebSocket push | Automated background HTTP polling |
+| **Kafka Changes** | Requires `owprov.ui_notifications` topic & consumer | Zero Kafka changes |
+| **Frontend UI Impact** | Existing WebSocket listener unchanged | Requires polling loop in frontend UI |
+| **Offline Client Resilience** | Requires durable status backing for replay | Naturally resilient via database state |
 
 ---
 
@@ -1059,6 +1091,7 @@ owprov-1
 owprov-2
 owprov-3
 PostgreSQL
+Redis
 Kafka
 ```
 
@@ -1070,6 +1103,7 @@ All OWPROV instances must point to the same:
 
 ```text
 - PostgreSQL database
+- Redis shared cache
 - Kafka cluster
 - public service endpoint
 - internal service endpoint, if internal load balancing is used
@@ -1097,6 +1131,7 @@ An instance is ready only when:
 ```text
 - database startup coordination has completed;
 - PostgreSQL is reachable;
+- Redis is reachable where shared cached API reads are required;
 - Kafka required consumers/producers are ready;
 - required runtime files are downloaded and validated;
 - required service identity configuration is valid;
@@ -1156,7 +1191,7 @@ Database connection limits must be reviewed so adding instances does not exhaust
 
 The implementation should review and update these areas.
 
-### 19.1 API/cache/auth
+### 19.1 API/cache/auth/Redis
 
 ```text
 src/framework/RESTAPI_Handler.h
@@ -1241,10 +1276,12 @@ runtime env files
 
 ```text
 - PostgreSQL startup lock
-- DB-first API paths
-- AuthCache removed from API authorization decision paths
-- SerialNumberCache removed from API serial/inventory decision paths
-- DeviceTypeCache removed from API device type validation paths
+- Redis shared cache-aside support
+- PostgreSQL fallback on Redis cache miss
+- cache invalidation after committed POST/PUT/DELETE operations
+- AuthCache refactored away from process-local authorization decision state
+- SerialNumberCache refactored away from process-local serial/inventory decision state
+- DeviceTypeCache refactored away from process-local device type validation state
 - serial/inventory DB enforcement
 ```
 
