@@ -34,11 +34,11 @@ API request --->|      Load balancer      |
                     |        |        |
                     +--------+--------+
                              |
-              +--------------+--------------+
-              |                             |
-              v                             v
-          PostgreSQL                      Kafka
-     authoritative DB state        events / service discovery
+              +--------------+--------+--------------+
+              |                       |              |
+              v                       v              v
+          PostgreSQL                Redis          Kafka
+     authoritative DB state     shared API cache   events / service discovery
 ```
 
 **The expected behavior is**:
@@ -47,8 +47,9 @@ API request --->|      Load balancer      |
 1. More than one OWPROV instance can run at the same time.
 2. Any incoming API request can be routed to any healthy OWPROV instance.
 3. No user, device, job, or API request requires permanent routing to one specific OWPROV process.
-4. Shared state is stored in PostgreSQL.
-5. Kafka delivery behavior is defined per topic.
+4. Authoritative shared state is stored in PostgreSQL.
+5. Cached API reads use Redis as the shared cache across OWPROV instances.
+6. Kafka delivery behavior is defined per topic.
 ```
 
 ---
@@ -94,7 +95,7 @@ OWPROV must not require request stickiness for correctness.
 
 ```text
 1. Two OWPROV instances are running.
-2. A operation is performed through one instance.
+2. An operation is performed through one instance.
 3. A read or follow-up operation through another instance observes correct shared state.
 ```
 
@@ -370,7 +371,7 @@ OWPROV must support two consumer types:
 2. Every running instance receives service_events messages.
 3. "connection" is assigned to GroupConsumer.
 4. Each "connection" message is processed by only one instance in the service group.
-5. State written as a result of connection processing is stored in PostgreSQL and can be read by any OWPROV instance.
+5. State written as a result of connection processing is stored in PostgreSQL and can be read by any OWPROV instance through Redis shared cache or PostgreSQL fallback.
 6. No OWPROV-consumed Kafka topic is left without an explicitly assigned consumer type.
 ```
 
@@ -402,14 +403,14 @@ OWPROV must support two consumer types:
 
 ### 8.3: connection events must be safe for work-queue processing
 
-The `connection` topic may be processed as a work-queue topic only if OWPROV writes the durable result to shared state and later API calls read from shared state.
+The `connection` topic may be processed as a work-queue topic only if OWPROV writes the durable result to PostgreSQL and later API calls read through Redis shared cache or PostgreSQL fallback.
 
 **Required behavior:**
 
 ```text
 1. Each connection event should be processed by one instance in the OWPROV service group.
 2. The processing instance must write required durable device/inventory state to PostgreSQL.
-3. Later API calls for that device must be routable to any instance.
+3. Later API calls for that device must be routable to any instance and must read the result through Redis shared cache or PostgreSQL fallback.
 4. No device should become permanently owned by the instance that processed its connection event.
 5. Connection processing must be idempotent under retry, rebalance, or duplicate delivery.
 ```
@@ -598,12 +599,13 @@ Required behavior:
 ```text
 1. Multiple OWPROV containers must be able to run at the same time.
 2. All OWPROV instances must use the same PostgreSQL database.
-3. All OWPROV instances must use the same Kafka cluster.
-4. Each OWPROV instance must have unique instance identity where required.
-5. The public OWPROV endpoint must be load-balanced through a reverse proxy or equivalent.
-6. Health/readiness behavior must prevent unsafe instances from receiving traffic.
-7. Shutdown must stop accepting new traffic before terminating long-running work where possible.
-8. Instance-specific environment values must not conflict across replicas.
+3. All OWPROV instances must use the same Redis shared cache.
+4. All OWPROV instances must use the same Kafka cluster.
+5. Each OWPROV instance must have unique instance identity where required.
+6. The public OWPROV endpoint must be load-balanced through the Nginx load balancer.
+7. Health/readiness behavior must prevent unsafe instances from receiving traffic.
+8. Shutdown must stop accepting new traffic before terminating long-running work where possible.
+9. Instance-specific environment values must not conflict across replicas.
 ```
 
 Acceptance criteria:
@@ -611,7 +613,7 @@ Acceptance criteria:
 ```text
 1. At least two OWPROV instances run in Docker Compose.
 2. Requests can be routed to either instance.
-3. The same correctness-critical request returns consistent results from either instance.
+3. The same API read request returns consistent Redis/PostgreSQL-backed results from either instance.
 4. Restarting one instance does not corrupt shared state or lose durable work.
 ```
 
@@ -670,7 +672,7 @@ This document does not define:
 6. Exact Docker Compose YAML, reverse proxy configuration, or port mappings.
 7. Kubernetes, Helm, or Kubernetes-specific deployment behavior.
 8. Request stickiness between the load balancer and OWPROV instances.
-9. Replacing PostgreSQL as the source of truth for OWPROV API reads and writes.
+9. Replacing PostgreSQL as the source of truth for OWPROV API data.
 10. Using Redis as the durable source of truth instead of PostgreSQL.
 11. A shared data directory for runtime-downloaded files, as long as each instance independently downloads and validates equivalent files.
 12. Enabling rate limiting for every OWPROV API.

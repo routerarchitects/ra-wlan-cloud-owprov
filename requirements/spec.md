@@ -16,6 +16,7 @@ Load balancer
 
 Shared dependencies:
   -> PostgreSQL
+  -> Redis
   -> Kafka
 ```
 
@@ -61,11 +62,11 @@ API request --->|      Load balancer      |
                     |        |        |
                     +--------+--------+
                              |
-              +--------------+--------------+
-              |                             |
-              v                             v
-          PostgreSQL                      Kafka
-     authoritative API data       events and async delivery
+              +--------------+-----------+--------------+
+              |                          |              |
+              v                          v              v
+          PostgreSQL                   Redis          Kafka
+     authoritative API data     shared API cache   events and async delivery
 ```
 
 Each OWPROV instance must use the same:
@@ -195,7 +196,7 @@ Required behavior:
 3. Cache misses reload data from PostgreSQL.
 4. POST/PUT/DELETE handlers invalidate affected Redis keys only after successful PostgreSQL commit.
 5. Redis failure must not cause stale process-local cache fallback.
-``` 
+```
 
 ---
 
@@ -667,14 +668,14 @@ Required handler behavior:
    remove or mark stale only the announcing service instance.
 
 4. EVENT_REMOVE_TOKEN:
-   update PostgreSQL-backed token/auth state or the authoritative security source if OWPROV owns this token state.
+   update PostgreSQL-backed token/auth state or the authoritative security source if OWPROV owns this token state, then invalidate affected Redis authorization cache keys after the committed change.
 ```
 
 Local `Services_` state may remain process-local only if every OWPROV instance receives every required `service_events` message through BroadcastConsumer.
 
 If reliable broadcast delivery is not implemented, service discovery must move to a shared registry source.
 
-`EVENT_REMOVE_TOKEN` must not rely on local `AuthCache` invalidation as the authorization protection mechanism in multi-instance mode.
+`EVENT_REMOVE_TOKEN` must not rely on local `AuthCache` invalidation as the authorization protection mechanism in multi-instance mode. Authorization cache invalidation must target Redis shared cache keys where OWPROV owns the affected authorization state.
 
 ---
 
@@ -689,7 +690,7 @@ Required behavior:
 
 2. The processing instance writes required durable state to PostgreSQL.
 
-3. Later API reads for that device can be served by any OWPROV instance.
+3. Later API reads for that device can be served by any OWPROV instance through Redis shared cache or PostgreSQL fallback.
 
 4. The device does not become permanently owned by the processing instance.
 
@@ -1168,7 +1169,7 @@ Scale out:
 1. Start additional OWPROV instance.
 2. Instance receives unique identity.
 3. Instance joins Kafka consumers.
-4. Instance completes DB/file/readiness checks.
+4. Instance completes PostgreSQL, Redis, Kafka, runtime file, and readiness checks.
 5. Load balancer starts routing traffic.
 ```
 
@@ -1299,10 +1300,11 @@ runtime env files
 ### Phase 4: Jobs and notifications
 
 ```text
-- durable job table
-- worker claim/lease/retry
-- WebSocket notification bus
-- cross-instance notification delivery
+- durable PostgreSQL job table
+- job status query endpoint
+- background job status/result persistence
+- WebSocket notification bus or PostgreSQL job polling
+- cross-instance notification/status delivery
 ```
 
 ### Phase 5: Runtime and deployment
