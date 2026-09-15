@@ -134,11 +134,13 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 ```text
 1. Cached API read paths must use Redis as the shared cache across all OWPROV instances.
 2. If a required record is not present in Redis, the API path must read the record from PostgreSQL.
-3. PostgreSQL results loaded on cache miss may be written back to Redis using deterministic cache keys.
+3. PostgreSQL results loaded on cache miss may be written back to Redis using deterministic cache keys with a short, configurable TTL.
 4. Write/update/delete APIs must persist changes to PostgreSQL before returning success.
 5. After a successful PostgreSQL commit, OWPROV must invalidate all Redis cache keys affected by that write.
 6. Redis must not be updated before the PostgreSQL transaction commits.
-7. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
+7. If PostgreSQL commit succeeds but Redis invalidation fails, the API write must still return success; un-invalidated stale cache entries are bounded by the short TTL fallback, and invalidation errors are logged and monitored.
+8. If Redis becomes unavailable, OWPROV must operate in degraded mode directly against PostgreSQL without falling back to process-local cache state.
+9. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
 ```
 
 **Acceptance criteria**:
@@ -147,8 +149,10 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 1. Data created/updated through owprov-1 is persisted in PostgreSQL.
 2. Related Redis cache keys are invalidated after the PostgreSQL commit.
 3. A later read through owprov-2 either reads fresh data from Redis or reloads it from PostgreSQL on cache miss.
-4. Restarting one OWPROV instance does not change the data view of another instance.
-5. API behavior is the same regardless of which OWPROV replica receives the request.
+4. If a Redis invalidation call fails after PostgreSQL commit, the API call returns success, the failure is logged, and stale Redis entries expire quickly via short TTL fallback.
+5. If Redis is offline, API reads and writes continue functioning directly against PostgreSQL.
+6. Restarting one OWPROV instance does not change the data view of another instance.
+7. API behavior is the same regardless of which OWPROV replica receives the request.
 ```
 
 ---
@@ -541,25 +545,25 @@ Acceptance criteria:
 
 ## 13. WebSocket And Notification Requirements
 
-### 13.1: UI notifications must work when WebSocket owner and work owner are different instances
+### 13.1: UI notifications and job status must be deliverable across different instances
 
-A browser may be connected to one OWPROV instance while an API action or background job runs on another instance.
+A browser or UI client may be connected to one OWPROV instance while an API action or background job runs on another instance.
 
 Required behavior:
 
 ```text
-1. A notification generated on owprov-2 must be deliverable to a user whose WebSocket is connected to owprov-1.
-2. WebSocket connection locality must not cause required notifications to be silently lost.
+1. Progress and completion for work executed on owprov-2 must be deliverable to a client connected to owprov-1 through either cross-instance WebSocket fan-out or durable job-status polling.
+2. WebSocket connection locality must not cause required notifications or job status updates to be silently lost.
 3. Sticky WebSocket routing may help connection stability but must not be the only correctness mechanism.
-4. Notification delivery expectations must be documented for each important event type.
+4. Notification and status delivery expectations must be documented for each important event type.
 ```
 
 Acceptance criteria:
 
 ```text
-1. Connect a UI WebSocket to owprov-1.
+1. Connect a UI client to owprov-1.
 2. Trigger a job or action through owprov-2.
-3. Verify required progress/completion notification reaches the UI connected to owprov-1.
+3. Verify required progress/completion information is available to the client through either cross-instance WebSocket fan-out or durable job-status polling.
 ```
 
 ---

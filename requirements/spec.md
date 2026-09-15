@@ -181,6 +181,7 @@ Example:
 ```text
 openwifi.redis.host=redis
 openwifi.redis.port=6379
+openwifi.redis.cache.ttl=60
 ```
 
 Redis is used only as the shared cache layer; PostgreSQL remains the source of truth.
@@ -193,6 +194,8 @@ Required behavior:
 3. Cache misses reload data from PostgreSQL.
 4. POST/PUT/DELETE handlers invalidate affected Redis keys only after successful PostgreSQL commit.
 5. Redis failure must not cause stale process-local cache fallback.
+6. Cached entries must use a short, configurable TTL fallback to limit bounded staleness if invalidation fails.
+7. Redis invalidation failures must be logged and monitored without failing committed DB writes.
 ```
 
 ---
@@ -236,7 +239,7 @@ Implementation rules:
 1. Redis keys must be deterministic and shared across OWPROV instances.
 2. Cache values must represent PostgreSQL-backed data or data derived from PostgreSQL-backed state.
 3. Cache misses must reload from PostgreSQL.
-4. Cache TTLs must be defined per data type.
+4. Cache TTLs must be short and configurable per data type to ensure bounded staleness.
 5. API behavior must not fall back to process-local cache state when Redis misses.
 ```
 
@@ -263,6 +266,32 @@ Implementation rules:
 3. POST/PUT/DELETE handlers must identify affected Redis keys.
 4. The preferred first implementation is cache invalidation, not direct Redis mutation.
 5. The next read repopulates Redis from PostgreSQL on cache miss.
+```
+
+### 6.3.1 Invalidation failure handling and bounded staleness
+
+When a write operation succeeds in PostgreSQL, OWPROV invalidates the corresponding Redis cache key(s). If the Redis invalidation call fails (e.g., due to temporary network partition, socket timeout, or Redis command error), OWPROV must handle the failure safely:
+
+```text
+PostgreSQL Commit Succeeded -> Redis Invalidation Failed:
+  1. Return HTTP Success (200/201/204) to the client.
+  2. Log ERROR with affected cache keys and failure reason.
+  3. Increment invalidation failure metric.
+  4. Stale cache entry expires quickly via short configurable TTL fallback.
+  5. Subsequent read reloads fresh data from PostgreSQL.
+```
+
+Implementation rules:
+
+```text
+1. Successful DB writes must not return API errors if Redis invalidation fails. PostgreSQL has already durably committed the change; returning an HTTP error would mislead callers and risk dangerous duplicate non-idempotent retries.
+2. All Redis cache entries must be written with a short, configurable TTL (e.g., a short safety window such as 10–60 seconds, configurable via openwifi.redis.cache.ttl or per domain) rather than long or indefinite durations.
+3. The short TTL acts as a bounded staleness fallback: in the event of an invalidation failure, stale entries expire quickly on their own without requiring complex background retry queues or outbox processing.
+4. When Redis is completely unreachable or offline, OWPROV must enter degraded mode:
+   - Read requests bypass Redis and query PostgreSQL directly.
+   - Write requests commit to PostgreSQL, skip Redis invalidation, log the condition, and return success.
+   - OWPROV must never fall back to stale process-local memory caches or crash when Redis fails.
+5. Invalidation failures must emit log warnings and increment owprov_redis_invalidation_failures_total for operator visibility.
 ```
 
 ### 6.4 Process-local cache usage
@@ -391,7 +420,7 @@ For this phase, the preferred implementation is PostgreSQL-backed device type st
 
 ### 9.2 PostgreSQL-backed device type state with Redis cache
 
-The implementation should add or identify PostgreSQL-backed state that represents the accepted device type set or current accepted device type version.
+The implementation must add or identify PostgreSQL-backed state that represents the accepted device type set or current accepted device type version.
 
 This state may be populated from the existing firmware/service-registry/download source, but API validation must read through the shared cache-aside model instead of process-local `DeviceTypeCache`.
 
@@ -891,12 +920,15 @@ job_type            -- "VenueRebooter", "VenueUpgrade", "VenueConfigUpdater"
 user_id             -- User email who initiated the job
 parameters          -- JSON array/object of parameters (e.g. venueId, revision)
 status              -- pending, running, succeeded, failed
-owner_instance_id   -- ID of OWPROV instance executing the job
+owner_instance_id   -- ID of OWPROV instance currently executing the job
+lease_expires_at    -- Heartbeat lease expiration timestamp to detect worker crashes
+attempt_count       -- Number of execution attempts
+max_attempts        -- Maximum allowed execution attempts (e.g. 2)
 result              -- JSON result details (e.g. success/failed device lists)
 error_message       -- Error text if the job failed
 created_at          -- Timestamp when job was submitted
 started_at          -- Timestamp when execution began
-completed_at        -- Timestamp when finished
+completed_at        -- Timestamp when terminal state was reached
 ```
 
 Allowed statuses:
@@ -908,19 +940,61 @@ succeeded
 failed
 ```
 
-### 15.3 Job lifecycle
+### 15.3 Job creation and atomic claiming
 
 When a REST request starts a long-running action:
 
 ```text
 1. Validate the request.
-2. Insert a row into the jobs table with status 'running', owner_instance_id, and user_id.
-3. Return the jobId to the caller immediately via HTTP.
-4. Execute the operation in the background thread.
-5. Upon completion, update status to 'succeeded' or 'failed', record the result, and deliver the notification (via Option A or Option B in Section 16).
+2. Insert a row into the jobs table with status 'pending', attempt_count = 0, and user_id.
+3. Return the jobId and initial 'pending' status to the caller immediately via HTTP.
+4. A worker loop on an OWPROV instance atomically claims the pending job from PostgreSQL:
+
+   UPDATE jobs
+   SET
+     status = 'running',
+     owner_instance_id = :instance_id,
+     lease_expires_at = :now + :lease_interval,
+     attempt_count = attempt_count + 1,
+     started_at = COALESCE(started_at, :now)
+   WHERE id = :job_id
+     AND status = 'pending'
+   RETURNING *;
+
+5. Only the instance that successfully receives the updated row executes the background job thread.
 ```
 
-### 15.4 Job query endpoint
+### 15.4 Lease renewal and heartbeat
+
+While executing a job, the owning instance must maintain an active lease:
+
+```text
+1. Running jobs have an active lease_expires_at timestamp.
+2. The executing worker periodically updates lease_expires_at (e.g., every 10 seconds with a 30-second lease window).
+3. Upon task completion, the worker updates status to 'succeeded' or 'failed', persists result/error_message, sets completed_at, and triggers notification delivery (via Option A or Option B in Section 16).
+```
+
+### 15.5 Expired-owner recovery and retry rules
+
+Surviving OWPROV instances periodically scan for crashed or abandoned jobs:
+
+```text
+1. Scan for jobs where status = 'running' AND lease_expires_at < :now.
+2. If attempt_count < max_attempts:
+   - Another instance atomically reclaims the job.
+   - The reclaim event is logged with old owner, new owner, and attempt count.
+   - The new owner resumes or restarts execution.
+3. If attempt_count >= max_attempts:
+   - The job is transitioned to terminal status 'failed'.
+   - error_message is set to 'Worker crashed and maximum execution attempts exceeded'.
+   - completed_at is recorded.
+```
+
+### 15.6 Device-side idempotency
+
+Background tasks must record incremental progress or device-level execution states where possible. On crash recovery, operations are not blindly re-executed on devices that already completed the action.
+
+### 15.7 Job query endpoint
 
 Any OWPROV instance can serve job status queries from PostgreSQL:
 
@@ -928,7 +1002,7 @@ Any OWPROV instance can serve job status queries from PostgreSQL:
 GET /api/v1/jobs/{id}
 ```
 
-The UI or API client can query any instance to inspect job status and results directly from PostgreSQL without requiring affinity to the instance that created or executed the job.
+The UI or API client can query any instance to inspect job status, progress, and results directly from PostgreSQL without requiring affinity to the instance that created or executed the job.
 
 ---
 
