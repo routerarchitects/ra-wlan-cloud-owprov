@@ -139,7 +139,7 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 5. After a successful PostgreSQL commit, OWPROV must invalidate all Redis cache keys affected by that write.
 6. Redis must not be updated before the PostgreSQL transaction commits.
 7. If PostgreSQL commit succeeds but Redis invalidation fails, the API write must still return success; un-invalidated stale cache entries are bounded by the short TTL fallback, and invalidation errors are logged and monitored.
-8. If Redis becomes unavailable, OWPROV must operate in degraded mode directly against PostgreSQL without falling back to process-local cache state.
+8. Redis is a required dependency for service startup and readiness: if Redis is unreachable, the instance must fail startup or readiness and refuse to accept traffic.
 9. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
 ```
 
@@ -149,8 +149,8 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 1. Data created/updated through owprov-1 is persisted in PostgreSQL.
 2. Related Redis cache keys are invalidated after the PostgreSQL commit.
 3. A later read through owprov-2 either reads fresh data from Redis or reloads it from PostgreSQL on cache miss.
-4. If a Redis invalidation call fails after PostgreSQL commit, the API call returns success, the failure is logged, and stale Redis entries expire quickly via short TTL fallback.
-5. If Redis is offline, API reads and writes continue functioning directly against PostgreSQL.
+4. If a Redis invalidation call fails after PostgreSQL commit, the API call returns success, an ERROR is logged, and stale Redis entries expire quickly via short TTL fallback.
+5. If Redis is offline or unreachable, readiness checks fail and the instance does not accept traffic.
 6. Restarting one OWPROV instance does not change the data view of another instance.
 7. API behavior is the same regardless of which OWPROV replica receives the request.
 ```

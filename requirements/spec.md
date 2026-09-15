@@ -286,12 +286,9 @@ Implementation rules:
 ```text
 1. Successful DB writes must not return API errors if Redis invalidation fails. PostgreSQL has already durably committed the change; returning an HTTP error would mislead callers and risk dangerous duplicate non-idempotent retries.
 2. All Redis cache entries must be written with a short, configurable TTL (e.g., a short safety window such as 10–60 seconds, configurable via openwifi.redis.cache.ttl or per domain) rather than long or indefinite durations.
-3. The short TTL acts as a bounded staleness fallback: in the event of an invalidation failure, stale entries expire quickly on their own without requiring complex background retry queues or outbox processing.
-4. When Redis is completely unreachable or offline, OWPROV must enter degraded mode:
-   - Read requests bypass Redis and query PostgreSQL directly.
-   - Write requests commit to PostgreSQL, skip Redis invalidation, log the condition, and return success.
-   - OWPROV must never fall back to stale process-local memory caches or crash when Redis fails.
-5. Invalidation failures must emit log warnings and increment owprov_redis_invalidation_failures_total for operator visibility.
+3. The short TTL acts as a bounded staleness fallback: in the event of an individual invalidation failure, stale entries expire quickly on their own without requiring complex background retry queues or outbox processing.
+4. Redis is a hard dependency for startup and readiness: if Redis is unreachable or offline, the instance must fail startup or fail readiness and refuse traffic until Redis connectivity is established. OWPROV must never fall back to process-local cache state.
+5. Invalidation failures must emit ERROR logs with affected keys and increment owprov_redis_invalidation_failures_total for operator visibility.
 ```
 
 ### 6.4 Process-local cache usage
@@ -1203,7 +1200,7 @@ An instance is ready only when:
 ```text
 - database startup coordination has completed;
 - PostgreSQL is reachable;
-- Redis is reachable where shared cached API reads are required;
+- Redis is reachable and ready;
 - Kafka required consumers/producers are ready;
 - required runtime files are downloaded and validated;
 - required service identity configuration is valid;
