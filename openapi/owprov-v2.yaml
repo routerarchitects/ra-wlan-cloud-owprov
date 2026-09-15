@@ -1,0 +1,303 @@
+openapi: 3.0.1
+info:
+  title: OpenWiFi Provisioning Model V2
+  description: Definitions and APIs to manage an OpenWiFi network (API Version 2).
+  version: 2.0.0
+  license:
+    name: BSD3
+    url: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
+
+servers:
+  - url: 'https://localhost:16005/api/v2'
+
+security:
+  - bearerAuth: []
+  - ApiKeyAuth: []
+
+paths:
+  /managementRole/{id}:
+    post:
+      tags:
+        - Management Roles
+      operationId: createManagementRoleV2
+      summary: Create management role(s) with venueIds scoping (V2).
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        description: Information used to create the new management role(s)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManagementRoleCreateV2'
+      responses:
+        200:
+          description: Successful creation of management role(s)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementRoleList'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    get:
+      tags:
+        - Management Roles
+      operationId: getManagementRoleV2
+      summary: Retrieve a specific management role (V2).
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+        - in: query
+          name: expandInUse
+          schema:
+            type: boolean
+          required: false
+      responses:
+        200:
+          description: Successful retrieval of a management role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementRole'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Management Roles
+      operationId: modifyManagementRoleV2
+      summary: Modify a specific management role (V2).
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+      requestBody:
+        description: Information used to modify the management role.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManagementRole'
+      responses:
+        200:
+          description: Successful modification of a management role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementRole'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - Management Roles
+      operationId: deleteManagementRoleV2
+      summary: Delete a specific management role (V2).
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+            format: uuid
+          required: true
+      responses:
+        200:
+          $ref: '#/components/responses/Success'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-KEY
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errorCode:
+                type: integer
+              errorDetails:
+                type: string
+    Unauthorized:
+      description: Unauthorized request.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errorCode:
+                type: integer
+              errorDetails:
+                type: string
+    Success:
+      description: Successful operation.
+    BadRequest:
+      description: Invalid or missing parameters.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errorCode:
+                type: integer
+              errorDetails:
+                type: string
+
+  schemas:
+    NoteInfo:
+      type: object
+      properties:
+        created:
+          type: integer
+          format: int64
+        createdBy:
+          type: string
+        note:
+          type: string
+
+    ObjectInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoteInfo'
+        created:
+          type: integer
+          format: int64
+        modified:
+          type: integer
+          format: int64
+        tags:
+          type: array
+          items:
+            type: string
+
+    ManagementRole:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoteInfo'
+        created:
+          type: integer
+          format: int64
+        modified:
+          type: integer
+          format: int64
+        tags:
+          type: array
+          items:
+            type: string
+        managementPolicy:
+          type: string
+          format: uuid
+        users:
+          type: array
+          items:
+            type: string
+            format: uuid
+        inUse:
+          type: array
+          items:
+            type: string
+        entity:
+          type: string
+          format: uuid
+        venue:
+          type: string
+          format: uuid
+
+    ManagementRoleList:
+      type: object
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ManagementRole'
+
+    ManagementRoleCreateV2:
+      type: object
+      required:
+        - name
+        - entity
+        - managementPolicy
+        - users
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NoteInfo'
+        managementPolicy:
+          type: string
+          format: uuid
+        users:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Exactly one user UUID to assign this role to
+        entity:
+          type: string
+          format: uuid
+        venueIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: List of venue UUIDs to assign the role to (empty for entity-wide)
+
