@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - anil-feature
   pull_request:
     branches:
       - main
@@ -226,6 +225,93 @@ jobs:
             sleep 1
           done
 
+      # ── Start PostgreSQL container ───────────────────────────────────────────
+      - name: Start PostgreSQL container
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name postgres \
+            --network host \
+            -e POSTGRES_USER=owprov \
+            -e POSTGRES_PASSWORD=owprov \
+            -e POSTGRES_DB=owprov \
+            postgres:15
+
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if docker exec postgres pg_isready -U owprov > /dev/null 2>&1; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: PostgreSQL did not start in time!"
+              docker logs postgres
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # ── Seed legacy schema & dirty data for brownfield migration test ────────
+      - name: Seed legacy schema and dirty data for migration verification
+        run: |
+          set -euo pipefail
+          echo "Seeding legacy (v1) schema and corrupt/orphaned data into PostgreSQL..."
+
+          docker exec -i postgres psql -U owprov -d owprov << 'EOF'
+          -- 1. Create policies table
+          CREATE TABLE IF NOT EXISTS policies (
+              id VARCHAR(64) PRIMARY KEY,
+              name TEXT,
+              description TEXT,
+              notes TEXT,
+              created BIGINT,
+              modified BIGINT,
+              entries TEXT,
+              inUse TEXT,
+              tags TEXT,
+              entity TEXT,
+              venue TEXT
+          );
+
+          -- 2. Insert valid reference policy
+          INSERT INTO policies (id, name, description, notes, created, modified, entries, inUse, tags, entity, venue)
+          VALUES ('mig-valid-policy-001', 'Migration Valid Policy', 'Valid policy for migration test', '[]', 1600000000, 1600000000, '[]', '[]', '[]', '', '');
+
+          -- 3. Create legacy roles table (v1: missing entity & venue columns, nullable managementPolicy, no FK)
+          CREATE TABLE roles (
+              id VARCHAR(64) PRIMARY KEY,
+              name TEXT,
+              description TEXT,
+              notes TEXT,
+              created BIGINT,
+              modified BIGINT,
+              managementPolicy VARCHAR(64),
+              users TEXT,
+              inUse TEXT,
+              tags TEXT
+          );
+
+          -- 4. Seed dirty and valid roles
+          -- Role 1: Corrupt - NULL managementPolicy
+          INSERT INTO roles (id, name, description, notes, created, modified, managementPolicy, users, inUse, tags)
+          VALUES ('mig-role-null-001', 'Role With NULL Policy', 'Should be auto-purged', '[]', 1600000000, 1600000000, NULL, '[]', '[]', '[]');
+
+          -- Role 2: Corrupt - Empty string managementPolicy
+          INSERT INTO roles (id, name, description, notes, created, modified, managementPolicy, users, inUse, tags)
+          VALUES ('mig-role-empty-002', 'Role With Empty Policy', 'Should be auto-purged', '[]', 1600000000, 1600000000, '', '[]', '[]', '[]');
+
+          -- Role 3: Corrupt - Orphaned managementPolicy UUID (not present in policies)
+          INSERT INTO roles (id, name, description, notes, created, modified, managementPolicy, users, inUse, tags)
+          VALUES ('mig-role-orphan-003', 'Role With Orphaned Policy', 'Should be auto-purged', '[]', 1600000000, 1600000000, 'non-existent-policy-999', '[]', '[]', '[]');
+
+          -- Role 4: Valid - References existing policy
+          INSERT INTO roles (id, name, description, notes, created, modified, managementPolicy, users, inUse, tags)
+          VALUES ('mig-role-valid-004', 'Role With Valid Policy', 'Should survive migration', '[]', 1600000000, 1600000000, 'mig-valid-policy-001', '[]', '[]', '[]');
+          EOF
+
+          echo "Legacy schema and dirty test data successfully seeded."
+
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
         run: |
@@ -241,19 +327,26 @@ jobs:
             -e TEMPLATE_CONFIG=true \
             -e KAFKA_ENABLE=true \
             -e KAFKA_BROKERLIST=localhost:9092 \
-            -e STORAGE_TYPE=sqlite \
+            -e STORAGE_TYPE=postgresql \
+            -e STORAGE_TYPE_POSTGRESQL_HOST=localhost \
+            -e STORAGE_TYPE_POSTGRESQL_PORT=5432 \
+            -e STORAGE_TYPE_POSTGRESQL_USERNAME=owprov \
+            -e STORAGE_TYPE_POSTGRESQL_PASSWORD=owprov \
+            -e STORAGE_TYPE_POSTGRESQL_DATABASE=owprov \
             -e RESTAPI_HOST_PORT=16005 \
             -e INTERNAL_RESTAPI_HOST_PORT=17005 \
             owprov:test
 
           echo "Waiting for owprov to start on port 16005..."
 
+          SUCCESS=0
           for i in {1..40}; do
             if curl -k -s --max-time 3 \
               "https://localhost:16005/api/v1/system?command=info" \
               > /dev/null 2>&1; then
               echo "owprov HTTPS endpoint is reachable!"
-              exit 0
+              SUCCESS=1
+              break
             fi
 
             if ! docker inspect -f '{{.State.Running}}' owprov 2>/dev/null | grep -q true; then
@@ -266,9 +359,118 @@ jobs:
             sleep 3
           done
 
-          echo "ERROR: owprov did not start in time!"
-          docker logs owprov
-          exit 1
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "ERROR: owprov did not start in time!"
+            docker logs owprov
+            exit 1
+          fi
+
+      # ── Verify brownfield schema migration and data integrity ────────────────
+      - name: Verify schema migration and data integrity
+        run: |
+          set -euo pipefail
+          echo "=== Verifying Brownfield Schema Migration & Data Integrity ==="
+
+          # 1. Verify corrupt roles were purged during migration
+          PURGED_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM roles WHERE id IN ('mig-role-null-001', 'mig-role-empty-002', 'mig-role-orphan-003');")
+          echo "Purged corrupt roles remaining: ${PURGED_COUNT}"
+          if [ "${PURGED_COUNT}" -ne 0 ]; then
+            echo "ERROR: Corrupt roles were not purged during migration!"
+            docker exec postgres psql -U owprov -d owprov -c "SELECT id, name, managementPolicy FROM roles;"
+            exit 1
+          fi
+
+          # 2. Verify valid role survived migration
+          SURVIVED_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM roles WHERE id = 'mig-role-valid-004' AND managementPolicy = 'mig-valid-policy-001';")
+          echo "Valid role survived count: ${SURVIVED_COUNT}"
+          if [ "${SURVIVED_COUNT}" -ne 1 ]; then
+            echo "ERROR: Valid role was unexpectedly purged or modified during migration!"
+            exit 1
+          fi
+
+          # 3. Verify columns 'entity' and 'venue' were added (v1 -> v2 migration)
+          COL_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND lower(table_name) = 'roles' AND lower(column_name) IN ('entity', 'venue');")
+          echo "Added columns count (entity, venue): ${COL_COUNT}"
+          if [ "${COL_COUNT}" -ne 2 ]; then
+            echo "ERROR: Columns 'entity' and 'venue' were not added to roles table!"
+            exit 1
+          fi
+
+          # 4. Verify 'managementPolicy' column is NOT NULL
+          IS_NULLABLE=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND lower(table_name) = 'roles' AND lower(column_name) = 'managementpolicy';")
+          echo "managementPolicy is_nullable: ${IS_NULLABLE}"
+          if [ "${IS_NULLABLE}" != "NO" ]; then
+            echo "ERROR: managementPolicy is not NOT NULL (got ${IS_NULLABLE})!"
+            exit 1
+          fi
+
+          # 5. Verify fk_roles_management_policy constraint exists in catalog
+          FK_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM information_schema.table_constraints WHERE table_schema = current_schema() AND lower(table_name) = 'roles' AND lower(constraint_name) = 'fk_roles_management_policy';")
+          echo "FK constraint count: ${FK_COUNT}"
+          if [ "${FK_COUNT}" -ne 1 ]; then
+            echo "ERROR: fk_roles_management_policy constraint missing from catalog!"
+            exit 1
+          fi
+
+          # 5b. Verify roles_management_policy_idx index exists in catalog
+          INDEX_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND lower(tablename) = 'roles' AND lower(indexname) = 'roles_management_policy_idx';")
+          echo "roles_management_policy_idx index count: ${INDEX_COUNT}"
+          if [ "${INDEX_COUNT}" -ne 1 ]; then
+            echo "ERROR: roles_management_policy_idx index missing from catalog!"
+            exit 1
+          fi
+
+          # 6. Verify FK enforcement: deleting referenced policy must fail
+          echo "Testing foreign key enforcement on DELETE..."
+          set +e
+          FK_OUTPUT=$(docker exec postgres psql -U owprov -d owprov -c \
+            "DELETE FROM policies WHERE id = 'mig-valid-policy-001';" 2>&1)
+          FK_STATUS=$?
+          set -e
+
+          if [ $FK_STATUS -ne 0 ] && echo "${FK_OUTPUT}" | grep -q "violates foreign key constraint"; then
+            echo "SUCCESS: Foreign key actively prevented policy deletion: ${FK_OUTPUT}"
+          else
+            echo "ERROR: Foreign key did not prevent referenced policy deletion! Status: ${FK_STATUS}, Output: ${FK_OUTPUT}"
+            exit 1
+          fi
+
+          # 7. Clean up migration test fixtures and verify unblocked policy deletion
+          docker exec postgres psql -U owprov -d owprov -c \
+            "DELETE FROM roles WHERE id = 'mig-role-valid-004';"
+          docker exec postgres psql -U owprov -d owprov -c \
+            "DELETE FROM policies WHERE id = 'mig-valid-policy-001';"
+          echo "Migration test fixtures cleaned up successfully."
+
+          # 8. Test restart idempotency: restart owprov and ensure clean boot
+          echo "Testing daemon restart idempotency..."
+          docker restart owprov
+          sleep 2
+          for i in {1..40}; do
+            if curl -k -s --max-time 3 "https://localhost:16005/api/v1/system?command=info" > /dev/null 2>&1; then
+              echo "owprov successfully restarted and healthy after schema upgrade!"
+              break
+            fi
+            if ! docker inspect -f '{{.State.Running}}' owprov 2>/dev/null | grep -q true; then
+              echo "ERROR: owprov container crashed on restart!"
+              docker logs owprov
+              exit 1
+            fi
+            if [ "$i" -eq 40 ]; then
+              echo "ERROR: owprov did not restart in time!"
+              docker logs owprov
+              exit 1
+            fi
+            sleep 2
+          done
+
+          echo "=== All Brownfield Schema Migration Assertions Passed! ==="
 
       # ── Publish Kafka join events ────────────────────────────────────────────
       - name: Publish owsec + owfms Kafka join events
@@ -296,6 +498,16 @@ jobs:
         run: go run main.go
         working-directory: ${{ github.workspace }}/tests/lab_tests
 
+      # ── Run RBAC immutability and policy protection tests ─────────────────────
+      - name: Execute RBAC Immutability and Policy Protection Tests
+        run: |
+          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection"
+        working-directory: ${{ github.workspace }}/tests/rbac_tests
+        env:
+          OWPROV_URL: "https://localhost:16005/api/v1"
+          TOKEN_ROOT: "Bearer root-test-token"
+          TOKEN_NO_ACCESS: "Bearer user-read-only-token"
+
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts
         if: always()
@@ -307,4 +519,6 @@ jobs:
       # ── Debug on failure ──────────────────────────────────────────────────────
       - name: Dump owprov logs on failure
         if: failure()
-        run: docker logs owprov 2>&1 | tail -100
+        run: |
+          docker logs owprov 2>&1 | tail -100
+          docker logs postgres 2>&1 | tail -50 || true

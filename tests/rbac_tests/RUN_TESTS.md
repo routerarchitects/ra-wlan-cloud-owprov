@@ -78,6 +78,33 @@ TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Ven
 TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/Users
 ```
 
+#### **1.5 Empty Policy ID Update Blocked (Negative)**
+- **Test Function**: `TestManagementRoleImmutability` (Sub-test: `Negative: Updating managementPolicy to empty string returns 400 Bad Request`)
+- **Description**: Verifies that attempting to clear or set `managementPolicy` to an empty string on an existing role is rejected.
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/empty_string
+```
+
+#### **1.6 Non-Existent Policy ID Update Blocked (Negative)**
+- **Test Function**: `TestManagementRoleImmutability` (Sub-test: `Negative: Updating managementPolicy to non-existent UUID returns 400 Bad Request`)
+- **Description**: Verifies that updating `managementPolicy` to a non-existent UUID is rejected.
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/non-existent
+```
+
+#### **1.7 Malformed Policy ID Update Blocked (Negative)**
+- **Test Function**: `TestManagementRoleImmutability` (Sub-test: `Negative: Updating managementPolicy with malformed string returns 400 Bad Request`)
+- **Description**: Verifies that updating `managementPolicy` with an invalid/malformed string is rejected.
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <token>" go test -v . -run TestManagementRoleImmutability/malformed
+```
+
 ---
 
 ### 2. Operator Scope Isolation & Visibility Tests (Section 11.1)
@@ -280,6 +307,55 @@ TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" SERVICE_CLASS_B_ID="<service_cla
 - **Command**:
 ```bash
 TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TARGET_USER_A="<user_a_uuid>" OPERATOR_A_ENTITY_UUID="<entity_uuid>" POLICY_WEAK_ID="<policy_id>" go test -v . -run TestManagementRoleCreation_ExactScopeKeyUniqueness
+```
+
+---
+
+### 8. Management Policy Deletion Protection Tests
+
+#### **8.1 Unreferenced Policy Deletion (Positive)**
+- **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Positive: Deleting unreferenced policy succeeds`)
+- **Description**: Verifies deleting a policy that is not linked to any role succeeds.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <root_token>" go test -v . -run TestManagementPolicyDeletionProtection/unreferenced
+```
+
+#### **8.2 In-Use Policy Deletion Blocked (Negative)**
+- **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Negative: Deleting in-use policy returns 400 Bad Request`)
+- **Description**: Verifies deleting a policy assigned to an active role returns 400 Bad Request with "Management policy is currently assigned to one or more management roles".
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <root_token>" go test -v . -run TestManagementPolicyDeletionProtection/in-use
+```
+
+#### **8.3 Non-Root Policy Deletion Blocked (Negative)**
+- **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Negative: Non-root user cannot delete management policy`)
+- **Description**: Verifies non-root users cannot delete management policies.
+- **Expected Output**: **`401 Unauthorized / 403 Forbidden`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <root_token>" TOKEN_NO_ACCESS="Bearer <non_root_token>" go test -v . -run TestManagementPolicyDeletionProtection/Non-root
+```
+
+#### **8.4 Non-Existent Policy Deletion (Negative)**
+- **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Negative: Deleting non-existent policy returns 404 Not Found`)
+- **Description**: Verifies deleting a non-existent policy ID returns 404 Not Found.
+- **Expected Output**: **`404 Not Found`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <root_token>" go test -v . -run TestManagementPolicyDeletionProtection/non-existent
+```
+
+#### **8.5 Policy Deletion After Role Reassignment (Positive)**
+- **Test Function**: `TestManagementPolicyDeletionProtection` (Sub-test: `Positive: Deleting policy after reassigning role succeeds`)
+- **Description**: Verifies that reassigning an active role to another policy frees the original policy, allowing it to be deleted.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+TEST_TOKEN="Bearer <root_token>" go test -v . -run TestManagementPolicyDeletionProtection/reassigning
 ```
 
 ---
