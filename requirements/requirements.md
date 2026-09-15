@@ -593,14 +593,14 @@ This document does not define:
 4. Exact background job table schema, worker implementation, or retry algorithm.
 5. Exact WebSocket fanout mechanism or notification transport.
 6. Exact Docker Compose YAML, reverse proxy configuration, or port mappings.
-8. Kubernetes, Helm, or Kubernetes-specific deployment behavior.
-9. Request stickiness between the load balancer and OWPROV instances.
-10. Replacing PostgreSQL as the source of truth for OWPROV API reads and writes.
-11. Adding a shared cache layer for normal OWPROV API read/write correctness.
-12. A shared data directory for runtime-downloaded files, as long as each instance independently downloads and validates equivalent files.
-13. Enabling rate limiting for every OWPROV API.
-14. Performance tuning, benchmarking targets, or capacity planning.
-15. Public API behavior changes unless later required by `spec.md`.
+7. Kubernetes, Helm, or Kubernetes-specific deployment behavior.
+8. Request stickiness between the load balancer and OWPROV instances.
+9. Replacing PostgreSQL as the source of truth for OWPROV API reads and writes.
+10. Adding a shared cache layer for normal OWPROV API read/write correctness.
+11. A shared data directory for runtime-downloaded files, as long as each instance independently downloads and validates equivalent files.
+12. Enabling rate limiting for every OWPROV API.
+13. Performance tuning, benchmarking targets, or capacity planning.
+14. Public API behavior changes unless later required by `spec.md`.
 
 
 

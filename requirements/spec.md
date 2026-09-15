@@ -1234,7 +1234,7 @@ runtime env files
 
 ```text
 - requirements.md reviewed
-- specification.md reviewed
+- spec.md reviewed
 ```
 
 ### Phase 2: Database and API safety
