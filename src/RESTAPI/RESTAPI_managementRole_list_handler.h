@@ -18,7 +18,7 @@ namespace OpenWifi {
 							 std::vector<std::string>{Poco::Net::HTTPRequest::HTTP_GET,
 													  Poco::Net::HTTPRequest::HTTP_OPTIONS},
 							 Server, TransactionId, Internal) {}
-		static auto PathName() { return std::list<std::string>{"/api/v1/managementRole", "/api/v2/managementRole"}; };
+		static auto PathName() { return std::list<std::string>{"/api/v1/managementRole"}; };
 
 	  private:
 		ManagementRoleDB &DB_ = StorageService()->RolesDB();
