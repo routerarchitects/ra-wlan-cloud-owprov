@@ -10,6 +10,7 @@
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
+#include "fmt/format.h"
 #include <set>
 
 namespace OpenWifi {
@@ -280,6 +281,7 @@ namespace OpenWifi {
 
 		std::vector<ProvObjects::ManagementRole> SavedRoles;
 		std::vector<ProvObjects::ManagementRole> NewlyCreatedRoles;
+		std::vector<ProvObjects::ManagementRole> OriginalUpdatedRoles;
 
 		bool BatchFailed = false;
 		for (std::size_t idx = 0; idx < Scopes.size(); ++idx) {
@@ -291,6 +293,7 @@ namespace OpenWifi {
 
 			ProvObjects::ManagementRole ExistingRole;
 			if (FindExactExistingRole(DB_, UserId, RoleForScope.entity, RoleForScope.venue, ExistingRole)) {
+				ProvObjects::ManagementRole Snapshot = ExistingRole;
 				ExistingRole.managementPolicy = RoleForScope.managementPolicy;
 				ExistingRole.info.modified = Utils::Now();
 
@@ -298,6 +301,7 @@ namespace OpenWifi {
 					BatchFailed = true;
 					break;
 				}
+				OriginalUpdatedRoles.emplace_back(Snapshot);
 				SavedRoles.emplace_back(ExistingRole);
 				continue;
 			}
@@ -311,9 +315,17 @@ namespace OpenWifi {
 		}
 
 		if (BatchFailed) {
-			for (const auto &role : NewlyCreatedRoles) {
-				DB_.DeleteRecord("id", role.info.id);
+			for (auto it = NewlyCreatedRoles.rbegin(); it != NewlyCreatedRoles.rend(); ++it) {
+				if (!DB_.DeleteRecord("id", it->info.id)) {
+					poco_error(Logger(), fmt::format("Rollback failed to delete newly created management role '{}' (user '{}', entity '{}', venue '{}').", it->info.id, UserId, it->entity, it->venue));
+				}
 			}
+			for (auto it = OriginalUpdatedRoles.rbegin(); it != OriginalUpdatedRoles.rend(); ++it) {
+				if (!DB_.UpdateRecord("id", it->info.id, *it)) {
+					poco_error(Logger(), fmt::format("Rollback failed to restore original management role '{}' (user '{}', entity '{}', venue '{}').", it->info.id, UserId, it->entity, it->venue));
+				}
+			}
+			AuthCache::GetInstance()->Clear();
 			return InternalError(RESTAPI::Errors::RecordNotCreated);
 		}
 
