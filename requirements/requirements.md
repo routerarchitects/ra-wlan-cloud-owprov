@@ -532,12 +532,13 @@ Required behavior:
 
 ```text
 1. Long-running actions must create durable job state in PostgreSQL.
-2. Job state must include job id, job type, parameters, status, result details etc.
+2. Job state must include job id, job type, parameters, owner_user_id (for access control), owner_email, status, result details etc.
 3. Instances must claim pending jobs through an atomic shared-state operation.
 4. Only one instance may own a job at a time.
 5. A crashed or stopped owner must not lose the job permanently.
 6. Another instance may retry a pending job.
 7. Kafka may be used to wake workers, but Kafka group leadership must not be the source of truth for job ownership.
+8. Job status query endpoint GET /api/v1/jobs/{id} must restrict access to the matching owner_user_id or callers with explicit admin/support permission for the job's scope, and job result payloads must contain only necessary fields without secrets or configuration bodies.
 ```
 
 Acceptance criteria:
@@ -547,6 +548,7 @@ Acceptance criteria:
 2. If owprov-1 stops while owning a job, owprov-2 can observe and handle the job according to durable state.
 3. A job is not blindly executed twice during restart, rebalance, or retry.
 4. Job progress and terminal state survive process restart.
+5. A job status read via GET /api/v1/jobs/{id} allows access only to the matching owner_user_id or a caller with authorized admin/support access to the job's resource scope, returning minimized result summaries without secrets.
 ```
 
 ---
@@ -564,6 +566,7 @@ Required behavior:
 2. WebSocket connection locality must not cause required notifications or job status updates to be silently lost.
 3. Sticky WebSocket routing may help connection stability but must not be the only correctness mechanism.
 4. Notification and status delivery expectations must be documented for each important event type.
+5. Cross-instance notification fan-out must include an ownership envelope (owner_user_id, owner_email, job_id, notification_type), and receiving instances must filter and deliver only to local WebSockets matching the authenticated owner identity.
 ```
 
 Acceptance criteria:
@@ -572,6 +575,7 @@ Acceptance criteria:
 1. Connect a UI client to owprov-1.
 2. Trigger a job or action through owprov-2.
 3. Verify required progress/completion information is available to the client through either cross-instance WebSocket fan-out or durable job-status polling.
+4. Cross-instance notification broadcast does not deliver user- or job-specific notifications to clients with non-matching owner identities.
 ```
 
 ---

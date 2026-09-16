@@ -977,14 +977,15 @@ Minimum fields:
 ```text
 id                  -- UUID primary key
 job_type            -- "VenueRebooter", "VenueUpgrade", "VenueConfigUpdater"
-user_id             -- User email who initiated the job
+owner_user_id       -- Stable Security service user identifier for authorization
+owner_email         -- User email for WebSocket delivery/display/audit
 parameters          -- JSON array/object of parameters (e.g. venueId, revision)
 status              -- pending, running, succeeded, failed
 owner_instance_id   -- ID of OWPROV instance currently executing the job
 lease_expires_at    -- Heartbeat lease expiration timestamp to detect worker crashes
 attempt_count       -- Number of execution attempts
 max_attempts        -- Maximum allowed execution attempts (e.g. 2)
-result              -- JSON result details (e.g. success/failed device lists)
+result              -- Summary JSON result details (minimized; excludes configuration bodies and secrets)
 error_message       -- Error text if the job failed
 created_at          -- Timestamp when job was submitted
 started_at          -- Timestamp when execution began
@@ -1005,8 +1006,8 @@ failed
 When a REST request starts a long-running action:
 
 ```text
-1. Validate the request.
-2. Insert a row into the jobs table with status 'pending', attempt_count = 0, and user_id.
+1. Validate the request and extract caller identity (UserInfo.id, UserInfo.email).
+2. Insert a row into the jobs table with status 'pending', attempt_count = 0, owner_user_id, and owner_email.
 3. Return the jobId and initial 'pending' status to the caller immediately via HTTP.
 4. A worker loop on an OWPROV instance atomically claims the pending job from PostgreSQL:
 
@@ -1054,7 +1055,7 @@ Surviving OWPROV instances periodically scan for crashed or abandoned jobs:
 
 Background tasks must record incremental progress or device-level execution states where possible. On crash recovery, operations are not blindly re-executed on devices that already completed the action.
 
-### 15.7 Job query endpoint
+### 15.7 Job query endpoint and access control
 
 Any OWPROV instance can serve job status queries from PostgreSQL:
 
@@ -1062,7 +1063,15 @@ Any OWPROV instance can serve job status queries from PostgreSQL:
 GET /api/v1/jobs/{id}
 ```
 
-The UI or API client can query any instance to inspect job status, progress, and results directly from PostgreSQL without requiring affinity to the instance that created or executed the job.
+Access control and data minimization rules:
+
+```text
+1. The endpoint requires authentication.
+2. Reads are allowed when the authenticated caller's Security user ID (UserInfo.id) matches job.owner_user_id.
+3. Reads are also allowed when the caller has an explicit admin or support permission/role covering the job's resource scope (e.g. venue/entity).
+4. Requests from callers who are neither the job owner nor authorized for the job's scope are rejected with 403 Forbidden.
+5. Job result payloads must contain only fields necessary to report job status and outcome. They must exclude secrets and configuration bodies, and access to the result must follow the same owner/scope authorization rules as the job row.
+```
 
 ---
 
@@ -1109,22 +1118,26 @@ If Kafka is not used for cross-instance UI notification delivery:
 
 ### 16.3 Notification event format (Option A)
 
-The Kafka notification message should directly wrap OWPROV's existing `WebSocketNotification` payload:
+The Kafka notification message defines an explicit envelope containing owner identity, job reference, and payload:
 
 ```text
-user: target user email (or empty string for broadcast to all users)
-type_id: notification type id (e.g. 1000 = fw_upgrade, 2000 = config_update, 3000 = rebooter)
-payload: JSON object containing { notification_id, type_id, content }
-source_instance_id: instance identifier that generated the event
-created_at: timestamp
+owner_user_id:      Security service user identifier (SecurityObjects::UserInfo.id) for authorization and audit
+owner_email:        User email (SecurityObjects::UserInfo.email) for local socket lookup
+job_id:             UUID of the associated job (or empty if not a job-related event)
+notification_type:  Notification type ID (e.g. 1000 = fw_upgrade, 2000 = config_update, 3000 = rebooter)
+source_instance_id: OWPROV instance identifier that generated the event
+created_at:         Timestamp
+payload:            JSON object containing { notification_id, type_id, content }
 ```
 
 Example Kafka JSON message:
 
 ```json
 {
-  "user": "user@example.com",
-  "type_id": 3000,
+  "owner_user_id": "99351e3e-4b2a-4f51-b0e6-a21234567890",
+  "owner_email": "user@example.com",
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "notification_type": 3000,
   "source_instance_id": "owprov-2",
   "created_at": 1726400000,
   "payload": {
@@ -1132,34 +1145,38 @@ Example Kafka JSON message:
     "type_id": 3000,
     "content": {
       "title": "Venue Reboot",
-      "jobId": "a1b2c3d4-...",
+      "jobId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "details": "Job Completed: 50 rebooted, 0 failed.",
-      "timeStamp": 1726400000,
-      "success": ["001122334455"],
-      "warning": []
+      "timeStamp": 1726400000
     }
   }
 }
 ```
 
-When an OWPROV instance consumes this message:
-- If `user` is non-empty: calls `UI_WebSocketClientServer()->SendToUser(user, type_id, payload_str)`
-- If `user` is empty: calls `UI_WebSocketClientServer()->SendToAll(type_id, payload_str)`
+When an OWPROV instance consumes this message from the broadcast topic:
+- It uses `owner_email` to find candidate connected WebSocket sessions on that local instance.
+- It verifies that the candidate socket's authenticated user ID matches `owner_user_id` before delivering the frame.
+- If no matching authenticated socket exists on that instance, the event is safely ignored and discarded by that replica.
+- Broadcast fan-out consumers must never deliver user- or job-specific notifications to arbitrary or unauthenticated clients.
 
 ### 16.4 Delivery behavior (Option A)
 
 Required behavior:
 
 ```text
-1. Instance generating the event publishes a notification event.
+1. The instance executing or finishing the action publishes a notification event to the broadcast topic with the complete ownership envelope (owner_user_id, owner_email, job_id, notification_type).
 
-2. Every OWPROV instance receives the notification event.
+2. Every OWPROV instance receives the notification event via its BroadcastConsumer.
 
-3. Each instance checks whether it has matching local WebSocket clients.
+3. Each instance filters the event against its local WebSocket client map:
+   - Uses owner_email to locate local socket sessions.
+   - Verifies the socket's authenticated user ID matches owner_user_id.
 
-4. The instance holding the socket delivers the event to the browser.
+4. Only the instance holding the matching authenticated socket delivers the event to the user's browser.
 
-5. If no socket is connected, durable job/status state remains queryable through API where required.
+5. Other instances with no matching authenticated socket safely discard the message.
+
+6. If the user has no active WebSocket connected to any instance, durable state remains queryable through GET /api/v1/jobs/{id}.
 ```
 
 Sticky WebSocket routing may be used for connection stability, but it is not the notification delivery mechanism.
@@ -1407,47 +1424,48 @@ runtime env files
 - spec.md reviewed
 ```
 
-### Phase 2: Database safety and Redis foundation
+### Phase 2: Database startup lock and transaction safety
 
 ```text
-- PostgreSQL startup advisory lock
-- PostgreSQL-enforced inventory and serial number uniqueness constraints
-- Redis shared cache-aside client integration
-- Post-commit cache invalidation framework
+- PostgreSQL startup advisory lock (prevents migration race on boot)
+- PostgreSQL unique constraints on device serial numbers (prevents duplicate device creation across instances)
+- Concurrent write protection with row-level locking (SELECT ... FOR UPDATE) and transaction rollback
 ```
 
-### Phase 3: Auth and in-memory cache refactoring
-
-```text
-- AuthCache refactored to Redis with PostgreSQL fallback
-- AuthClient refactored to Redis with Security service (owsec) REST fallback
-- SerialNumberCache and DeviceTypeCache migrated away from process-local decision state
-- EVENT_REMOVE_TOKEN Kafka broadcast cache invalidation
-```
-
-### Phase 4: Kafka and event coordination
+### Phase 3: Kafka consumer separation and service discovery
 
 ```text
 - Consumer separation: BroadcastConsumer (service_events) and GroupConsumer (connection)
-- Multi-replica service discovery registry tracking
-- Key-based producer partitioning per device
+- Multi-replica service discovery registry tracking (Services_[Type][InstanceId])
+- Key-based producer partitioning per device serial number
 - Consumer commit and retry safety
 ```
 
-### Phase 5: Durable jobs and notifications
+### Phase 4: Shared Redis caching and cache modernization
 
 ```text
-- Durable PostgreSQL jobs table with fenced lease model and heartbeat
-- Worker claim, expired reclaim, and device-level idempotency
-- Job status query endpoint
-- Cross-instance UI notification delivery
+- Redis shared cache-aside client integration and connection pooling
+- Post-commit cache invalidation framework (tied to DB transactions)
+- AuthCache and AuthClient migrated to Redis (with DB and Security service REST fallbacks)
+- SerialNumberCache and DeviceTypeCache migrated away from process-local memory
+- EVENT_REMOVE_TOKEN broadcast cache invalidation hook
+```
+
+### Phase 5: Durable background jobs and WebSocket UI notifications
+
+```text
+- PostgreSQL jobs table schema creation (with owner_user_id, owner_email, status, lease fields)
+- Background worker claim loop, fenced lease heartbeats, and expired-job reclaim
+- Job status query endpoint (GET /api/v1/jobs/{id}) with owner and scope access control
+- Cross-instance UI notification delivery (Kafka fan-out with owner envelope and local socket filtering)
+- Device-level execution progress tracking and idempotency
 ```
 
 ### Phase 6: Runtime deployment and scale-out validation
 
 ```text
-- Runtime file consistency validation
-- Docker Compose multi-instance topology and load balancing
+- Runtime shared file consistency validation
+- Docker Compose multi-instance topology and load balancer configuration
 - Readiness probes and graceful shutdown/drain handling
 - End-to-end active-active scale-out verification
 ```
