@@ -214,6 +214,12 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
+		// V2 strictly requires venueIds to be a JSON array if provided
+		if (RawObj->has("venueIds") && !RawObj->isArray("venueIds")) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+							  "Field 'venueIds' must be a JSON array of venue UUIDs.");
+		}
+
 		// V2 strictly extracts venueIds array (single venue string is not used)
 		auto Scopes = ParseVenueIds(RawObj);
 		if (Scopes.empty()) {
@@ -404,6 +410,11 @@ namespace OpenWifi {
 				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
 					"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
 			}
+		}
+
+		if (RawObject->has("venueIds")) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+				"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
 		}
 
 		if (RawObject->has("users")) {

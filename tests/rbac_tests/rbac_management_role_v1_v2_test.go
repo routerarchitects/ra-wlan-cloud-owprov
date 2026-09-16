@@ -510,4 +510,38 @@ func TestManagementRole_V2_Negative_Scenarios(t *testing.T) {
 			t.Errorf("Expected 400 Bad Request for empty policy, got %d. Body: %s", status, string(body))
 		}
 	})
+
+	t.Run("Negative: Non-array string venueIds returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"name":             "v2-neg-string-venueids",
+			"entity":           fixtures.entityA,
+			"venueIds":         fixtures.venueA1, // String instead of array!
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for string venueIds, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Non-array object venueIds returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"name":             "v2-neg-object-venueids",
+			"entity":           fixtures.entityA,
+			"venueIds":         map[string]string{"id": fixtures.venueA1}, // Object instead of array!
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for object venueIds, got %d. Body: %s", status, string(body))
+		}
+	})
 }
