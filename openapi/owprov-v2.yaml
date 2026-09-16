@@ -70,7 +70,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ManagementRole'
+                oneOf:
+                  - $ref: '#/components/schemas/ManagementRole'
+                  - $ref: '#/components/schemas/ExpandedUseEntryMapList'
         400:
           $ref: '#/components/responses/BadRequest'
         403:
@@ -302,4 +304,33 @@ components:
             type: string
             format: uuid
           description: List of venue UUIDs to assign the role to (empty for entity-wide)
+
+    ExpandedUseEntry:
+      type: object
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+
+    ExpandedUseEntryMap:
+      type: object
+      properties:
+        type:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpandedUseEntry'
+
+    ExpandedUseEntryMapList:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpandedUseEntryMap'
 
