@@ -142,9 +142,11 @@ namespace OpenWifi {
 									  ProvObjects::ManagementRole &ExistingRole) {
 		std::string WhereClause;
 		if (venueId.empty()) {
-			WhereClause = Poco::format("entity='%s' AND (venue IS NULL OR venue='') AND users LIKE '%%%s%%'", entityId, userId);
+			WhereClause = Poco::format("entity='%s' AND (venue IS NULL OR venue='') AND users LIKE '%%%s%%'",
+									   ORM::Escape(entityId), ORM::Escape(userId));
 		} else {
-			WhereClause = Poco::format("entity='%s' AND venue='%s' AND users LIKE '%%%s%%'", entityId, venueId, userId);
+			WhereClause = Poco::format("entity='%s' AND venue='%s' AND users LIKE '%%%s%%'",
+									   ORM::Escape(entityId), ORM::Escape(venueId), ORM::Escape(userId));
 		}
 
 		std::vector<ProvObjects::ManagementRole> CandidateRoles;

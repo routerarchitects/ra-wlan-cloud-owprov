@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // Helper structure to parse V2 role response envelope
@@ -49,17 +50,17 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 	}
 
 	fixtures := testFixtures{
-		entityA:     getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "c59573d8-54be-42d4-b087-b372317203af"),
-		entityB:     getEnvOrDefault("OPERATOR_B_ENTITY_UUID", "dc6882e2-f7b4-4098-9275-6e49f83f6739"),
-		venueA1:     getEnvOrDefault("VENUE_A1_UUID", "2211d28a-a985-434a-ad68-ca5ac4559852"),
-		venueA2:     getEnvOrDefault("VENUE_A2_UUID", "bb52f7ad-b7a6-4427-a493-65ff206e7bd1"),
-		venueB1:     getEnvOrDefault("VENUE_B1_UUID", "9f8269e3-5931-4dba-b43e-b528be910ad5"),
-		policyValid: getEnvOrDefault("POLICY_VALID_ID", "772714b3-dc89-41e8-832d-7ba6e88e6cc2"),
-		userValid:   getEnvOrDefault("USER_VALID_ID", "11111111-0000-0000-6666-999999999999"),
+		entityA:     getEnvOrDefault("OPERATOR_A_ENTITY_UUID", ""),
+		entityB:     getEnvOrDefault("OPERATOR_B_ENTITY_UUID", ""),
+		venueA1:     getEnvOrDefault("VENUE_A1_UUID", ""),
+		venueA2:     getEnvOrDefault("VENUE_A2_UUID", ""),
+		venueB1:     getEnvOrDefault("VENUE_B1_UUID", ""),
+		policyValid: getEnvOrDefault("POLICY_VALID_ID", ""),
+		userValid:   getEnvOrDefault("USER_VALID_ID", ""),
 		token:       token,
 	}
 
-	// Dynamic discovery if defaults are not available
+	// 1. Discover existing entities
 	var entResp struct {
 		Entities []struct {
 			ID     string   `json:"id"`
@@ -67,29 +68,199 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 		} `json:"entities"`
 	}
 	if status, body, err := clientV1.DoRequest("GET", "/entity", token, nil); err == nil && status == http.StatusOK {
-		if err := json.Unmarshal(body, &entResp); err == nil {
-			for _, ent := range entResp.Entities {
-				if len(ent.Venues) >= 2 && fixtures.entityA == "" {
-					fixtures.entityA = ent.ID
+		_ = json.Unmarshal(body, &entResp)
+	}
+
+	// Select or create entityA
+	if fixtures.entityA == "" {
+		for _, ent := range entResp.Entities {
+			if ent.ID != "" && ent.ID != "0000-0000-0000" {
+				fixtures.entityA = ent.ID
+				if len(ent.Venues) >= 1 && fixtures.venueA1 == "" {
 					fixtures.venueA1 = ent.Venues[0]
+				}
+				if len(ent.Venues) >= 2 && fixtures.venueA2 == "" {
 					fixtures.venueA2 = ent.Venues[1]
-				} else if len(ent.Venues) >= 1 && ent.ID != fixtures.entityA {
-					fixtures.entityB = ent.ID
-					fixtures.venueB1 = ent.Venues[0]
+				}
+				break
+			}
+		}
+	}
+
+	if fixtures.entityA == "" {
+		payload := map[string]interface{}{
+			"name":   fmt.Sprintf("fixture-entity-a-%d", time.Now().UnixNano()),
+			"parent": "0000-0000-0000",
+		}
+		if status, body, err := clientV1.DoRequest("POST", "/entity/0", token, payload); err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+				fixtures.entityA = created.ID
+			}
+		}
+	}
+
+	// Ensure entityA has at least 2 distinct venues
+	if fixtures.entityA != "" {
+		// Fetch fresh entity details if venues are not populated
+		if fixtures.venueA1 == "" || fixtures.venueA2 == "" {
+			var entDetail struct {
+				Venues []string `json:"venues"`
+			}
+			if status, body, err := clientV1.DoRequest("GET", fmt.Sprintf("/entity/%s", fixtures.entityA), token, nil); err == nil && status == http.StatusOK {
+				if err := json.Unmarshal(body, &entDetail); err == nil {
+					if len(entDetail.Venues) >= 1 && fixtures.venueA1 == "" {
+						fixtures.venueA1 = entDetail.Venues[0]
+					}
+					if len(entDetail.Venues) >= 2 && fixtures.venueA2 == "" {
+						fixtures.venueA2 = entDetail.Venues[1]
+					}
+				}
+			}
+		}
+
+		if fixtures.venueA1 == "" {
+			payload := map[string]interface{}{
+				"name":   fmt.Sprintf("fixture-venue-a1-%d", time.Now().UnixNano()),
+				"entity": fixtures.entityA,
+			}
+			if status, body, err := clientV1.DoRequest("POST", "/venue/0", token, payload); err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+				var created struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+					fixtures.venueA1 = created.ID
+				}
+			}
+		}
+
+		if fixtures.venueA2 == "" || fixtures.venueA2 == fixtures.venueA1 {
+			payload := map[string]interface{}{
+				"name":   fmt.Sprintf("fixture-venue-a2-%d", time.Now().UnixNano()),
+				"entity": fixtures.entityA,
+			}
+			if status, body, err := clientV1.DoRequest("POST", "/venue/0", token, payload); err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+				var created struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+					fixtures.venueA2 = created.ID
 				}
 			}
 		}
 	}
 
-	var polResp struct {
-		ManagementPolicies []struct {
-			ID string `json:"id"`
-		} `json:"managementPolicies"`
-	}
-	if status, body, err := clientV1.DoRequest("GET", "/managementPolicy", token, nil); err == nil && status == http.StatusOK {
-		if err := json.Unmarshal(body, &polResp); err == nil && len(polResp.ManagementPolicies) > 0 {
-			fixtures.policyValid = polResp.ManagementPolicies[0].ID
+	// Select or create entityB and venueB1 for cross-entity tests
+	if fixtures.entityB == "" {
+		for _, ent := range entResp.Entities {
+			if ent.ID != "" && ent.ID != "0000-0000-0000" && ent.ID != fixtures.entityA {
+				fixtures.entityB = ent.ID
+				if len(ent.Venues) >= 1 && fixtures.venueB1 == "" {
+					fixtures.venueB1 = ent.Venues[0]
+				}
+				break
+			}
 		}
+	}
+
+	if fixtures.entityB == "" {
+		payload := map[string]interface{}{
+			"name":   fmt.Sprintf("fixture-entity-b-%d", time.Now().UnixNano()),
+			"parent": "0000-0000-0000",
+		}
+		if status, body, err := clientV1.DoRequest("POST", "/entity/0", token, payload); err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+				fixtures.entityB = created.ID
+			}
+		}
+	}
+
+	if fixtures.entityB != "" && fixtures.venueB1 == "" {
+		var entDetail struct {
+			Venues []string `json:"venues"`
+		}
+		if status, body, err := clientV1.DoRequest("GET", fmt.Sprintf("/entity/%s", fixtures.entityB), token, nil); err == nil && status == http.StatusOK {
+			if err := json.Unmarshal(body, &entDetail); err == nil && len(entDetail.Venues) >= 1 {
+				fixtures.venueB1 = entDetail.Venues[0]
+			}
+		}
+		if fixtures.venueB1 == "" {
+			payload := map[string]interface{}{
+				"name":   fmt.Sprintf("fixture-venue-b1-%d", time.Now().UnixNano()),
+				"entity": fixtures.entityB,
+			}
+			if status, body, err := clientV1.DoRequest("POST", "/venue/0", token, payload); err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+				var created struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+					fixtures.venueB1 = created.ID
+				}
+			}
+		}
+	}
+
+	// Discover existing valid policy, or create one
+	if fixtures.policyValid == "" {
+		var polResp struct {
+			ManagementPolicies []struct {
+				ID string `json:"id"`
+			} `json:"managementPolicies"`
+		}
+		if status, body, err := clientV1.DoRequest("GET", "/managementPolicy", token, nil); err == nil && status == http.StatusOK {
+			if err := json.Unmarshal(body, &polResp); err == nil && len(polResp.ManagementPolicies) > 0 {
+				fixtures.policyValid = polResp.ManagementPolicies[0].ID
+			}
+		}
+	}
+
+	if fixtures.policyValid == "" {
+		payload := map[string]interface{}{
+			"name":        fmt.Sprintf("fixture-policy-%d", time.Now().UnixNano()),
+			"description": "Auto-created test policy",
+			"entries": []map[string]interface{}{
+				{
+					"resources": []string{"*"},
+					"actions":   []string{"*"},
+				},
+			},
+		}
+		if status, body, err := clientV1.DoRequest("POST", "/managementPolicy/0", token, payload); err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+				fixtures.policyValid = created.ID
+			}
+		}
+	}
+
+	// Discover existing user from management roles or fall back to default root user
+	if fixtures.userValid == "" {
+		var roleList struct {
+			Roles []struct {
+				Users []string `json:"users"`
+			} `json:"roles"`
+		}
+		if status, body, err := clientV1.DoRequest("GET", "/managementRole", token, nil); err == nil && status == http.StatusOK {
+			if err := json.Unmarshal(body, &roleList); err == nil {
+				for _, r := range roleList.Roles {
+					if len(r.Users) > 0 && r.Users[0] != "" {
+						fixtures.userValid = r.Users[0]
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if fixtures.userValid == "" {
+		fixtures.userValid = "00000000-0000-0000-0000-000000000001"
 	}
 
 	return fixtures

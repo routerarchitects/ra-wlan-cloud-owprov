@@ -260,6 +260,8 @@ components:
 
     ManagementRoleList:
       type: object
+      required:
+        - roles
       properties:
         roles:
           type: array
