@@ -15,6 +15,72 @@ security:
   - ApiKeyAuth: []
 
 paths:
+  /managementRole:
+    get:
+      tags:
+        - Management Roles
+      operationId: getManagementRolesV2
+      summary: Retrieve a list of management roles (V2).
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+            format: uuid
+          description: Filter roles assigned to a specific user UUID
+          required: false
+        - in: query
+          name: user
+          schema:
+            type: string
+            format: uuid
+          description: Alias for userId
+          required: false
+        - in: query
+          name: entity
+          schema:
+            type: string
+            format: uuid
+          description: Filter roles by entity UUID
+          required: false
+        - in: query
+          name: offset
+          schema:
+            type: integer
+          description: 'How many items to skip from the start (default: 0).'
+          required: false
+        - in: query
+          name: limit
+          schema:
+            type: integer
+          description: Maximum number of entries to return
+          required: false
+        - in: query
+          name: select
+          schema:
+            type: string
+          description: Comma-separated list of IDs to select
+          required: false
+        - in: query
+          name: countOnly
+          schema:
+            type: boolean
+          description: Return the number of roles only
+          required: false
+      responses:
+        200:
+          description: Return a list of management roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagementRoleList'
+        400:
+          $ref: '#/components/responses/BadRequest'
+        403:
+          $ref: '#/components/responses/Unauthorized'
+        404:
+          $ref: '#/components/responses/NotFound'
+
   /managementRole/{id}:
     post:
       tags:
