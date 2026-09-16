@@ -161,18 +161,18 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 
 ### 6.1: API behavior must not depend on process-local in-memory caches
 
-OWPROV currently has process-local in-memory caches such as `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar cache structures.
+OWPROV currently has process-local in-memory caches such as `AuthCache`, `AuthClient`, `SerialNumberCache`, `DeviceTypeCache`, or similar cache structures.
 
 For multi-instance operation, these caches must not be used as process-local API decision sources.
 
 API paths that require cached reads must follow the shared Redis cache-aside model defined in Section 5.2.
 
-This section focuses on the cache-safety rule for existing process-local cache classes: they may remain only as wrappers around Redis/PostgreSQL-backed behavior, not as per-process API decision state.
+This section focuses on the cache-safety rule for existing process-local cache classes: they may remain only as wrappers around Redis shared caching or authoritative backend fallbacks, not as per-process authoritative API decision state.
 
 **Required behavior:**
 
 ```text
-1. API read paths must not rely on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches as the decision source.
+1. API read paths must not rely on process-local AuthCache, AuthClient, SerialNumberCache, DeviceTypeCache, or similar in-memory caches as the decision source.
 2. Cached API reads must follow the shared cache-aside model defined in Section 5.2.
 3. API write/update/delete paths must persist required state to PostgreSQL.
 4. After successful PostgreSQL commit, affected Redis cache keys must be invalidated.
@@ -192,33 +192,37 @@ This section focuses on the cache-safety rule for existing process-local cache c
 
 ---
 
-### 6.2: Authorization decisions must use Redis shared cache with PostgreSQL
+### 6.2: Authorization and authentication decisions must use Redis shared cache with authoritative backends
 
-Authorization must not depend on which OWPROV instance receives the request.
+Authorization and authentication checks must not depend on which OWPROV instance receives the request, nor on process-local in-memory cache state. 
 
-For multi-instance operation, authorization-related API checks must not depend on process-local `AuthCache` state.
-
-Authorization data may be cached in Redis, but the fallback/source-of-truth data must come from PostgreSQL-backed state where OWPROV owns the data.
+The architecture distinguishes two distinct categories of authorization and authentication state:
+1. **OWPROV-Owned Authorization Data** (management roles, policies, entity scopes, permissions): Source of truth is OWPROV PostgreSQL. Cache misses reload from PostgreSQL. Invalidation occurs after PostgreSQL commit.
+2. **Security-Service-Owned Authentication Data** (user session tokens `Authorization: Bearer <token>`, subscriber tokens validated via `AuthClient`): Source of truth is the OpenWiFi Security Microservice (`owsec`). Cache misses query `owsec` REST endpoints (`/api/v1/validateToken`, `/api/v1/validateSubToken`), NOT OWPROV PostgreSQL. Invalidation occurs upon receiving `EVENT_REMOVE_TOKEN` broadcast over Kafka `service_events`.
 
 **Required behavior:**
 
 ```text
-1. Authorization-related API checks may read from Redis shared cache.
-2. If required authorization data is not present in Redis, the API path must read from PostgreSQL-backed state.
-3. Permission, role, policy, token, and management-scope changes owned by OWPROV must be persisted in PostgreSQL.
-4. After a successful authorization-related write, affected Redis authorization cache keys must be invalidated.
-5. Authorization behavior must not require process-local AuthCache synchronization between OWPROV instances.
+1. Authorization and authentication API checks may read from Redis shared cache.
+2. If OWPROV-owned authorization data is not present in Redis, the API path must read from PostgreSQL-backed state.
+3. If token or API-key validation data is not present in Redis, AuthClient must call the Security service (owsec) REST API, not PostgreSQL.
+4. Permission, role, policy, and management-scope changes owned by OWPROV must be persisted in PostgreSQL and invalidate affected Redis keys after commit.
+5. On receiving EVENT_REMOVE_TOKEN over Kafka service_events broadcast, the instance must delete the affected Redis token key and purge any local fallback cache entry.
+6. Authorization and authentication behavior must not require process-local AuthCache or AuthClient cache synchronization between OWPROV instances.
 ```
 
 **Acceptance criteria:**
 
 ```text
 1. Start owprov-1 and owprov-2.
-2. Change or revoke a user's permission through owprov-1.
-3. Confirm the permission change is persisted in PostgreSQL.
-4. Confirm affected Redis authorization cache keys are invalidated.
-5. Send an API request that requires that permission to owprov-2.
-6. owprov-2 authorizes or rejects the request using Redis shared cache or PostgreSQL reload, not local AuthCache state.
+2. Change or revoke a user's management role/permission through owprov-1:
+   - Confirm the change is persisted in PostgreSQL.
+   - Confirm affected Redis authorization cache keys are invalidated.
+   - Send an API request requiring that permission to owprov-2; confirm owprov-2 authorizes or rejects the request using Redis shared cache or PostgreSQL reload, not local AuthCache state.
+3. Revoke a user session token or log out in owsec:
+   - owsec emits EVENT_REMOVE_TOKEN over Kafka service_events.
+   - All OWPROV instances receive the event and invalidate the shared Redis token key.
+   - A subsequent request with that token to any OWPROV instance is rejected after validating against Redis/owsec.
 ```
 
 ---
@@ -341,7 +345,7 @@ OWPROV must support two consumer types:
 2. "service_events" must be registered on BroadcastConsumer.
 3. "connection" must be registered on GroupConsumer.
 4. GroupConsumer must use the shared group.id so one message is processed by one instance.
-5. BroadcastConsumer must use an instance-unique group.id so every instance receives broadcast messages.
+5. BroadcastConsumer must use an instance-unique group.id stable across restarts (group.id = prov-<instance-id>-broadcast) with auto.offset.reset = earliest so every instance receives broadcast messages and immediately populates discovery state on startup.
 6. Kafka client.id must also be unique per instance for logs and observability.
 ```
 
@@ -360,24 +364,26 @@ OWPROV must support two consumer types:
 
 ### 8.2: service_events must be delivered to every instance
 
-`service_events` is a broadcast topic.
+`service_events` is a broadcast topic providing dynamic service discovery data across microservices.
 
 **Required behavior:**
 
 ```text
 1. Every instance must receive service join, keep-alive, leave, and remove-token events.
 2. Every instance must maintain a compatible service discovery view.
-3. Token invalidation events must reach every instance that may hold relevant token/auth state.
-4. One instance consuming a service event must not prevent other instances from receiving it.
+3. Service discovery registries must track active replicas by instance identifier so that an individual replica's departure does not unregister a shared load-balanced service endpoint while other replicas remain active.
+4. Token invalidation events must reach every instance that may hold relevant token/auth state.
+5. One instance consuming a service event must not prevent other instances from receiving it.
 ```
 
 **Acceptance criteria:**
 
 ```text
-1. Start owprov-1 and owprov-2.
+1. Start owprov-1 and owprov-2 behind a shared private endpoint.
 2. Publish or trigger service_events.
 3. Verify both instances receive and process the same service event.
-4. Verify internal service lookup does not fail on one replica only because another replica consumed the event.
+4. Shutting down owprov-1 removes only owprov-1 from the peer discovery view without dropping the shared OWPROV service registration while owprov-2 is running.
+5. Verify internal service lookup does not fail on one replica only because another replica consumed the event.
 ```
 
 ---
@@ -438,10 +444,11 @@ Horizontal scaling requires a clear distinction between shared service identity 
 **Required behavior:**
 
 ```text
-1. Each instance must have a unique instance identity for logs, metrics, Kafka client id, and broadcast group identity.
-2. The public OWPROV service endpoint must remain stable behind the load balancer.
-3. If private per-instance endpoints are advertised, they must not collide and must be reachable by intended peers.
-4. Internal API key/hash behavior must remain consistent where it depends on shared public endpoint configuration.
+1. Each instance must have a unique instance identity for logs, metrics, Kafka client id, broadcast group identity, and service_events ID.
+2. The service_events ID field must uniquely and stably identify the individual replica (derived from or mapped to instance identity) so two simultaneously running replicas never emit the same ID.
+3. The public OWPROV service endpoint must remain stable behind the load balancer.
+4. If private per-instance endpoints are advertised, they must not collide and must be reachable by intended peers.
+5. Internal API key/hash behavior must remain consistent where it depends on shared public endpoint configuration.
 ```
 
 **Acceptance criteria:**
@@ -449,7 +456,8 @@ Horizontal scaling requires a clear distinction between shared service identity 
 ```text
 1. Logs clearly identify which OWPROV instance produced each entry.
 2. Kafka clients can be distinguished per running instance.
-3. Service discovery does not accidentally collapse multiple replicas into ambiguous or conflicting records.
+3. Two simultaneously running replicas emit distinct service_events IDs.
+4. Service discovery does not accidentally collapse multiple replicas into ambiguous or conflicting records.
 ```
 
 ---
@@ -584,7 +592,7 @@ Required behavior:
 4. All OWPROV instances must use the same Kafka cluster.
 5. Each OWPROV instance must have unique instance identity where required.
 6. The public OWPROV endpoint must be load-balanced through the Nginx load balancer.
-7. Health/readiness behavior must prevent unsafe instances from receiving traffic.
+7. Health/readiness behavior must prevent instances from receiving traffic until dependencies (PostgreSQL, Redis, Kafka, and required upstream microservices) are ready.
 8. Shutdown must stop accepting new traffic before terminating long-running work where possible.
 9. Instance-specific environment values must not conflict across replicas.
 ```
@@ -595,7 +603,8 @@ Acceptance criteria:
 1. At least two OWPROV instances run in Docker Compose.
 2. Requests can be routed to either instance.
 3. The same API read request returns consistent shared-state results from either instance.
-4. Restarting one instance does not corrupt shared state or lose durable work.
+4. An instance does not become ready for traffic until required upstream dependency services are discovered.
+5. Restarting one instance does not corrupt shared state or lose durable work.
 ```
 
 ---

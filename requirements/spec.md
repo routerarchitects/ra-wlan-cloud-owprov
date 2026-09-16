@@ -32,7 +32,7 @@ The horizontal scaling implementation must provide:
 - active-active OWPROV instances
 - no REST/API request stickiness requirement
 - shared Redis cache-aside model with PostgreSQL as the source of truth
-- no API dependency on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches
+- no API dependency on process-local AuthCache, AuthClient (Cache_/ApiKeyCache_), SerialNumberCache, DeviceTypeCache, or similar in-memory caches
 - cache invalidation after committed POST/PUT/DELETE operations
 - explicit Kafka delivery behavior per topic
 - safe database startup coordination
@@ -293,29 +293,34 @@ Implementation rules:
 
 ### 6.4 Process-local cache usage
 
-In multi-instance mode, OWPROV API paths must not use process-local caches for API decisions.
+In multi-instance mode, OWPROV API paths must not use process-local caches for authoritative API decisions.
 
-API handlers that currently depend on `AuthCache`, `SerialNumberCache`, `DeviceTypeCache`, or similar in-memory structures must be changed to use the shared cache-aside model defined in Sections 6.2 and 6.3.
+API handlers that currently depend on `AuthCache`, `AuthClient`, `SerialNumberCache`, `DeviceTypeCache`, or similar in-memory structures must be changed to use the shared cache-aside model defined in Sections 6.2 and 6.3.
 
-If any of these cache classes remain in the codebase, they may be refactored to wrap Redis/PostgreSQL-backed behavior, but they must not keep process-local authoritative API decision state.
+If any of these cache classes remain in the codebase, they may be refactored to wrap Redis shared caching or direct service/database fallbacks, but they must not keep process-local authoritative API decision state.
 
 Required behavior:
 
 ```text
-1. Authorization checks must not use process-local AuthCache as the decision source.
-2. Serial-number existence, uniqueness, and search behavior must not use process-local SerialNumberCache as the decision source.
-3. Device type validation must not use process-local DeviceTypeCache as the decision source.
-4. API response decisions must use Redis shared cache or PostgreSQL-backed state.
-5. Updating one OWPROV instance must not require updating another instance's local cache before the second instance can return the correct API result.
+1. Authorization and role checks must not use process-local AuthCache as the decision source.
+2. Token and API-key authentication must not use process-local AuthClient caches as the authoritative decision source across instances.
+3. Serial-number existence, uniqueness, and search behavior must not use process-local SerialNumberCache as the decision source.
+4. Device type validation must not use process-local DeviceTypeCache as the decision source.
+5. API response decisions must use Redis shared cache or the appropriate authoritative backing source (OWPROV PostgreSQL for entity data; Security service REST API for token validation).
+6. Updating one OWPROV instance must not require updating another instance's local cache before the second instance can return the correct API result.
 ```
 
 ---
 
-## 7. Authorization Specification
+## 7. Authorization & Authentication Specification
 
-### 7.1 AuthCache behavior
+The architecture distinguishes between two separate categories of authorization and authentication state:
+1. **OWPROV-Owned Authorization State**: Management roles, policies, entity scopes, and access permissions.
+2. **Security-Service-Owned Authentication State (`AuthClient`)**: User session tokens (`Authorization: Bearer <token>`), subscriber tokens.
 
-In multi-instance mode, OWPROV authorization-related API checks must not use process-local `AuthCache` as the decision source.
+### 7.1 OWPROV-Owned Authorization (Management Roles, Policies, Scopes)
+
+In multi-instance mode, OWPROV authorization-related API checks (roles, policies, management scopes) must not use process-local `AuthCache` as the decision source.
 
 Authorization checks may use Redis shared cache.
 
@@ -328,38 +333,51 @@ Required behavior:
 ```text
 1. Authorization checks read from Redis shared cache where available.
 2. Redis cache misses read from PostgreSQL-backed state.
-3. Permission, role, policy, token, and management-scope changes are persisted in PostgreSQL-backed state where OWPROV owns the data.
-4. After successful authorization-related writes, affected Redis authorization cache keys are invalidated.
+3. Permission, role, policy, and management-scope changes are persisted in PostgreSQL-backed state where OWPROV owns the data.
+4. After successful authorization-related writes, affected Redis authorization cache keys are invalidated (DEL).
 5. Authorization results must not depend on which OWPROV instance receives the request.
 ```
 
-### 7.2 Revocation behavior
+### 7.2 Security-Service-Owned Authentication (AuthClient: Token & API Key Validation)
 
-Permission, role, policy, token, or management-scope changes must be visible to all OWPROV instances.
+OWPROV validates incoming user session tokens (`Authorization: Bearer <token>`), subscriber tokens through `AuthClient` (`src/framework/AuthClient.h`, `src/framework/AuthClient.cpp`).
+
+In single-instance mode, `AuthClient` maintains process-local `ExpireLRUCache` instances.
+
+In multi-instance mode:
+
+```text
+1. Shared Redis Token Cache: Validated token and metadata may be cached in Redis using hashed keys with TTL matching the token's remaining lifetime (capped to a safe maximum, e.g., 20 minutes).
+2. Cache Miss Target: On a Redis cache miss, AuthClient MUST call the OpenWiFi Security Service (owsec) REST endpoints (/api/v1/validateToken, /api/v1/validateSubToken), NOT OWPROV PostgreSQL. OWPROV PostgreSQL does not store Security-service session tokens or user API keys.
+3. Token Invalidation (EVENT_REMOVE_TOKEN): When a token is revoked or a user logs out in owsec, owsec publishes an EVENT_REMOVE_TOKEN broadcast event over Kafka service_events. Every OWPROV instance receives this broadcast via its BroadcastConsumer and invalidates the Redis key as well as any process-local fallback cache entry.
+4. Process-local AuthClient::Cache_ and ApiKeyCache_ must not act as authoritative decision sources across instances.
+```
+
+### 7.3 Revocation behavior
+
+Permission, role, policy, and token/API-key changes must be visible to all OWPROV instances immediately.
 
 Required behavior:
 
 ```text
 1. A permission change handled by owprov-1 must affect a later API request requiring that permission when the request is handled by owprov-2.
 2. Revoked privileges must not remain accepted because owprov-2 has old process-local authorization state.
-3. Token removal or revocation must update PostgreSQL-backed state where OWPROV owns the affected token state.
-4. Affected Redis authorization cache keys must be invalidated after the committed change.
-5. Authorization checks must not rely on process-local cache synchronization between OWPROV instances.
+3. Token removal or logout broadcast via EVENT_REMOVE_TOKEN from owsec must immediately invalidate the corresponding Redis token validation entry.
+4. OWPROV-owned role/policy modifications must invalidate affected Redis authorization keys after the committed PostgreSQL write.
+5. Authorization and token checks must not rely on process-local cache synchronization between OWPROV instances.
 ```
 
-### 7.3 Implementation direction
+### 7.4 Implementation direction
 
-For the first implementation, use Redis shared cache for cached authorization reads and PostgreSQL reload on cache miss.
-
-Implementation rules:
+For the first implementation:
 
 ```text
-1. Identify API handlers that currently use AuthCache for permission, role, policy, token, or management-scope decisions.
-2. Replace process-local AuthCache decision behavior with Redis shared cache reads.
-3. On Redis miss, reload authorization data from PostgreSQL-backed state.
-4. Persist permission, role, policy, token, and management-scope changes to PostgreSQL-backed state where OWPROV owns the data.
-5. Invalidate affected Redis authorization keys after successful PostgreSQL commit.
-6. Do not add a process-local AuthCache synchronization system between OWPROV instances.
+1. Identify API handlers that currently use AuthCache for permission, role, policy, or management-scope decisions.
+2. Replace process-local AuthCache decision behavior with Redis shared cache reads, falling back to PostgreSQL on miss.
+3. Refactor AuthClient to check and populate Redis shared cache for token/API-key validation, falling back to the Security service REST API on miss.
+4. Persist OWPROV permission, role, policy, and management-scope changes to PostgreSQL-backed state, and invalidate affected Redis keys after successful PostgreSQL commit.
+5. On EVENT_REMOVE_TOKEN Kafka message receipt, issue Redis DEL for the affected token cache key.
+6. Do not add process-local AuthCache or AuthClient synchronization systems between OWPROV instances.
 ```
 
 ---
@@ -650,8 +668,9 @@ BroadcastConsumer is used when every OWPROV instance must receive each message.
 Configuration pattern:
 
 ```text
-group.id = prov-<instance-id>-broadcast
-client.id = <instance-id>-broadcast-consumer
+group.id = prov-<OWPROV_INSTANCE_ID>-broadcast
+client.id = <OWPROV_INSTANCE_ID>-broadcast-consumer
+auto.offset.reset = earliest
 ```
 
 Initial topic assignment:
@@ -663,42 +682,70 @@ service_events -> BroadcastConsumer
 Required behavior:
 
 ```text
-1. Each OWPROV instance has its own broadcast consumer group.
+1. Each OWPROV instance has its own broadcast consumer group derived from its instance identity (group.id = prov-<OWPROV_INSTANCE_ID>-broadcast), which remains stable across container restarts.
 
-2. Every OWPROV instance receives every service_events message.
+2. On container restart, the broadcast consumer resumes from its last committed offset to immediately receive any service events published during the restart window.
 
-3. One instance consuming a service event must not prevent another instance from consuming the same service event.
+3. On initial cold start of a new replica with no committed offset, auto.offset.reset = earliest replays active service discovery events to immediately populate the local registry.
 
-4. Broadcast handlers must be safe to run independently on every instance.
+4. Every OWPROV instance receives every service_events message.
+
+5. One instance consuming a service event must not prevent another instance from consuming the same service event.
+
+6. Broadcast handlers must be safe to run independently on every instance.
 ```
 
 ---
 
-### 12.4 service_events behavior
+### 12.4 service_events behavior and instance-aware discovery
 
-`service_events` must provide every OWPROV instance with service discovery data.
+`service_events` provides every OWPROV instance and peer microservice with service discovery data.
 
-Required handler behavior:
+In an active-active multi-instance deployment behind a load balancer, all OWPROV replicas advertise the shared load-balanced private endpoint (`https://owprov-internal:17005`) while emitting unique per-instance identifiers (`ID` field).
+
+To ensure that an individual replica's shutdown or restart does not unregister the shared service endpoint while other replicas remain healthy, service discovery registries maintain instance-aware membership:
+
+Payload structure:
 
 ```text
-1. JOIN:
-   update service discovery view for the announced service instance.
+EVENT:   JOIN, KEEP_ALIVE, LEAVE, EVENT_REMOVE_TOKEN
+ID:      <unique-instance-id> (stably derived from or mapped to OWPROV_INSTANCE_ID)
+TYPE:    owprov (logical service type)
+PRIVATE: https://owprov-internal:17005 (shared load-balanced private endpoint)
+PUBLIC:  https://owprov.example.com:16005 (shared load-balanced public endpoint)
+KEY:     <shared-service-key>
+VRSN:    <daemon-version>
+```
 
-2. KEEP_ALIVE:
-   refresh liveness timestamp for the announced service instance.
+Required handler and registry behavior:
+
+```text
+1. Multi-Replica Registry Tracking:
+   - The in-memory discovery registry tracks active replicas per service type and instance ID: Services_[Type][InstanceID] -> MicroServiceMeta.
+   - Inter-service client resolution (e.g. GetServices(Type)) returns the active endpoint as long as at least one healthy replica is present in the registry.
+
+2. JOIN & KEEP_ALIVE:
+   - Inserts or updates the liveness timestamp and metadata for the specific announcing InstanceID.
 
 3. LEAVE:
-   remove or mark stale only the announcing service instance.
+   - Removes only the announcing InstanceID from the active replica set (Services_[Type].erase(InstanceID)).
+   - The logical service endpoint remains active and routable as long as other replicas of that service type remain registered.
+   - The logical service entry is removed from routing only when its last active replica leaves or times out.
 
 4. EVENT_REMOVE_TOKEN:
-   update PostgreSQL-backed token/auth state where OWPROV owns the affected token state, then invalidate affected Redis authorization cache keys after the committed change.
+   - Invalidate the Redis shared token validation cache key and remove any process-local `AuthClient` cache entry upon receiving token revocation from `owsec`.
+
+5. Startup & Bootstrap:
+   - BroadcastConsumer for service_events uses auto.offset.reset = earliest so newly started replicas discover existing peer services immediately on boot.
+   - Restarting replicas resume from their stable group.id committed offset.
+   - An instance is considered ready only after required upstream dependency microservices (such as security, gateway, and firmware services) have been discovered in the service discovery registry.
 ```
 
 Local `Services_` state may remain process-local only if every OWPROV instance receives every required `service_events` message through BroadcastConsumer.
 
 If reliable broadcast delivery is not implemented, service discovery must move to a shared registry source.
 
-`EVENT_REMOVE_TOKEN` must not rely on local `AuthCache` invalidation as the authorization protection mechanism in multi-instance mode. Authorization cache invalidation must target Redis shared cache keys where OWPROV owns the affected authorization state.
+`EVENT_REMOVE_TOKEN` must not rely solely on process-local `AuthClient` cache invalidation in multi-instance mode. On receipt of `EVENT_REMOVE_TOKEN`, the receiving instance must delete the affected Redis shared token validation key so all active OWPROV instances immediately reject the revoked token.
 
 ---
 
@@ -805,12 +852,21 @@ Each OWPROV instance must have its own identity.
 Instance-scoped values:
 
 ```text
-- instance id
+- instance id (OWPROV_INSTANCE_ID, e.g. owprov-1, owprov-2)
+- service_events ID (uniquely and stably derived from or mapped to OWPROV_INSTANCE_ID)
 - Kafka client.id
 - broadcast consumer group id
 - logs and metrics labels
 - job owner id
 - service event instance metadata
+```
+
+Implementation rules:
+
+```text
+1. The service_events ID field must uniquely and stably identify the individual OWPROV replica.
+2. For the horizontal-scaling implementation, ID must be derived from or mapped to OWPROV_INSTANCE_ID. It must not represent only the shared logical OWPROV service identity.
+3. Two simultaneously running OWPROV replicas must never emit the same service_events instance ID.
 ```
 
 ### 13.3 Public endpoint
@@ -825,7 +881,7 @@ https://owprov.example.com:16005
 
 ### 13.4 Private endpoint
 
-For Docker Compose phase, the private endpoint should also point to an internal load-balanced OWPROV endpoint.
+For multi-instance deployments behind a load balancer, all OWPROV instances advertise a shared load-balanced private endpoint.
 
 Example:
 
@@ -833,7 +889,14 @@ Example:
 https://owprov-internal:17005
 ```
 
-Do not advertise `localhost` as the service endpoint in multi-instance mode.
+Implementation rules:
+
+```text
+1. All OWPROV replicas publish the shared load-balanced private endpoint so peer microservices route inter-service API traffic through the load balancer.
+2. Individual replicas are distinguished in service_events by their unique instance ID.
+3. Peer microservice registries track replicas per instance ID (Section 12.4) so replica scale-in or restarts do not prematurely unregister the shared endpoint.
+4. Do not advertise localhost or unroutable container IP addresses as the service endpoint in multi-instance mode.
+```
 
 ### 13.5 Internal API key/hash behavior
 
@@ -1202,6 +1265,7 @@ An instance is ready only when:
 - PostgreSQL is reachable;
 - Redis is reachable and ready;
 - Kafka required consumers/producers are ready;
+- required upstream dependency microservices (such as security, gateway, and firmware services) have been discovered in the service discovery registry;
 - required runtime files are downloaded and validated;
 - required service identity configuration is valid;
 - the instance is not draining.
@@ -1265,6 +1329,8 @@ The implementation should review and update these areas.
 ```text
 src/framework/RESTAPI_Handler.h
 src/framework/RESTAPI_Handler.cpp
+src/framework/AuthClient.h
+src/framework/AuthClient.cpp
 src/RESTAPI/RESTAPI_managementRole_handler.cpp
 src/RESTAPI/RESTAPI_managementPolicy_handler.cpp
 src/RESTAPI/RESTAPI_inventory_handler.cpp
@@ -1346,9 +1412,11 @@ runtime env files
 ```text
 - PostgreSQL startup lock
 - Redis shared cache-aside support
-- PostgreSQL fallback on Redis cache miss
+- PostgreSQL fallback on Redis cache miss for OWPROV-owned entities (roles, policies, inventory)
+- Security service REST fallback on Redis cache miss for AuthClient token/API-key validation
 - cache invalidation after committed POST/PUT/DELETE operations
 - AuthCache refactored away from process-local authorization decision state
+- AuthClient refactored to use Redis shared token cache with EVENT_REMOVE_TOKEN invalidation
 - SerialNumberCache refactored away from process-local serial/inventory decision state
 - DeviceTypeCache refactored away from process-local device type validation state
 - serial/inventory DB enforcement
