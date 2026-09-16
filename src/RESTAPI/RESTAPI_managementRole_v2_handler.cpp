@@ -1,14 +1,16 @@
 //
-// Created by stephane bourque on 2021-08-26.
+// Created for OpenWifi Prov V2 Management Role API
 //
 
-#include "RESTAPI_managementRole_handler.h"
+#include "RESTAPI_managementRole_v2_handler.h"
 
 #include "Poco/JSON/Parser.h"
+#include "Poco/String.h"
 #include "Poco/StringTokenizer.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
+#include "fmt/format.h"
 #include <set>
 
 namespace OpenWifi {
@@ -32,63 +34,6 @@ namespace OpenWifi {
 		}
 
 		return true;
-	}
-
-	void RESTAPI_managementRole_handler::DoGet() {
-		ProvObjects::ManagementRole Existing;
-		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
-		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
-			return NotFound();
-		}
-
-		Poco::JSON::Object Answer;
-		std::string Arg;
-		if (HasParameter("expandInUse", Arg) && Arg == "true") {
-			Storage::ExpandedListMap M;
-			std::vector<std::string> Errors;
-			Poco::JSON::Object Inner;
-			if (StorageService()->ExpandInUse(Existing.inUse, M, Errors)) {
-				for (const auto &[type, list] : M) {
-					Poco::JSON::Array ObjList;
-					for (const auto &i : list.entries) {
-						Poco::JSON::Object O;
-						i.to_json(O);
-						ObjList.add(O);
-					}
-					Inner.set(type, ObjList);
-				}
-			}
-			Answer.set("entries", Inner);
-			return ReturnObject(Answer);
-		}
-
-		if (QB_.AdditionalInfo)
-			AddExtendedInfo(Existing, Answer);
-		Existing.to_json(Answer);
-		ReturnObject(Answer);
-	}
-
-	void RESTAPI_managementRole_handler::DoDelete() {
-		ProvObjects::ManagementRole Existing;
-		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
-		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
-			return NotFound();
-		}
-
-		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
-			for (const auto &userId : Existing.users) {
-				std::string UserValidationError;
-				if (!ValidateAssignableUser(this, UserInfo_.userinfo.id, UserInfo_.userinfo.userRole, userId, UserValidationError)) {
-					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
-				}
-			}
-		}
-
-		if (!DB_.DeleteRecord("id", Existing.info.id)) {
-			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
-		}
-		AuthCache::GetInstance()->Clear();
-		return OK();
 	}
 
 	static bool AccessEntryGrants(const ProvObjects::ManagementPolicyEntry &entry, const std::string &resource, const std::string &accessRequired) {
@@ -150,117 +95,110 @@ namespace OpenWifi {
 		}
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
-		if (!venueId.empty()) {
-			bool foundSpecificVenueRole = false;
-			for (const auto &role : Roles) {
-				if (role.venue == venueId) {
-					foundSpecificVenueRole = true;
-					ProvObjects::ManagementPolicy Policy;
-					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
-						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-							AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
-						} else {
-							continue;
-						}
+		for (const auto &role : Roles) {
+			std::set<std::string> AllowedEntities;
+			RESTAPIHandler::GetDescendantEntities(role.entity, AllowedEntities);
+			if (AllowedEntities.find(entityId) != AllowedEntities.end() && (role.venue == venueId || role.venue.empty())) {
+				ProvObjects::ManagementPolicy Policy;
+				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+					if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+						AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+						requesterPolicies.push_back(Policy);
 					}
-					requesterPolicies.push_back(Policy);
-				}
-			}
-			if (!foundSpecificVenueRole) {
-				for (const auto &role : Roles) {
-					if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
-						std::set<std::string> AllowedVenues;
-						ProvObjects::Entity EntRec;
-						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
-							for (const auto &vId : EntRec.venues) {
-								RESTAPIHandler::GetDescendantVenues(vId, AllowedVenues);
-							}
-						}
-						if (AllowedVenues.find(venueId) != AllowedVenues.end()) {
-							ProvObjects::ManagementPolicy Policy;
-							if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
-								if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-									AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
-								} else {
-									continue;
-								}
-							}
-							requesterPolicies.push_back(Policy);
-						}
-					}
-				}
-			}
-		} else {
-			for (const auto &role : Roles) {
-				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
-					ProvObjects::ManagementPolicy Policy;
-					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
-						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-							AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
-						} else {
-							continue;
-						}
-					}
+				} else {
 					requesterPolicies.push_back(Policy);
 				}
 			}
 		}
 
 		if (requesterPolicies.empty()) {
-			ErrorDescription = "Privilege mismatch: requester has no role on the target scope.";
+			ErrorDescription = "Requester holds no roles matching or governing the target scope.";
 			return false;
 		}
 
-		for (const auto &entry : TargetPolicy.entries) {
-			for (const auto &res : entry.resources) {
-				for (const auto &acc : entry.access) {
-					bool Covered = false;
-					for (const auto &policy : requesterPolicies) {
-						if (PolicyGrants(policy, res, acc) || PolicyGrants(policy, res, "FULL")) {
-							Covered = true;
+		for (const auto &targetEntry : TargetPolicy.entries) {
+			for (const auto &targetRes : targetEntry.resources) {
+				for (const auto &targetAcc : targetEntry.access) {
+					bool granted = false;
+					for (const auto &reqPolicy : requesterPolicies) {
+						if (PolicyGrants(reqPolicy, targetRes, targetAcc)) {
+							granted = true;
 							break;
 						}
 					}
-					if (acc == "FULL") {
-						if (!Covered) {
-							ErrorDescription = "Privilege mismatch: requester does not have FULL permission on resource " + res;
-							return false;
-						}
-					} else if (!Covered) {
-						ErrorDescription = "Privilege mismatch: requester does not have " + acc + " permission on resource " + res;
+					if (!granted) {
+						ErrorDescription = Poco::format("Cannot assign permissions stronger than held: missing '%s' on '%s'.", targetAcc, targetRes);
 						return false;
 					}
 				}
 			}
 		}
+
 		return true;
 	}
 
-	static bool FindExactExistingRole(ManagementRoleDB &DB, const std::string &userId, const std::string &entityId, const std::string &venueId, ProvObjects::ManagementRole &ExistingRole) {
-		std::vector<ProvObjects::ManagementRole> Roles;
-		if (AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
-			for (const auto &role : Roles) {
-				if (role.entity == entityId && role.venue == venueId) {
-					ExistingRole = role;
-					return true;
-				}
-			}
-			return false;
+	static bool FindExactExistingRole(ManagementRoleDB &DB,
+									  const std::string &userId,
+									  const std::string &entityId,
+									  const std::string &venueId,
+									  ProvObjects::ManagementRole &ExistingRole) {
+		std::string WhereClause;
+		if (venueId.empty()) {
+			WhereClause = Poco::format("entity='%s' AND (venue IS NULL OR venue='') AND users LIKE '%%%s%%'",
+									   ORM::Escape(entityId), ORM::Escape(userId));
+		} else {
+			WhereClause = Poco::format("entity='%s' AND venue='%s' AND users LIKE '%%%s%%'",
+									   ORM::Escape(entityId), ORM::Escape(venueId), ORM::Escape(userId));
 		}
 
-		ManagementRoleDB::RecordVec DB_Roles;
-		std::string WhereClause = "entity='" + ORM::Escape(entityId) + "' and venue='" + ORM::Escape(venueId) + "' and users LIKE '%" + ORM::Escape(userId) + "%'";
-		if (DB.GetRecords(0, 100, DB_Roles, WhereClause)) {
-			for (const auto &role : DB_Roles) {
-				for (const auto &user : role.users) {
-					if (user == userId) {
-						ExistingRole = role;
-						return true;
+		std::vector<ProvObjects::ManagementRole> CandidateRoles;
+		if (DB.GetRecords(0, 50, CandidateRoles, WhereClause)) {
+			for (const auto &role : CandidateRoles) {
+				if (role.entity == entityId && role.venue == venueId) {
+					for (const auto &u : role.users) {
+						if (u == userId) {
+							ExistingRole = role;
+							return true;
+						}
 					}
 				}
 			}
 		}
 		return false;
+	}
+
+	static bool ParseVenueIds(const Poco::JSON::Object::Ptr &RawObj,
+							  std::vector<std::string> &VenueIds,
+							  std::string &Error) {
+		VenueIds.clear();
+		if (!RawObj || !RawObj->has("venueIds")) {
+			return true;
+		}
+
+		if (!RawObj->isArray("venueIds")) {
+			Error = "Field 'venueIds' must be a JSON array of venue UUIDs.";
+			return false;
+		}
+
+		auto VenueArray = RawObj->getArray("venueIds");
+		std::set<std::string> Seen;
+		for (std::size_t i = 0; i < VenueArray->size(); ++i) {
+			auto element = VenueArray->get(i);
+			if (element.isEmpty() || !element.isString()) {
+				Error = "Each item in 'venueIds' must be a valid non-empty venue UUID string.";
+				return false;
+			}
+			std::string VenueId = Poco::trim(element.toString());
+			if (VenueId.empty()) {
+				Error = "Venue ID in 'venueIds' array must not be empty.";
+				return false;
+			}
+			if (Seen.insert(VenueId).second) {
+				VenueIds.emplace_back(VenueId);
+			}
+		}
+
+		return true;
 	}
 
 	static bool ValidateVenueScope(const std::string &entityId, const std::string &venueId) {
@@ -276,7 +214,7 @@ namespace OpenWifi {
 		return VenueObj.entity == entityId;
 	}
 
-	void RESTAPI_managementRole_handler::DoPost() {
+	void RESTAPI_managementRole_v2_handler::DoPost() {
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty()) {
 			return BadRequest(RESTAPI::Errors::MissingUUID);
@@ -297,6 +235,16 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
+		// V2 strictly extracts venueIds array (single venue string is not used)
+		std::vector<std::string> Scopes;
+		std::string VenueParseError;
+		if (!ParseVenueIds(RawObj, Scopes, VenueParseError)) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, VenueParseError);
+		}
+		if (Scopes.empty()) {
+			Scopes.emplace_back("");
+		}
+
 		// Validate system policy exists in DB
 		ProvObjects::ManagementPolicy TargetPolicy;
 		if (NewObject.managementPolicy.empty()) {
@@ -307,14 +255,18 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::UnknownManagementPolicyUUID);
 		}
 
-		if (!ValidateVenueScope(NewObject.entity, NewObject.venue)) {
-			return BadRequest(RESTAPI::Errors::VenueMustExist);
+		for (const auto &venueId : Scopes) {
+			if (!ValidateVenueScope(NewObject.entity, venueId)) {
+				return BadRequest(RESTAPI::Errors::VenueMustExist);
+			}
 		}
 
 		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
-			std::string PrivilegeError;
-			if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, NewObject.venue, TargetPolicy, PrivilegeError)) {
-				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
+			for (const auto &venueId : Scopes) {
+				std::string PrivilegeError;
+				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, venueId, TargetPolicy, PrivilegeError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);
+				}
 			}
 		}
 
@@ -327,32 +279,128 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
 		}
 
-		ProvObjects::ManagementRole ExistingRole;
-		if (FindExactExistingRole(DB_, UserId, NewObject.entity, NewObject.venue, ExistingRole)) {
-			ExistingRole.managementPolicy = NewObject.managementPolicy;
-			ExistingRole.info.modified = Utils::Now();
+		std::vector<ProvObjects::ManagementRole> SavedRoles;
+		std::vector<ProvObjects::ManagementRole> NewlyCreatedRoles;
+		std::vector<ProvObjects::ManagementRole> OriginalUpdatedRoles;
 
-			if (!DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
-				return InternalError(RESTAPI::Errors::RecordNotUpdated);
+		bool BatchFailed = false;
+		for (std::size_t idx = 0; idx < Scopes.size(); ++idx) {
+			ProvObjects::ManagementRole RoleForScope = NewObject;
+			RoleForScope.venue = Scopes[idx];
+			if (idx > 0) {
+				RoleForScope.info.id = MicroServiceCreateUUID();
 			}
-			AuthCache::GetInstance()->Clear();
-			Poco::JSON::Object Answer;
-			ExistingRole.to_json(Answer);
-			return ReturnObject(Answer);
+
+			ProvObjects::ManagementRole ExistingRole;
+			if (FindExactExistingRole(DB_, UserId, RoleForScope.entity, RoleForScope.venue, ExistingRole)) {
+				ProvObjects::ManagementRole Snapshot = ExistingRole;
+				ExistingRole.managementPolicy = RoleForScope.managementPolicy;
+				ExistingRole.info.modified = Utils::Now();
+
+				if (!DB_.UpdateRecord("id", ExistingRole.info.id, ExistingRole)) {
+					BatchFailed = true;
+					break;
+				}
+				OriginalUpdatedRoles.emplace_back(Snapshot);
+				SavedRoles.emplace_back(ExistingRole);
+				continue;
+			}
+
+			if (!DB_.CreateRecord(RoleForScope)) {
+				BatchFailed = true;
+				break;
+			}
+			NewlyCreatedRoles.emplace_back(RoleForScope);
+			SavedRoles.emplace_back(RoleForScope);
 		}
 
-		if (!DB_.CreateRecord(NewObject)) {
+		if (BatchFailed) {
+			for (auto it = NewlyCreatedRoles.rbegin(); it != NewlyCreatedRoles.rend(); ++it) {
+				if (!DB_.DeleteRecord("id", it->info.id)) {
+					poco_error(Logger(), fmt::format("Rollback failed to delete newly created management role '{}' (user '{}', entity '{}', venue '{}').", it->info.id, UserId, it->entity, it->venue));
+				}
+			}
+			for (auto it = OriginalUpdatedRoles.rbegin(); it != OriginalUpdatedRoles.rend(); ++it) {
+				if (!DB_.UpdateRecord("id", it->info.id, *it)) {
+					poco_error(Logger(), fmt::format("Rollback failed to restore original management role '{}' (user '{}', entity '{}', venue '{}').", it->info.id, UserId, it->entity, it->venue));
+				}
+			}
+			AuthCache::GetInstance()->Clear();
 			return InternalError(RESTAPI::Errors::RecordNotCreated);
 		}
 
 		AuthCache::GetInstance()->Clear();
 
+		// V2 always returns {"roles": [...]} envelope
 		Poco::JSON::Object Answer;
-		NewObject.to_json(Answer);
+		Poco::JSON::Array RolesArray;
+		for (const auto &role : SavedRoles) {
+			Poco::JSON::Object RoleObject;
+			role.to_json(RoleObject);
+			RolesArray.add(RoleObject);
+		}
+		Answer.set("roles", RolesArray);
 		return ReturnObject(Answer);
 	}
 
-	void RESTAPI_managementRole_handler::DoPut() {
+	void RESTAPI_managementRole_v2_handler::DoGet() {
+		ProvObjects::ManagementRole Existing;
+		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
+		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
+			return NotFound();
+		}
+
+		Poco::JSON::Object Answer;
+		std::string Arg;
+		if (HasParameter("expandInUse", Arg) && Arg == "true") {
+			Storage::ExpandedListMap M;
+			std::vector<std::string> Errors;
+			Poco::JSON::Object Inner;
+			if (StorageService()->ExpandInUse(Existing.inUse, M, Errors)) {
+				for (const auto &[type, list] : M) {
+					Poco::JSON::Array ObjList;
+					for (const auto &i : list.entries) {
+						Poco::JSON::Object O;
+						i.to_json(O);
+						ObjList.add(O);
+					}
+					Inner.set(type, ObjList);
+				}
+			}
+			Answer.set("entries", Inner);
+			return ReturnObject(Answer);
+		}
+
+		if (QB_.AdditionalInfo)
+			AddExtendedInfo(Existing, Answer);
+		Existing.to_json(Answer);
+		ReturnObject(Answer);
+	}
+
+	void RESTAPI_managementRole_v2_handler::DoDelete() {
+		ProvObjects::ManagementRole Existing;
+		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
+		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
+			return NotFound();
+		}
+
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			for (const auto &userId : Existing.users) {
+				std::string UserValidationError;
+				if (!ValidateAssignableUser(this, UserInfo_.userinfo.id, UserInfo_.userinfo.userRole, userId, UserValidationError)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, UserValidationError);
+				}
+			}
+		}
+
+		if (!DB_.DeleteRecord("id", Existing.info.id)) {
+			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+		}
+		AuthCache::GetInstance()->Clear();
+		return OK();
+	}
+
+	void RESTAPI_managementRole_v2_handler::DoPut() {
 		ProvObjects::ManagementRole Existing;
 		std::string UUID = GetBinding(RESTAPI::Protocol::ID, "");
 		if (UUID.empty() || !DB_.GetRecord(RESTAPI::Protocol::ID, UUID, Existing)) {
@@ -392,6 +440,11 @@ namespace OpenWifi {
 				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
 					"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
 			}
+		}
+
+		if (RawObject->has("venueIds")) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+				"Entity ID, Venue ID, and User ID are immutable. To change scope, delete the existing role and create a new role.");
 		}
 
 		if (RawObject->has("users")) {
@@ -451,4 +504,6 @@ namespace OpenWifi {
 		}
 		InternalError(RESTAPI::Errors::RecordNotUpdated);
 	}
+
 } // namespace OpenWifi
+
