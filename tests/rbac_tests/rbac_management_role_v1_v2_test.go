@@ -226,7 +226,7 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 			"entries": []map[string]interface{}{
 				{
 					"resources": []string{"*"},
-					"actions":   []string{"*"},
+					"access":    []string{"*"},
 				},
 			},
 		}
