@@ -92,7 +92,7 @@ paths:
             format: uuid
           required: true
       requestBody:
-        description: Information used to modify the management role.
+        description: Information used to modify the management role. Scope fields (entity, venue, users) and server metadata (id, inUse, created, modified) are read-only / immutable.
         content:
           application/json:
             schema:
@@ -223,6 +223,7 @@ components:
         id:
           type: string
           format: uuid
+          readOnly: true
         name:
           type: string
         description:
@@ -234,9 +235,11 @@ components:
         created:
           type: integer
           format: int64
+          readOnly: true
         modified:
           type: integer
           format: int64
+          readOnly: true
         tags:
           type: array
           items:
@@ -244,21 +247,29 @@ components:
         managementPolicy:
           type: string
           format: uuid
+          description: UUID of the management policy assigned to this role
         users:
           type: array
           items:
             type: string
             format: uuid
+          readOnly: true
+          description: Assigned users list (immutable; cannot be modified via PUT)
         inUse:
           type: array
           items:
             type: string
+          readOnly: true
         entity:
           type: string
           format: uuid
+          readOnly: true
+          description: Scope entity UUID (immutable; cannot be modified via PUT)
         venue:
           type: string
           format: uuid
+          readOnly: true
+          description: Scope venue UUID (immutable; cannot be modified via PUT)
 
     ManagementRoleList:
       type: object
