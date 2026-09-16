@@ -1407,47 +1407,47 @@ runtime env files
 - spec.md reviewed
 ```
 
-### Phase 2: Database and API safety
+### Phase 2: Database safety and Redis foundation
 
 ```text
-- PostgreSQL startup lock
-- Redis shared cache-aside support
-- PostgreSQL fallback on Redis cache miss for OWPROV-owned entities (roles, policies, inventory)
-- Security service REST fallback on Redis cache miss for AuthClient token/API-key validation
-- cache invalidation after committed POST/PUT/DELETE operations
-- AuthCache refactored away from process-local authorization decision state
-- AuthClient refactored to use Redis shared token cache with EVENT_REMOVE_TOKEN invalidation
-- SerialNumberCache refactored away from process-local serial/inventory decision state
-- DeviceTypeCache refactored away from process-local device type validation state
-- serial/inventory DB enforcement
+- PostgreSQL startup advisory lock
+- PostgreSQL-enforced inventory and serial number uniqueness constraints
+- Redis shared cache-aside client integration
+- Post-commit cache invalidation framework
 ```
 
-### Phase 3: Kafka behavior
+### Phase 3: Auth and in-memory cache refactoring
 
 ```text
-- relationship write protection
-- GroupConsumer/BroadcastConsumer behavior
-- service_events broadcast handling
-- connection work-queue handling
-- commit/retry behavior
-- producer partitioning review
+- AuthCache refactored to Redis with PostgreSQL fallback
+- AuthClient refactored to Redis with Security service (owsec) REST fallback
+- SerialNumberCache and DeviceTypeCache migrated away from process-local decision state
+- EVENT_REMOVE_TOKEN Kafka broadcast cache invalidation
 ```
 
-### Phase 4: Jobs and notifications
+### Phase 4: Kafka and event coordination
 
 ```text
-- durable PostgreSQL job table
-- job status query endpoint
-- background job status/result persistence
-- WebSocket notification bus or PostgreSQL job polling
-- cross-instance notification/status delivery
+- Consumer separation: BroadcastConsumer (service_events) and GroupConsumer (connection)
+- Multi-replica service discovery registry tracking
+- Key-based producer partitioning per device
+- Consumer commit and retry safety
 ```
 
-### Phase 5: Runtime and deployment
+### Phase 5: Durable jobs and notifications
 
 ```text
-- runtime file validation
-- Docker Compose multi-instance config
-- readiness/drain behavior
-- scale out/in validation
+- Durable PostgreSQL jobs table with fenced lease model and heartbeat
+- Worker claim, expired reclaim, and device-level idempotency
+- Job status query endpoint
+- Cross-instance UI notification delivery
+```
+
+### Phase 6: Runtime deployment and scale-out validation
+
+```text
+- Runtime file consistency validation
+- Docker Compose multi-instance topology and load balancing
+- Readiness probes and graceful shutdown/drain handling
+- End-to-end active-active scale-out verification
 ```
