@@ -992,21 +992,17 @@ components:
 
     ExpandedUseEntryMap:
       type: object
-      properties:
-        type:
-          type: string
-        entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/ExpandedUseEntry'
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/ExpandedUseEntry'
+      description: Map of resource types (e.g. venues, entities) to lists of expanded reference objects.
 
     ExpandedUseEntryMapList:
       type: object
       properties:
         entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/ExpandedUseEntryMap'
+          $ref: '#/components/schemas/ExpandedUseEntryMap'
 
     FirmwareOptions:
       type: object
