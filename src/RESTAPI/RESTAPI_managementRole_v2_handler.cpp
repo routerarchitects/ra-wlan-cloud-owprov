@@ -5,6 +5,7 @@
 #include "RESTAPI_managementRole_v2_handler.h"
 
 #include "Poco/JSON/Parser.h"
+#include "Poco/String.h"
 #include "Poco/StringTokenizer.h"
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
@@ -165,21 +166,38 @@ namespace OpenWifi {
 		return false;
 	}
 
-	static std::vector<std::string> ParseVenueIds(const Poco::JSON::Object::Ptr &RawObj) {
-		std::vector<std::string> VenueIds;
-		std::set<std::string> Seen;
+	static bool ParseVenueIds(const Poco::JSON::Object::Ptr &RawObj,
+							  std::vector<std::string> &VenueIds,
+							  std::string &Error) {
+		VenueIds.clear();
+		if (!RawObj || !RawObj->has("venueIds")) {
+			return true;
+		}
 
-		if (RawObj && RawObj->isArray("venueIds")) {
-			auto VenueArray = RawObj->getArray("venueIds");
-			for (const auto &value : *VenueArray) {
-				auto VenueId = value.toString();
-				if (!VenueId.empty() && Seen.insert(VenueId).second) {
-					VenueIds.emplace_back(VenueId);
-				}
+		if (!RawObj->isArray("venueIds")) {
+			Error = "Field 'venueIds' must be a JSON array of venue UUIDs.";
+			return false;
+		}
+
+		auto VenueArray = RawObj->getArray("venueIds");
+		std::set<std::string> Seen;
+		for (std::size_t i = 0; i < VenueArray->size(); ++i) {
+			auto element = VenueArray->get(i);
+			if (element.isEmpty() || !element.isString()) {
+				Error = "Each item in 'venueIds' must be a valid non-empty venue UUID string.";
+				return false;
+			}
+			std::string VenueId = Poco::trim(element.toString());
+			if (VenueId.empty()) {
+				Error = "Venue ID in 'venueIds' array must not be empty.";
+				return false;
+			}
+			if (Seen.insert(VenueId).second) {
+				VenueIds.emplace_back(VenueId);
 			}
 		}
 
-		return VenueIds;
+		return true;
 	}
 
 	static bool ValidateVenueScope(const std::string &entityId, const std::string &venueId) {
@@ -216,14 +234,12 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::EntityMustExist);
 		}
 
-		// V2 strictly requires venueIds to be a JSON array if provided
-		if (RawObj->has("venueIds") && !RawObj->isArray("venueIds")) {
-			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
-							  "Field 'venueIds' must be a JSON array of venue UUIDs.");
-		}
-
 		// V2 strictly extracts venueIds array (single venue string is not used)
-		auto Scopes = ParseVenueIds(RawObj);
+		std::vector<std::string> Scopes;
+		std::string VenueParseError;
+		if (!ParseVenueIds(RawObj, Scopes, VenueParseError)) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, VenueParseError);
+		}
 		if (Scopes.empty()) {
 			Scopes.emplace_back("");
 		}

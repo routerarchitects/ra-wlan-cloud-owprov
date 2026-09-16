@@ -715,4 +715,55 @@ func TestManagementRole_V2_Negative_Scenarios(t *testing.T) {
 			t.Errorf("Expected 400 Bad Request for object venueIds, got %d. Body: %s", status, string(body))
 		}
 	})
+
+	t.Run("Negative: Empty string in venueIds returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"name":             "v2-neg-empty-string-venueids",
+			"entity":           fixtures.entityA,
+			"venueIds":         []string{""},
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for empty string venueIds element, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Whitespace string in venueIds returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"name":             "v2-neg-whitespace-venueids",
+			"entity":           fixtures.entityA,
+			"venueIds":         []string{"   "},
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for whitespace venueIds element, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Non-string element in venueIds returns 400 Bad Request", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"name":             "v2-neg-non-string-venueids",
+			"entity":           fixtures.entityA,
+			"venueIds":         []interface{}{123},
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, payload)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for non-string venueIds element, got %d. Body: %s", status, string(body))
+		}
+	})
 }
