@@ -5,32 +5,35 @@
 </p>
 
 
-# OpenWiFi Provisioning Service (OWPROV)
+# OpenLAN/OpenWiFi Provisioning Service - Mango Cloud
 
 ## Overview
-The OWPROV (OpenWiFi Provisioning Service) is a core service within the Telecom Infra Project (TIP) OpenWiFi CloudSDK (OWSDK) ecosystem.
 
-OWPROV is responsible for:
-* Managing inventory and provisioned TIP OpenWiFi-compatible devices (Access Points, Switches, and Gateways).
-* Organizing devices into hierarchical structures using **Entities** and **Venues**.
-* Generating device-specific configurations matching the uCentral schema.
+The **OpenWiFi Provisioning Service (OWPROV)** is a core provisioning and device-management service within **[Mango Cloud](https://www.mangowifi.cloud/)**, Router Architects' open-source, **OpenLAN-aligned cloud controller and platform for managed Wi-Fi and connectivity operations**.
 
-Like all other OWSDK microservices, OWPROV is defined using an OpenAPI definition and communicates asynchronously with other services via Kafka, while exposing a REST API for management interfaces. Rather than communicating directly with Access Points, it integrates with the uCentral Gateway (`owgw`), which manages the WebSocket connections to the physical hardware.
+Built on the Telecom Infra Project (**TIP**) OpenWiFi CloudSDK architecture, OWPROV provides the provisioning layer used to onboard, organize, and manage **OpenLAN/OpenWiFi access points, switches, gateways, subscribers, venues, and network inventory**.
+
+OWPROV provides:
+
+* **Device provisioning and onboarding** for OpenWiFi access points, OpenLAN gateways, switches, and mesh devices
+* **Inventory management** for provisioned network infrastructure
+* **Multi-tenant organization** using Operators, Entities, Venues, and Subscribers
+* **Subscriber and location management** for residential Wi-Fi, MDU, and managed Wi-Fi deployments
+* **Device configuration management** based on the uCentral schema
+* **REST APIs** defined through OpenAPI for integration with management applications and OSS/BSS workflows
+* **Kafka-based integration** with other Mango Cloud and OpenWiFi cloud services
+
+OWPROV does not communicate directly with physical access points. It integrates with the **uCentral Gateway (OWGW)**, which maintains WebSocket connections with OpenWiFi-compatible devices and provides the device communication layer.
+
+Together with the other Mango Cloud services, OWPROV helps provide an open-source **OpenLAN/OpenWiFi cloud controller and managed Wi-Fi platform** for ISPs, MSPs, system integrators, and organizations building multi-vendor Wi-Fi infrastructure.
 
 To use OWPROV, you can either [build it from source](#building) or deploy the containerized version using [Docker](#docker).
 
 ## Role in Mango Cloud
 
-This service is part of [Mango Cloud](https://www.mangowifi.cloud/), Router Architects’ open-source platform for managed Wi-Fi and connectivity operations.
+OWPROV is the provisioning and organizational service within Mango Cloud, Router Architects' open-source, OpenLAN-aligned cloud controller and platform for managed Wi-Fi and connectivity operations.
 
-Within Mango Cloud, **OWPROV** serves as the central provisioning and organizational layer for managing:
-
-* **Operators & Default Entities**: Orchestrates the multi-tenant onboarding of network operators and default environments.
-* **Hierarchical Organization**: Defines entity and location structures to map physical networks.
-* **Venues & Inventory Ownership**: Directs venue configurations and tracks device inventory assignments.
-* **Subscriber Management**: Manages individual subscribers and auto-created subscriber venues.
-* **Device Onboarding**: Governs the onboarding flow for gateways (**OLG**), access points, and mesh nodes.
-* **Device Lifecycle Relationships**: Maintains the state and topology of connected hardware.
+Mango Cloud provides a common cloud operations layer for managing OpenLAN and OpenWiFi infrastructure, including access points, switches, gateways, subscribers, tenants, and service-provider workflows.
 
 OWPROV exposes its functionality through an OpenAPI-compliant REST interface, integrating seamlessly with the rest of the Mango Cloud services to power residential Wi-Fi, MDU (Multi-Dwelling Unit), and managed-connectivity workflows.
 
