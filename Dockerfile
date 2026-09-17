@@ -1,16 +1,17 @@
-ARG DEBIAN_VERSION=11.5-slim
+ARG DEBIAN_VERSION=13.6-slim
 ARG POCO_VERSION=poco-tip-v2
 ARG CPPKAFKA_VERSION=tip-v1
 ARG VALIJASON_VERSION=tip-v1
 
 FROM debian:$DEBIAN_VERSION AS build-base
 
-RUN sed -i '/bullseye-security/d' /etc/apt/sources.list && \
-    apt-get update && apt-get install --no-install-recommends -y \
+RUN apt-get -o Acquire::Retries=5 update && \
+    apt-get -o Acquire::Retries=5 install --no-install-recommends -y \
     make cmake g++ git \
-    libpq-dev libmariadb-dev libmariadbclient-dev-compat \
+    libpq-dev libmariadb-dev libmariadb-dev-compat \
     librdkafka-dev libboost-all-dev libssl-dev \
-    zlib1g-dev nlohmann-json3-dev ca-certificates libcurl4-openssl-dev libfmt-dev
+    zlib1g-dev nlohmann-json3-dev ca-certificates libcurl4-openssl-dev libfmt-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 FROM build-base AS poco-build
 
@@ -68,6 +69,8 @@ COPY --from=cppkafka-build /usr/local/include /usr/local/include
 COPY --from=cppkafka-build /usr/local/lib /usr/local/lib
 COPY --from=valijson-build /usr/local/include /usr/local/include
 
+RUN ldconfig
+
 WORKDIR /owprov
 RUN mkdir cmake-build
 WORKDIR /owprov/cmake-build
@@ -86,10 +89,11 @@ RUN mkdir /openwifi
 RUN mkdir -p "$OWPROV_ROOT" "$OWPROV_CONFIG" && \
     chown "$OWPROV_USER": "$OWPROV_ROOT" "$OWPROV_CONFIG"
 
-RUN sed -i '/bullseye-security/d' /etc/apt/sources.list && \
-    apt-get update && apt-get install --no-install-recommends -y \
+RUN apt-get -o Acquire::Retries=5 update && \
+    apt-get -o Acquire::Retries=5 install --no-install-recommends -y \
     librdkafka++1 gosu gettext ca-certificates bash jq curl wget \
-    libmariadb-dev-compat libpq5 postgresql-client libfmt7 tzdata
+    libmariadb3 libpq5 postgresql-client libfmt10 tzdata && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY readiness_check /readiness_check
 COPY test_scripts/curl/cli /cli

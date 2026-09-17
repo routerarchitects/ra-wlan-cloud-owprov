@@ -2,6 +2,7 @@
 // Created by stephane bourque on 2022-10-25.
 //
 
+#include <optional>
 #include "framework/MicroServiceFuncs.h"
 #include "framework/MicroService.h"
 
