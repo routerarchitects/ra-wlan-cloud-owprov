@@ -12,6 +12,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <vector>
 

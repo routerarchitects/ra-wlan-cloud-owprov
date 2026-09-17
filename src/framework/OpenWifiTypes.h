@@ -8,6 +8,7 @@
 #include <functional>
 #include <list>
 #include <map>
+#include <optional>
 #include <queue>
 #include <set>
 #include <string>
