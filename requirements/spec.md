@@ -270,10 +270,10 @@ Implementation rules:
 
 ### 6.3.1 Invalidation failure handling and bounded staleness
 
-When a write operation succeeds in PostgreSQL, OWPROV invalidates the corresponding Redis cache key(s). If the Redis invalidation call fails (e.g., due to temporary network partition, socket timeout, or Redis command error), OWPROV must handle the failure safely:
+For normal data cache entries (inventory, display, metadata), when a write operation succeeds in PostgreSQL, OWPROV invalidates the corresponding Redis cache key(s). If the Redis invalidation call fails (e.g., due to temporary network partition, socket timeout, or Redis command error), OWPROV handles the failure safely:
 
 ```text
-PostgreSQL Commit Succeeded -> Redis Invalidation Failed:
+PostgreSQL Commit Succeeded -> Redis Invalidation Failed (Normal Data):
   1. Return HTTP Success (200/201/204) to the client.
   2. Log ERROR with affected cache keys and failure reason.
   3. Increment invalidation failure metric.
@@ -284,12 +284,29 @@ PostgreSQL Commit Succeeded -> Redis Invalidation Failed:
 Implementation rules:
 
 ```text
-1. Successful DB writes must not return API errors if Redis invalidation fails. PostgreSQL has already durably committed the change; returning an HTTP error would mislead callers and risk dangerous duplicate non-idempotent retries.
-2. All Redis cache entries must be written with a short, configurable TTL (e.g., a short safety window such as 10–60 seconds, configurable via openwifi.redis.cache.ttl or per domain) rather than long or indefinite durations.
+1. For normal data writes, successful DB writes must not return API errors if Redis invalidation fails. PostgreSQL has already durably committed the change; returning an HTTP error would mislead callers and risk dangerous duplicate non-idempotent retries.
+2. Normal Redis cache entries must be written with a short, configurable TTL (e.g., a short safety window such as 10–60 seconds, configurable via openwifi.redis.cache.ttl or per domain) rather than long or indefinite durations.
 3. The short TTL acts as a bounded staleness fallback: in the event of an individual invalidation failure, stale entries expire quickly on their own without requiring complex background retry queues or outbox processing.
 4. Redis is a hard dependency for startup and readiness: if Redis is unreachable or offline, the instance must fail startup or fail readiness and refuse traffic until Redis connectivity is established. OWPROV must never fall back to process-local cache state.
 5. Invalidation failures must emit ERROR logs with affected keys and increment owprov_redis_invalidation_failures_total for operator visibility.
 ```
+
+### 6.3.2 Security-sensitive cache invalidation
+
+Redis cache usage is divided into two cache policy classes:
+
+1. Normal data cache
+   - Used for inventory, display, metadata, and non-authorization data.
+   - PostgreSQL remains the source of truth.
+   - After a successful PostgreSQL commit, Redis invalidation failure may be tolerated if the stale window is bounded by a short TTL.
+
+2. Security-sensitive authorization cache
+   - Used for permission, role, policy, management-scope, token validation, and token revocation state.
+   - Redis invalidation failure must not be treated as normal bounded staleness.
+   - Redis invalidation failure must create a shared durable pending invalidation record, not only an in-memory retry on one OWPROV instance.
+   - Redis invalidation must be retried with backoff until the affected cache entry is removed.
+   - Request authorization must not rely only on a Redis entry known to be stale or affected by a pending invalidation.
+   - If the cache state is uncertain, OWPROV must use authoritative validation (PostgreSQL for OWPROV authorization state; Security service for tokens) or fail closed.
 
 ### 6.4 Process-local cache usage
 
@@ -362,9 +379,10 @@ Required behavior:
 ```text
 1. A permission change handled by owprov-1 must affect a later API request requiring that permission when the request is handled by owprov-2.
 2. Revoked privileges must not remain accepted because owprov-2 has old process-local authorization state.
-3. Token removal or logout broadcast via EVENT_REMOVE_TOKEN from owsec must immediately invalidate the corresponding Redis token validation entry.
-4. OWPROV-owned role/policy modifications must invalidate affected Redis authorization keys after the committed PostgreSQL write.
+3. Token removal or logout broadcast via EVENT_REMOVE_TOKEN from owsec must immediately remove the local token cache entry and attempt to delete the corresponding Redis token validation entry. If Redis deletion fails, the failure must be recorded as a shared durable pending invalidation and retried; requests must not authorize from the stale entry.
+4. OWPROV-owned role/policy modifications must invalidate affected Redis authorization keys after the committed PostgreSQL write following the security-sensitive invalidation policy (Section 6.3.2).
 5. Authorization and token checks must not rely on process-local cache synchronization between OWPROV instances.
+6. If authorization cache state is uncertain or pending invalidation, OWPROV must validate authoritatively or fail closed.
 ```
 
 ### 7.4 Implementation direction
@@ -376,7 +394,7 @@ For the first implementation:
 2. Replace process-local AuthCache decision behavior with Redis shared cache reads, falling back to PostgreSQL on miss.
 3. Refactor AuthClient to check and populate Redis shared cache for token/API-key validation, falling back to the Security service REST API on miss.
 4. Persist OWPROV permission, role, policy, and management-scope changes to PostgreSQL-backed state, and invalidate affected Redis keys after successful PostgreSQL commit.
-5. On EVENT_REMOVE_TOKEN Kafka message receipt, issue Redis DEL for the affected token cache key.
+5. On EVENT_REMOVE_TOKEN Kafka message receipt, immediately remove the local AuthClient cache entry and issue Redis DEL for the affected token cache key. If Redis DEL fails, record a shared durable pending invalidation and retry with backoff.
 6. Do not add process-local AuthCache or AuthClient synchronization systems between OWPROV instances.
 ```
 
@@ -670,7 +688,7 @@ Configuration pattern:
 ```text
 group.id = prov-<OWPROV_INSTANCE_ID>-broadcast
 client.id = <OWPROV_INSTANCE_ID>-broadcast-consumer
-auto.offset.reset = earliest
+auto.offset.reset = latest
 ```
 
 Initial topic assignment:
@@ -686,9 +704,9 @@ Required behavior:
 
 2. On container restart, the broadcast consumer resumes from its last committed offset to immediately receive any service events published during the restart window.
 
-3. On initial cold start of a new replica with no committed offset, auto.offset.reset = earliest replays active service discovery events to immediately populate the local registry.
+3. On initial cold start of a new replica with no committed offset, auto.offset.reset = latest is used. The instance must not replay historical service_events from earliest. It may seed its local Services_ view from the shared Redis service registry snapshot when available, while live JOIN, KEEP_ALIVE, and LEAVE events remain the primary runtime discovery update path.
 
-4. Every OWPROV instance receives every service_events message.
+4. Every running OWPROV instance with an active BroadcastConsumer receives live service_events published after it starts consuming.
 
 5. One instance consuming a service event must not prevent another instance from consuming the same service event.
 
@@ -699,11 +717,11 @@ Required behavior:
 
 ### 12.4 service_events behavior and instance-aware discovery
 
-`service_events` provides every OWPROV instance and peer microservice with service discovery data.
+`service_events` provides every OWPROV instance and peer microservice with real-time incremental service discovery data.
 
 In an active-active multi-instance deployment behind a load balancer, all OWPROV replicas advertise the shared load-balanced private endpoint (`https://owprov-internal:17005`) while emitting unique per-instance identifiers (`ID` field).
 
-To ensure that an individual replica's shutdown or restart does not unregister the shared service endpoint while other replicas remain healthy, service discovery registries maintain instance-aware membership:
+To ensure that an individual replica's shutdown or restart does not unregister the shared service endpoint while other replicas remain healthy, service discovery uses a Kafka-first live discovery model with an optional shared Redis bootstrap snapshot. Each instance keeps a local in-memory Services_ runtime view updated from live service_events. Redis stores a current-state snapshot that can seed Services_ for newly started instances when available:
 
 Payload structure:
 
@@ -720,32 +738,60 @@ VRSN:    <daemon-version>
 Required handler and registry behavior:
 
 ```text
-1. Multi-Replica Registry Tracking:
-   - The in-memory discovery registry tracks active replicas per service type and instance ID: Services_[Type][InstanceID] -> MicroServiceMeta.
+1. Shared Redis Service Registry (Current State Snapshot):
+   - Redis stores the current active service discovery state under keys formatted as:
+     service-registry:{service_type}:{instance_id}
+   - Each service instance self-registers its own current state; no single instance or leader owns the registry.
+   - The shared Redis service registry is populated by service-discovery producers using the common service-registry contract when Redis registry support is available. Redis registry write failure must not prevent the producer from publishing live service_events.
+   - Redis stores a current-state bootstrap snapshot only; it does not store raw service_events history and is not used as the normal request-path lookup source.
+   - Self-registration records are written with a configurable TTL greater than the maximum keep-alive interval. Current services publish keep-alive every 5-10 seconds, so a TTL such as 30-60 seconds provides a bounded stale-service window while tolerating brief delays.
+   - On clean shutdown (LEAVE), the exiting instance deletes its own Redis key.
+   - If an instance terminates abnormally without sending LEAVE, its registration expires automatically via TTL.
+
+2. Multi-Replica In-Memory Registry (Fast Runtime Lookups):
+   - Each OWPROV instance maintains a local in-memory registry (Services_[Type][InstanceID] -> MicroServiceMeta) for fast request-path endpoint resolution.
    - Inter-service client resolution (e.g. GetServices(Type)) returns the active endpoint as long as at least one healthy replica is present in the registry.
 
-2. JOIN & KEEP_ALIVE:
-   - Inserts or updates the liveness timestamp and metadata for the specific announcing InstanceID.
+3. JOIN & KEEP_ALIVE:
+   - The announcing instance publishes JOIN and KEEP_ALIVE over Kafka service_events.
+   - When Redis registry support is available, the announcing instance also refreshes its own Redis record (service-registry:{service_type}:{instance_id}) with updated metadata and reset TTL.
+   - Peer instances receiving the Kafka event update the liveness timestamp and metadata in their local in-memory Services_ view.
+   - Redis write failure must not prevent live service_events from being published.
 
-3. LEAVE:
-   - Removes only the announcing InstanceID from the active replica set (Services_[Type].erase(InstanceID)).
+4. LEAVE:
+   - The departing instance publishes LEAVE over Kafka service_events.
+   - When Redis registry support is available, the departing instance also removes its Redis key (service-registry:{service_type}:{instance_id}).
+   - Peer instances receiving the Kafka LEAVE event remove that InstanceID from their local in-memory Services_ view.
+   - If the instance terminates abnormally and cannot publish LEAVE, local stale-entry timeout and Redis TTL expiry must eventually remove the stale instance from discovery views.
    - The logical service endpoint remains active and routable as long as other replicas of that service type remain registered.
    - The logical service entry is removed from routing only when its last active replica leaves or times out.
 
-4. EVENT_REMOVE_TOKEN:
+5. EVENT_REMOVE_TOKEN:
    - Invalidate the Redis shared token validation cache key and remove any process-local `AuthClient` cache entry upon receiving token revocation from `owsec`.
 
-5. Startup & Bootstrap:
-   - BroadcastConsumer for service_events uses auto.offset.reset = earliest so newly started replicas discover existing peer services immediately on boot.
-   - Restarting replicas resume from their stable group.id committed offset.
-   - An instance is considered ready only after required upstream dependency microservices (such as security, gateway, and firmware services) have been discovered in the service discovery registry.
+6. Startup & Bootstrap Lifecycle:
+   - On startup, a new OWPROV instance starts its BroadcastConsumer for service_events using latest/current offset, or resumes from its committed offset on restart.
+   - The instance builds and maintains its local Services_ runtime view from live JOIN, KEEP_ALIVE, and LEAVE events.
+   - If configured, the instance attempts to seed its local Services_ view from the Redis service-registry snapshot. Redis service-registry snapshot unavailability must not fail service-discovery bootstrap by itself; however, the instance must not pass readiness until required upstream services are present in its local Services_ view, whether learned from Redis snapshot seeding or live JOIN/KEEP_ALIVE events.
+   - Kafka history replay from earliest must not be used as the service-discovery bootstrap mechanism.
+   - Runtime inter-service lookup uses the local Services_ view.
+   - Local Services_ entries must expire or be removed when KEEP_ALIVE stops, LEAVE is received, or the entry is otherwise determined stale.
+   - An instance is considered discovery-ready only after required upstream dependency microservices are present in its local Services_ view, whether learned from Redis snapshot seeding or live service_events.
 ```
 
-Local `Services_` state may remain process-local only if every OWPROV instance receives every required `service_events` message through BroadcastConsumer.
+Local `Services_` remains the primary runtime discovery view for OWPROV inter-service lookups.
 
-If reliable broadcast delivery is not implemented, service discovery must move to a shared registry source.
+Correctness must not depend on replaying historical Kafka service_events from earliest.
 
-`EVENT_REMOVE_TOKEN` must not rely solely on process-local `AuthClient` cache invalidation in multi-instance mode. On receipt of `EVENT_REMOVE_TOKEN`, the receiving instance must delete the affected Redis shared token validation key so all active OWPROV instances immediately reject the revoked token.
+If BroadcastConsumer live delivery is unavailable, OWPROV may lose live discovery updates; Redis snapshot seeding can help new instances bootstrap, but it is not a replacement for live service_events during normal runtime.
+
+`EVENT_REMOVE_TOKEN` must not rely solely on process-local `AuthClient` cache invalidation in multi-instance mode.
+
+On receipt of `EVENT_REMOVE_TOKEN`, the receiving instance must immediately remove the affected process-local `AuthClient` cache entry and attempt to delete the affected Redis shared token validation key.
+
+If Redis deletion fails, the failure must be recorded as a shared durable security-sensitive pending invalidation and retried with backoff until the Redis token entry is removed.
+
+While the invalidation is pending or the token cache state is uncertain, OWPROV must not authorize requests using the stale Redis token validation entry. It must fall back to authoritative token validation or fail closed.
 
 ---
 
@@ -982,9 +1028,11 @@ owner_email         -- User email for WebSocket delivery/display/audit
 parameters          -- JSON array/object of parameters (e.g. venueId, revision)
 status              -- pending, running, succeeded, failed
 owner_instance_id   -- ID of OWPROV instance currently executing the job
+lease_generation    -- Monotonically increasing fencing token (BIGINT) incremented on claim/reclaim
 lease_expires_at    -- Heartbeat lease expiration timestamp to detect worker crashes
 attempt_count       -- Number of execution attempts
 max_attempts        -- Maximum allowed execution attempts (e.g. 2)
+progress            -- JSON object tracking per-device execution progress and completion state
 result              -- Summary JSON result details (minimized; excludes configuration bodies and secrets)
 error_message       -- Error text if the job failed
 created_at          -- Timestamp when job was submitted
@@ -1007,7 +1055,7 @@ When a REST request starts a long-running action:
 
 ```text
 1. Validate the request and extract caller identity (UserInfo.id, UserInfo.email).
-2. Insert a row into the jobs table with status 'pending', attempt_count = 0, owner_user_id, and owner_email.
+2. Insert a row into the jobs table with status 'pending', attempt_count = 0, lease_generation = 0, owner_user_id, and owner_email.
 3. Return the jobId and initial 'pending' status to the caller immediately via HTTP.
 4. A worker loop on an OWPROV instance atomically claims the pending job from PostgreSQL:
 
@@ -1015,24 +1063,33 @@ When a REST request starts a long-running action:
    SET
      status = 'running',
      owner_instance_id = :instance_id,
+     lease_generation = lease_generation + 1,
      lease_expires_at = :now + :lease_interval,
      attempt_count = attempt_count + 1,
      started_at = COALESCE(started_at, :now)
    WHERE id = :job_id
      AND status = 'pending'
-   RETURNING *;
+   RETURNING lease_generation, *;
 
-5. Only the instance that successfully receives the updated row executes the background job thread.
+5. Only the instance that successfully receives the updated row executes the background job thread, retaining the returned lease_generation in memory as its active fencing token.
 ```
 
-### 15.4 Lease renewal and heartbeat
+### 15.4 Lease renewal, progress updates, and fenced heartbeats
 
 While executing a job, the owning instance must maintain an active lease:
 
 ```text
-1. Running jobs have an active lease_expires_at timestamp.
-2. The executing worker periodically updates lease_expires_at (e.g., every 10 seconds with a 30-second lease window).
-3. Upon task completion, the worker updates status to 'succeeded' or 'failed', persists result/error_message, sets completed_at, and triggers notification delivery (via Option A or Option B in Section 16).
+1. Running jobs have an active lease_expires_at timestamp and lease_generation fencing token.
+2. The executing worker periodically updates lease_expires_at and persists progress using fenced queries:
+
+   UPDATE jobs
+   SET lease_expires_at = :now + :lease_interval
+   WHERE id = :job_id
+     AND owner_instance_id = :instance_id
+     AND lease_generation = :my_lease_generation;
+
+3. If any heartbeat, progress update, or terminal update returns 0 rows modified (indicating the lease expired and was reclaimed by another worker with an incremented lease_generation), the current worker detects fence invalidation, immediately aborts execution, and halts further device operations.
+4. Upon task completion, the worker atomically updates status to 'succeeded' or 'failed', persists result/error_message, sets completed_at using the same fenced predicate (WHERE id = :job_id AND owner_instance_id = :instance_id AND lease_generation = :my_lease_generation), and triggers cross-instance notification delivery (Section 16).
 ```
 
 ### 15.5 Expired-owner recovery and retry rules
@@ -1042,18 +1099,36 @@ Surviving OWPROV instances periodically scan for crashed or abandoned jobs:
 ```text
 1. Scan for jobs where status = 'running' AND lease_expires_at < :now.
 2. If attempt_count < max_attempts:
-   - Another instance atomically reclaims the job.
-   - The reclaim event is logged with old owner, new owner, and attempt count.
-   - The new owner resumes or restarts execution.
+   - Another instance atomically reclaims the job and increments the fencing token:
+
+     UPDATE jobs
+     SET
+       owner_instance_id = :new_instance_id,
+       lease_generation = lease_generation + 1,
+       lease_expires_at = :now + :lease_interval,
+       attempt_count = attempt_count + 1
+     WHERE id = :job_id
+       AND status = 'running'
+       AND lease_expires_at < :now
+       AND attempt_count < max_attempts
+     RETURNING lease_generation, *;
+
+   - The reclaim event is logged with old owner, new owner, attempt count, and new lease_generation.
+   - The new owner resumes execution using the incremented lease_generation fencing token.
 3. If attempt_count >= max_attempts:
    - The job is transitioned to terminal status 'failed'.
    - error_message is set to 'Worker crashed and maximum execution attempts exceeded'.
    - completed_at is recorded.
 ```
 
-### 15.6 Device-side idempotency
+### 15.6 Device-side idempotency and operation keys
 
-Background tasks must record incremental progress or device-level execution states where possible. On crash recovery, operations are not blindly re-executed on devices that already completed the action.
+```text
+1. Fencing tokens prevent stale workers from mutating database job state, but external device operations (reboot, firmware upgrade, configuration push via SDK/GW) require operation-level idempotency.
+2. Device commands dispatched to Gateway (owgw) must include an operation idempotency key (e.g. "${job_id}-${device_serial_number}-${action}") and record per-device completed state in the job progress column prior to dispatch.
+3. If a stalled worker resumes execution before detecting its lease loss, downstream device services de-duplicate requests matching the active idempotency key, preventing repeated or conflicting commands on physical devices.
+4. On crash recovery/reclaim, the newly claiming instance inspects the progress column and skips devices that have already completed the action.
+```
 
 ### 15.7 Job query endpoint and access control
 
@@ -1317,9 +1392,12 @@ Scale out:
 ```text
 1. Start additional OWPROV instance.
 2. Instance receives unique identity.
-3. Instance joins Kafka consumers.
-4. Instance completes PostgreSQL, Redis, Kafka, runtime file, and readiness checks.
-5. Load balancer starts routing traffic.
+3. Instance starts Kafka consumers, including BroadcastConsumer for service_events.
+4. Instance builds its local Services_ discovery view from live service_events.
+5. If Redis service registry is available, instance may seed its local Services_ view from the Redis snapshot.
+6. Instance completes PostgreSQL, Kafka, Redis, runtime file, and readiness checks.
+7. When ready/routable, instance broadcasts JOIN over service_events and refreshes its Redis service-registry record if Redis is available.
+8. Load balancer starts routing traffic after readiness succeeds.
 ```
 
 Scale in:
@@ -1454,11 +1532,11 @@ runtime env files
 ### Phase 5: Durable background jobs and WebSocket UI notifications
 
 ```text
-- PostgreSQL jobs table schema creation (with owner_user_id, owner_email, status, lease fields)
-- Background worker claim loop, fenced lease heartbeats, and expired-job reclaim
+- PostgreSQL jobs table schema creation (with owner_user_id, owner_email, status, lease_generation, lease fields)
+- Background worker claim loop, fenced lease heartbeats (lease_generation token), and expired-job reclaim
+- Device operation idempotency keys and device-level execution progress tracking
 - Job status query endpoint (GET /api/v1/jobs/{id}) with owner and scope access control
 - Cross-instance UI notification delivery (Kafka fan-out with owner envelope and local socket filtering)
-- Device-level execution progress tracking and idempotency
 ```
 
 ### Phase 6: Runtime deployment and scale-out validation

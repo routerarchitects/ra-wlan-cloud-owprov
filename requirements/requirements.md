@@ -138,7 +138,7 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 4. Write/update/delete APIs must persist changes to PostgreSQL before returning success.
 5. After a successful PostgreSQL commit, OWPROV must invalidate all Redis cache keys affected by that write.
 6. Redis must not be updated before the PostgreSQL transaction commits.
-7. If PostgreSQL commit succeeds but Redis invalidation fails, the API write must still return success; un-invalidated stale cache entries are bounded by the short TTL fallback, and invalidation errors are logged and monitored.
+7. For normal data cache entries, if PostgreSQL commit succeeds but Redis invalidation fails, the API write must still return success; un-invalidated stale cache entries are bounded by the short TTL fallback, and invalidation errors are logged and monitored. Security-sensitive authorization cache entries follow the stricter invalidation policy in Section 6.2.
 8. Redis is a required dependency for service startup and readiness: if Redis is unreachable, the instance must fail startup or readiness and refuse to accept traffic.
 9. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
 ```
@@ -209,6 +209,10 @@ The architecture distinguishes two distinct categories of authorization and auth
 4. Permission, role, policy, and management-scope changes owned by OWPROV must be persisted in PostgreSQL and invalidate affected Redis keys after commit.
 5. On receiving EVENT_REMOVE_TOKEN over Kafka service_events broadcast, the instance must delete the affected Redis token key and purge any local fallback cache entry.
 6. Authorization and authentication behavior must not require process-local AuthCache or AuthClient cache synchronization between OWPROV instances.
+7. Security-sensitive cache entries must follow a stricter invalidation policy than normal data cache entries:
+   - For normal inventory, display, and metadata caches, Redis invalidation failure after a successful PostgreSQL commit may return success if the stale window is bounded by a short TTL.
+   - For authorization-sensitive data, including permissions, roles, policies, token validation, and token revocation, Redis invalidation failure must not be treated as ordinary bounded staleness. The system must record a shared durable pending invalidation and retry with backoff until the stale authorization entry is removed.
+   - While a security-sensitive invalidation is pending or uncertain, OWPROV must not authorize requests only from the stale Redis entry. It must fall back to authoritative validation or fail closed.
 ```
 
 **Acceptance criteria:**
@@ -223,6 +227,8 @@ The architecture distinguishes two distinct categories of authorization and auth
    - owsec emits EVENT_REMOVE_TOKEN over Kafka service_events.
    - All OWPROV instances receive the event and invalidate the shared Redis token key.
    - A subsequent request with that token to any OWPROV instance is rejected after validating against Redis/owsec.
+4. Simulate Redis DEL failure after a permission or role revocation. Verify the database change commits, a shared durable security-sensitive invalidation retry is recorded, and no OWPROV replica authorizes using the stale permission cache entry.
+5. Simulate EVENT_REMOVE_TOKEN while Redis DEL fails. Verify the local AuthClient cache entry is removed, a shared durable Redis invalidation retry is recorded, and the stale Redis token entry is not accepted as sufficient authorization while invalidation is pending.
 ```
 
 ---
@@ -345,7 +351,7 @@ OWPROV must support two consumer types:
 2. "service_events" must be registered on BroadcastConsumer.
 3. "connection" must be registered on GroupConsumer.
 4. GroupConsumer must use the shared group.id so one message is processed by one instance.
-5. BroadcastConsumer must use an instance-unique group.id stable across restarts (group.id = prov-<instance-id>-broadcast) with auto.offset.reset = earliest so every instance receives broadcast messages and immediately populates discovery state on startup.
+5. BroadcastConsumer must use an instance-unique group.id stable across restarts (group.id = prov-<instance-id>-broadcast) with auto.offset.reset = latest. A new instance must not use Kafka history replay from earliest as the service-discovery bootstrap mechanism; it may seed its local discovery view from the shared Redis service registry snapshot when available and must continue maintaining discovery state from live service_events.
 6. Kafka client.id must also be unique per instance for logs and observability.
 ```
 
@@ -369,11 +375,13 @@ OWPROV must support two consumer types:
 **Required behavior:**
 
 ```text
-1. Every instance must receive service join, keep-alive, leave, and remove-token events.
+1. Every running instance with an active BroadcastConsumer must receive live service join, keep-alive, leave, and remove-token events published after it starts consuming.
 2. Every instance must maintain a compatible service discovery view.
 3. Service discovery registries must track active replicas by instance identifier so that an individual replica's departure does not unregister a shared load-balanced service endpoint while other replicas remain active.
 4. Token invalidation events must reach every instance that may hold relevant token/auth state.
 5. One instance consuming a service event must not prevent other instances from receiving it.
+6. Service discovery state must not be initialized by replaying historical service_events from earliest. A newly started instance may seed its local discovery view from the shared Redis service registry snapshot when Redis is available, and must maintain its runtime discovery view from live service_events consumed from latest/current offset.
+7. Redis service-registry snapshot unavailability must not fail service-discovery bootstrap by itself; however, the instance must not pass readiness until required upstream services are present in its local Services_ view, whether learned from Redis snapshot seeding or live JOIN/KEEP_ALIVE events.
 ```
 
 **Acceptance criteria:**
@@ -384,6 +392,8 @@ OWPROV must support two consumer types:
 3. Verify both instances receive and process the same service event.
 4. Shutting down owprov-1 removes only owprov-1 from the peer discovery view without dropping the shared OWPROV service registration while owprov-2 is running.
 5. Verify internal service lookup does not fail on one replica only because another replica consumed the event.
+6. A newly started replica does not replay historical service_events from earliest and can seed its local discovery view from the shared Redis registry snapshot when available.
+7. If the Redis registry snapshot is unavailable, verify the replica can still build its local discovery view from live JOIN and KEEP_ALIVE events consumed from service_events latest/current offset, and does not pass readiness until required upstream services are discovered.
 ```
 
 ---
@@ -532,23 +542,25 @@ Required behavior:
 
 ```text
 1. Long-running actions must create durable job state in PostgreSQL.
-2. Job state must include job id, job type, parameters, owner_user_id (for access control), owner_email, status, result details etc.
-3. Instances must claim pending jobs through an atomic shared-state operation.
+2. Job state must include job id, job type, parameters, owner_user_id (for access control), owner_email, status, lease_generation (monotonically increasing fencing token), lease_expires_at, progress, and result details.
+3. Instances must claim and reclaim pending or expired jobs through an atomic shared-state operation that increments lease_generation.
 4. Only one instance may own a job at a time.
-5. A crashed or stopped owner must not lose the job permanently.
-6. Another instance may retry a pending job.
-7. Kafka may be used to wake workers, but Kafka group leadership must not be the source of truth for job ownership.
-8. Job status query endpoint GET /api/v1/jobs/{id} must restrict access to the matching owner_user_id or callers with explicit admin/support permission for the job's scope, and job result payloads must contain only necessary fields without secrets or configuration bodies.
+5. All heartbeat, progress, and terminal status updates must be fenced using the active lease_generation and owner_instance_id; if the lease was stolen during a worker pause/stall, updates must fail (0 rows modified) and the stale worker must immediately abort execution.
+6. Device operations (reboots, firmware upgrades, config pushes) must use operation/job idempotency keys and per-device progress tracking so that stalled workers or recovered jobs do not re-execute commands on already-completed devices.
+7. A crashed or stopped owner must not lose the job permanently; another instance may reclaim an expired job up to max_attempts.
+8. Kafka may be used to wake workers, but Kafka group leadership must not be the source of truth for job ownership.
+9. Job status query endpoint GET /api/v1/jobs/{id} must restrict access to the matching owner_user_id or callers with explicit admin/support permission for the job's scope, and job result payloads must contain only necessary fields without secrets or configuration bodies.
 ```
 
 Acceptance criteria:
 
 ```text
 1. A job created through owprov-1 can be queried through owprov-2.
-2. If owprov-1 stops while owning a job, owprov-2 can observe and handle the job according to durable state.
-3. A job is not blindly executed twice during restart, rebalance, or retry.
-4. Job progress and terminal state survive process restart.
-5. A job status read via GET /api/v1/jobs/{id} allows access only to the matching owner_user_id or a caller with authorized admin/support access to the job's resource scope, returning minimized result summaries without secrets.
+2. If owprov-1 stops while owning a job, owprov-2 can observe and reclaim the job using an incremented lease_generation fencing token.
+3. If owprov-1 pauses and resumes after its lease has been reclaimed by owprov-2, owprov-1 cannot overwrite job state or issue duplicate device commands.
+4. A job is not blindly executed twice during restart, rebalance, or retry.
+5. Job progress and terminal state survive process restart.
+6. A job status read via GET /api/v1/jobs/{id} allows access only to the matching owner_user_id or a caller with authorized admin/support access to the job's resource scope, returning minimized result summaries without secrets.
 ```
 
 ---
@@ -625,7 +637,7 @@ OWPROV horizontal scaling is acceptable when:
 5. API write/update/delete operations commit to PostgreSQL and invalidate affected Redis keys after commit.
 6. API behavior does not depend on process-local AuthCache, SerialNumberCache, DeviceTypeCache, or similar in-memory caches.
 7. Kafka topics consumed by OWPROV are registered on the correct consumer type.
-8. service_events is received by every OWPROV instance.
+8. service_events is received by every running OWPROV instance with an active BroadcastConsumer.
 9. connection messages are processed by only one OWPROV instance in the service group.
 10. Database startup and schema initialization do not race between instances.
 11. Concurrent database writes do not silently lose updates.
