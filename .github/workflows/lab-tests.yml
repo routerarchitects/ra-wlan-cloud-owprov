@@ -194,6 +194,24 @@ jobs:
                 { echo "KEY NOT READABLE"; exit 1; }
             '
 
+      # -- Verify log redaction patterns --
+      - name: Verify log redaction patterns
+        run: |
+          set -euo pipefail
+          TEST_INPUT='{"token": "secret-jwt-token", "password": "super-secret-pwd"} Bearer abc123def456 key=mysecretkey'
+          SANITIZED=$(echo "$TEST_INPUT" | sed -E \
+            -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/\1[REDACTED]/gI' \
+            -e 's/("?(password|secret|token|key)"?[[:space:]]*:[[:space:]]*")[^"]*"/\1[REDACTED]"/gI' \
+            -e 's/((password|secret|token|key)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1[REDACTED]/gI')
+
+          if echo "$SANITIZED" | grep -qE "secret-jwt-token|super-secret-pwd|abc123def456|mysecretkey"; then
+            echo "ERROR: Redaction filter failed to mask secrets!"
+            echo "Output was: $SANITIZED"
+            exit 1
+          fi
+          echo "Log redaction verified successfully:"
+          echo "$SANITIZED"
+
       # ── Start mock services ───────────────────────────────────────────────────
       - name: Start mock_owsec and mock_fms
         run: |
@@ -539,7 +557,8 @@ jobs:
         run: |
           docker logs owprov 2>&1 | tail -500 | sed -E \
             -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/\1[REDACTED]/gI' \
-            -e 's/(password|secret|token|key)(["'\''=:][[:space:]]*)[^ &"\''\n]+/\1\2[REDACTED]/gI' \
+            -e 's/("?(password|secret|token|key)"?[[:space:]]*:[[:space:]]*")[^"]*"/\1[REDACTED]"/gI' \
+            -e 's/((password|secret|token|key)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1[REDACTED]/gI' \
             > /tmp/owprov-debug.log
           docker logs postgres 2>&1 | tail -200 > /tmp/postgres-debug.log
 
