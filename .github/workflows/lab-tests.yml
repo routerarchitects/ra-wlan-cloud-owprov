@@ -500,8 +500,8 @@ jobs:
           done
 
           if [ "$REGISTERED" -ne 1 ]; then
-            echo "ERROR: owprov did not register both owsec and owfms within 30 seconds!"
-            docker logs owprov 2>&1
+            echo "ERROR: owprov did not register both owsec and owfms within 30 seconds! Check the failure-logs artifact for full diagnostics."
+            docker logs owprov 2>&1 | tail -50
             exit 1
           fi
 
@@ -534,10 +534,16 @@ jobs:
           path: tests/lab_tests/rbac_actual_results.csv
 
       # ── Debug on failure ──────────────────────────────────────────────────────
-      - name: Dump owprov logs on failure
+      - name: Collect debug logs on failure
         if: failure()
         run: |
-          echo "=== Full owprov logs ==="
-          docker logs owprov 2>&1
-          echo "=== Postgres logs ==="
-          docker logs postgres 2>&1 | tail -50 || true
+          docker logs owprov > /tmp/owprov-debug.log 2>&1
+          docker logs postgres > /tmp/postgres-debug.log 2>&1
+
+      - name: Upload debug logs artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owprov-ci-failure-logs
+          path: /tmp/*-debug.log
+          retention-days: 5
