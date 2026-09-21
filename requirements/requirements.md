@@ -141,7 +141,9 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 7. For normal data cache entries, if PostgreSQL commit succeeds but Redis invalidation fails, the API write must still return success; un-invalidated stale cache entries are bounded by the short TTL fallback, and invalidation errors are logged and monitored. Security-sensitive authorization cache entries follow the stricter invalidation policy in Section 6.2.
 8. Redis is a cache layer, not a permanent source of record: if Redis is temporarily unavailable or unreachable, API reads must fall back directly to PostgreSQL or owsec authoritatively rather than failing readiness or serving stale process-local state. OWPROV operates without caching until Redis connectivity is restored.
 9. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
-10. Cache repopulation on read miss must not reintroduce stale data if a concurrent write committed in PostgreSQL: writers record the committed version/epoch in Redis alongside key invalidation (e.g. via an invalidation tombstone or version key), and readers attempting to repopulate on miss must check this marker and abort the write if their read version is older than the committed version.
+10. Cache repopulation guarantees:
+    a. Normal data cache (inventory, venues, configurations): Under normal operation, stale repopulation is prevented via version/generation tracking (writers record the committed version in Redis and readers abort repopulation if their read version is older). Across Redis outages or invalidation failures, stale repopulation is explicitly acceptable for normal data and is bounded by the configured TTL (openwifi.redis.cache.ttl, 10–60 seconds).
+    b. Security-sensitive authorization cache: Must maintain the stronger guarantee deriving directly from PostgreSQL/owsec revision epochs. An older read must never reintroduce stale authorization data or override an active revision epoch.
 ```
 
 **Acceptance criteria**:
@@ -154,7 +156,7 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 5. If Redis is offline or unreachable, API reads continue to operate correctly by querying PostgreSQL and owsec directly without failing traffic acceptance or falling back to process-local caches.
 6. Restarting one OWPROV instance does not change the data view of another instance.
 7. API behavior is the same regardless of which OWPROV replica receives the request.
-8. Verify that a slow read observing an older database snapshot cannot repopulate Redis with stale data if a concurrent write commits a newer version and invalidates the cache while the read was in-flight.
+8. Verify that under normal operation, slow reads observing older database snapshots do not repopulate Redis with stale data. For normal data caches during Redis outages or invalidation failures, verify that any stale repopulation is bounded by the configured TTL. For authorization data, verify that stale reads can never reintroduce stale authorization state and must strictly validate against the authoritative PostgreSQL/owsec revision epoch.
 ```
 
 ---
@@ -212,9 +214,10 @@ The architecture distinguishes two distinct categories of authorization and auth
 5. Permission, role, policy, and management-scope changes owned by OWPROV must be persisted in PostgreSQL and invalidate affected Redis keys after commit.
 6. Authorization and authentication behavior must not require process-local AuthCache or AuthClient cache synchronization between OWPROV instances.
 7. Security-sensitive cache entries must follow a stricter invalidation policy than normal data cache entries:
-   - For normal inventory, display, and metadata caches, Redis invalidation failure after a successful PostgreSQL commit may return success if the stale window is bounded by a short TTL.
-   - For authorization-sensitive data, including permissions, roles, policies, token validation, and token revocation, Redis invalidation failure must not be treated as ordinary bounded staleness. The system must record a shared durable pending invalidation and retry with backoff until the stale authorization entry is removed.
-   - The authoritative revision/epoch is maintained in PostgreSQL (or owsec). When caching in Redis, authorization entries validate against this active revision/epoch so that an older DB read cannot re-populate or re-authorize stale roles or permissions in the cache. If Redis is unavailable, authorization validates directly against PostgreSQL or owsec.
+   - For normal inventory, display, and metadata caches, Redis invalidation failure after a successful PostgreSQL commit may return success if the stale window is bounded by a short TTL. Readers do not perform double DB validation queries before setting cache.
+   - For authorization-sensitive data, including permissions, roles, policies, token validation, and token revocation, Redis invalidation failure must not be treated as ordinary bounded staleness. For OWPROV-owned authorization data, OWPROV must create a shared durable pending invalidation record and retry with backoff. For Security-service-owned token/session data, owsec must own the durable invalidation retry because owsec is the authoritative owner of token revocation and session state.
+   - Distinct ownership boundaries: OWPROV PostgreSQL is the source of truth for management roles, policies, and entity/venue scopes; owsec is the source of truth for bearer tokens and subscriber sessions.
+   - The authoritative revision/epoch is maintained in PostgreSQL (for OWPROV authorization data) or owsec (for tokens). When caching in Redis, authorization entries validate against this active revision/epoch: before OWPROV trusts a cached authorization result or writes one into Redis, it verifies that the record's revision/epoch is current against the authoritative source of truth. Older reads bearing stale epochs are rejected and cannot repopulate the cache. If Redis is unavailable, authorization validates directly against PostgreSQL or owsec.
    - While a security-sensitive invalidation is pending or uncertain, OWPROV must not authorize requests only from the stale Redis entry. It must fall back to authoritative validation or fail closed.
 ```
 

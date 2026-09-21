@@ -249,7 +249,7 @@ Implementation rules:
 3. Cache misses must reload from PostgreSQL.
 4. Cache TTLs must be short and configurable per data type to ensure bounded staleness.
 5. API behavior must not fall back to process-local cache state when Redis misses.
-6. Stale repopulation prevention: Cached entries must include a version/generation marker (e.g., record modified timestamp or revision epoch). When a writer commits version V2, it records this committed version in Redis (via an invalidation tombstone or version key). A reader with version V1 attempting to repopulate on cache miss must check this version marker and abort the write if V1 < V2.
+6. Stale repopulation prevention: Cached entries must include a version/generation marker (e.g., record modified timestamp or revision epoch). When Redis is available, a writer that commits version V2 records this committed version in Redis (via an invalidation tombstone or version key); a reader with version V1 attempting to repopulate on cache miss checks this version marker and aborts the write if V1 < V2. For normal data caches, if Redis was unavailable during the commit so the version marker could not be written, stale repopulation upon recovery is explicitly acceptable and bounded by the configured TTL. For security-sensitive authorization data, the stronger guarantee is maintained: authorization data strictly derives from the authoritative PostgreSQL/owsec revision epoch and stale repopulation is never permitted.
 ```
 
 ### 6.3 Write behavior and cache invalidation
@@ -275,7 +275,7 @@ Implementation rules:
 3. POST/PUT/DELETE handlers must identify affected Redis keys.
 4. The preferred first implementation is cache invalidation, not direct Redis mutation.
 5. The next read repopulates Redis from PostgreSQL on cache miss.
-6. Post-commit version tracking: Writers must record the newly committed version/epoch in Redis alongside key invalidation (e.g. setting an invalidation tombstone or version marker with the committed timestamp/version). Readers attempting to repopulate on miss compare their DB read's version against this marker in Redis and drop the write if their read is older than the committed version. Writes update the record version/generation in PostgreSQL before commit.
+6. Post-commit version tracking: When Redis is available, writers record the newly committed version/epoch in Redis alongside key invalidation (e.g. setting an invalidation tombstone or version marker with the committed timestamp/version); readers attempting to repopulate on miss compare their DB read's version against this marker in Redis and drop the write if their read is older than the committed version. Writes update the record version/generation in PostgreSQL before commit. For normal data caches across a Redis outage or invalidation failure, stale repopulation is explicitly acceptable for the duration of the configured TTL. For authorization data, the stronger guarantee is enforced via PostgreSQL/owsec revision epochs.
 ```
 
 ### 6.3.1 Invalidation failure handling and bounded staleness
@@ -299,25 +299,34 @@ Implementation rules:
 3. The short TTL acts as a bounded staleness fallback: in the event of an individual invalidation failure, stale entries expire quickly on their own without requiring complex background retry queues or outbox processing.
 4. If Redis is unreachable or temporarily offline, API reads must fall back to querying PostgreSQL or owsec directly rather than failing readiness or falling back to process-local cache state. The instance serves requests without caching until Redis connectivity is restored.
 5. Invalidation failures must emit ERROR logs with affected keys and increment owprov_redis_invalidation_failures_total for operator visibility.
+6. Stale repopulation across Redis outages: If a write commits in PostgreSQL while Redis is unreachable, the Redis invalidation and version marker cannot be recorded. For normal data (inventory, display, metadata), stale repopulation upon Redis recovery is explicitly acceptable and treated as bounded staleness expiring within the configured short TTL (10–60 seconds). For security-sensitive authorization data, the stronger guarantee is maintained: authorization state derives authoritatively from PostgreSQL/owsec revision epochs, preventing stale authorization data from ever being accepted or cached.
 ```
 
 ### 6.3.2 Security-sensitive cache invalidation
 
-Redis cache usage is divided into two cache policy classes:
+Redis cache usage is divided into two distinct cache policy classes:
 
 1. Normal data cache
    - Used for inventory, display, metadata, and non-authorization data.
    - PostgreSQL remains the source of truth.
-   - After a successful PostgreSQL commit, Redis invalidation failure may be tolerated if the stale window is bounded by a short TTL.
+   - Readers do not perform double DB validation queries before setting cache; during normal operation, Redis version markers prevent stale repopulation.
+   - After a successful PostgreSQL commit, if Redis invalidation fails or Redis was offline, stale repopulation upon recovery is explicitly acceptable and treated as bounded staleness expiring within the short TTL (`openwifi.redis.cache.ttl`, 10–60s).
 
 2. Security-sensitive authorization cache
-   - Used for permission, role, policy, management-scope, token validation, and token revocation state.
-   - The authoritative revision/epoch is maintained in PostgreSQL (or owsec). When cached in Redis, authorization entries must validate against this active revision/epoch, ensuring an older DB read bearing a previous epoch is immediately rejected and cannot repopulate the cache. If Redis is unavailable, authorization validates directly and authoritatively via PostgreSQL or owsec without caching.
-   - Redis invalidation failure must not be treated as normal bounded staleness.
-   - Redis invalidation failure must create a shared durable pending invalidation record, not only an in-memory retry on one OWPROV instance.
-   - Redis invalidation must be retried with backoff until the affected cache entry is removed.
+   - Used for permissions, roles, management policies, entity/venue scopes, user token validation, and token revocation state.
+   - Distinct ownership boundaries:
+     - **OWPROV-Owned Authorization Data** (roles, permissions, entity/venue scopes, management policies): OWPROV PostgreSQL is the source of truth and maintains an authoritative revision/epoch per authorization record.
+     - **Security-Service-Owned Authentication Data** (bearer tokens, session validity, subscriber auth): `owsec` is the source of truth and maintains token revision, expiration, and revocation status.
+   - Authoritative revision/epoch validation:
+     - The authoritative revision/epoch is maintained in PostgreSQL (for OWPROV data) or `owsec` (for tokens).
+     - **Before OWPROV trusts a cached authorization result in Redis**, it verifies that the cached revision/epoch matches the active revision/epoch.
+     - **Before OWPROV writes authorization data into Redis on a cache miss**, it validates that the DB-read revision/epoch is still current against the authoritative source of truth.
+     - Example (OWPROV Role Change): PostgreSQL has user role = `admin`, `auth_epoch = 5`. Instance `owprov-2` reads this. Concurrently, `owprov-1` changes user role to `viewer`, committing `auth_epoch = 6` to PostgreSQL. When `owprov-2` later attempts to cache or authorize using its read, it checks the active `auth_epoch` in PostgreSQL; seeing current epoch is 6, it identifies epoch 5 as stale, aborts the Redis write, and enforces `viewer` permissions.
+     - Example (OWSEC Token Revocation): `owsec` marks token `ABC` valid with `token_epoch = 10`. When the user logs out or the token is revoked, `owsec` updates token state to revoked with `token_epoch = 11`. Any Redis entry with `token_epoch = 10` is identified as stale and rejected; OWPROV validates directly with `owsec` or fails closed.
+   - Redis invalidation failure must not be treated as normal bounded staleness for authorization data.
+   - For OWPROV-owned authorization data, OWPROV must create a shared durable pending invalidation record and retry with backoff until the affected cache entry is removed. For Security-service-owned token/session data, owsec must own the durable invalidation retry because owsec is the authoritative owner of token revocation and session state.
    - Request authorization must not rely only on a Redis entry known to be stale or affected by a pending invalidation.
-   - If the cache state is uncertain, OWPROV must use authoritative validation (PostgreSQL for OWPROV authorization state; Security service for tokens) or fail closed.
+   - If the cache state is uncertain or Redis is unavailable, OWPROV must use authoritative validation (PostgreSQL for OWPROV authorization state; Security service REST API for tokens) or fail closed. Stale authorization data is never permitted to be cached or trusted.
 
 ### 6.4 Process-local cache usage
 
