@@ -84,3 +84,10 @@ jobs:
     - name: Build Docker Image
       run: |
         docker build -t owprov:test .
+
+    - name: Verify runtime shared-library dependencies
+      run: |
+        docker run --rm \
+          --entrypoint /bin/bash \
+          owprov:test \
+          -c 'ldd /openwifi/owprov && ! ldd /openwifi/owprov | grep -q "not found"'
