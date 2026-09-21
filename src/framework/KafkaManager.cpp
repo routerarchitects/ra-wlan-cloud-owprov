@@ -150,6 +150,8 @@ namespace OpenWifi {
 			 {"group.id", MicroServiceConfigGetString("openwifi.kafka.group.id", "")},
 			 {"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
 			 {"auto.offset.reset", "latest"},
+			 {"auto.offset.reset", "smallest"},
+			 {"allow.auto.create.topics", true},
 			 {"enable.partition.eof", false}});
 
 		AddKafkaSecurity(Config);
