@@ -237,7 +237,7 @@ Read path:
 2. Read from Redis.
 3. If Redis has the value, use it.
 4. If Redis does not have the value, read from PostgreSQL.
-5. Store the PostgreSQL result in Redis where caching is allowed, including its entity version/generation (e.g. modified timestamp or revision epoch).
+5. Store the PostgreSQL result in Redis where caching is allowed, including its record version/generation (e.g. modified timestamp or revision epoch).
 6. Return the API result.
 ```
 
@@ -249,7 +249,7 @@ Implementation rules:
 3. Cache misses must reload from PostgreSQL.
 4. Cache TTLs must be short and configurable per data type to ensure bounded staleness.
 5. API behavior must not fall back to process-local cache state when Redis misses.
-6. Stale repopulation prevention: Cached entries must include a version/generation marker (e.g., entity modified timestamp or revision epoch). When a writer commits version V2, it records this committed version in Redis (via an invalidation tombstone or version key). A reader with version V1 attempting to repopulate on cache miss must check this version marker and abort the write if V1 < V2.
+6. Stale repopulation prevention: Cached entries must include a version/generation marker (e.g., record modified timestamp or revision epoch). When a writer commits version V2, it records this committed version in Redis (via an invalidation tombstone or version key). A reader with version V1 attempting to repopulate on cache miss must check this version marker and abort the write if V1 < V2.
 ```
 
 ### 6.3 Write behavior and cache invalidation
@@ -261,7 +261,7 @@ Write path:
 ```text
 1. Validate request.
 2. Start required PostgreSQL transaction.
-3. Write PostgreSQL changes (updating entity version/generation).
+3. Write PostgreSQL changes (updating record version/generation).
 4. Commit PostgreSQL transaction.
 5. Invalidate affected Redis cache keys and record the committed version/epoch in Redis (e.g. via an invalidation tombstone or version marker) so older in-flight reads cannot repopulate stale data.
 6. Return API response.
@@ -275,7 +275,7 @@ Implementation rules:
 3. POST/PUT/DELETE handlers must identify affected Redis keys.
 4. The preferred first implementation is cache invalidation, not direct Redis mutation.
 5. The next read repopulates Redis from PostgreSQL on cache miss.
-6. Post-commit version tracking: Writers must record the newly committed version/epoch in Redis alongside key invalidation (e.g. setting an invalidation tombstone or version marker with the committed timestamp/version). Readers attempting to repopulate on miss compare their DB read's version against this marker in Redis and drop the write if their read is older than the committed version.
+6. Post-commit version tracking: Writers must record the newly committed version/epoch in Redis alongside key invalidation (e.g. setting an invalidation tombstone or version marker with the committed timestamp/version). Readers attempting to repopulate on miss compare their DB read's version against this marker in Redis and drop the write if their read is older than the committed version. Writes update the record version/generation in PostgreSQL before commit.
 ```
 
 ### 6.3.1 Invalidation failure handling and bounded staleness
