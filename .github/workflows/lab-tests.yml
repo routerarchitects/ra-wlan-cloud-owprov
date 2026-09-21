@@ -534,11 +534,14 @@ jobs:
           path: tests/lab_tests/rbac_actual_results.csv
 
       # ── Debug on failure ──────────────────────────────────────────────────────
-      - name: Collect debug logs on failure
+      - name: Collect and redact debug logs on failure
         if: failure()
         run: |
-          docker logs owprov > /tmp/owprov-debug.log 2>&1
-          docker logs postgres > /tmp/postgres-debug.log 2>&1
+          docker logs owprov 2>&1 | tail -500 | sed -E \
+            -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/\1[REDACTED]/gI' \
+            -e 's/(password|secret|token|key)(["'\''=:][[:space:]]*)[^ &"\''\n]+/\1\2[REDACTED]/gI' \
+            > /tmp/owprov-debug.log
+          docker logs postgres 2>&1 | tail -200 > /tmp/postgres-debug.log
 
       - name: Upload debug logs artifact on failure
         if: failure()
