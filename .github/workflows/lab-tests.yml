@@ -72,16 +72,9 @@ jobs:
           docker logs kafka | tail -100
           exit 1
 
-      # ── Create Kafka topic ───────────────────────────────────────────────────
-      - name: Create Kafka service_events topic
       # ── Create Kafka topics ───────────────────────────────────────────────────
       - name: Create Kafka topics
         run: |
-          docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-            --bootstrap-server localhost:9092 \
-            --create --topic service_events \
-            --partitions 1 --replication-factor 1 \
-            --if-not-exists
           for topic in command connection device_event_queue device_telemetry healthcheck provisioning_change service_events state wifiscan; do
             docker exec kafka /opt/kafka/bin/kafka-topics.sh \
               --bootstrap-server localhost:9092 \
