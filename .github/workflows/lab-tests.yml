@@ -491,9 +491,34 @@ jobs:
 
           echo "Waiting for owprov to consume service join events..."
           sleep 10
+          echo "Waiting for owprov to consume service join events and register owsec..."
+          REGISTERED=0
+          for i in {1..30}; do
+            if docker logs owprov 2>&1 | grep -q "Current list of microservices:.*owsec"; then
+              echo "SUCCESS: owprov has registered owsec!"
+              REGISTERED=1
+              break
+            fi
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "Republishing join events (attempt $i/30)..."
+              echo '{"event":"join","id":16001,"type":"owsec","publicEndPoint":"https://localhost:16001","privateEndPoint":"https://localhost:16001","key":"testkey","version":"2.1.0"}' | \
+                docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+                --bootstrap-server localhost:9092 \
+                --topic service_events
+            fi
+            sleep 1
+          done
 
           echo "Checking owprov logs for Kafka registration problems..."
           docker logs owprov 2>&1 | tail -50
+          if [ "$REGISTERED" -ne 1 ]; then
+            echo "ERROR: owprov did not register owsec within 30 seconds!"
+            docker logs owprov 2>&1
+            exit 1
+          fi
+
+          echo "Checking owprov logs for Kafka registration status..."
+          docker logs owprov 2>&1 | grep -i "microservices" || true
 
       # ── Run combined test suite ───────────────────────────────────────────────
       - name: Execute Combined Lab Test Suite (Root + Admin)
@@ -525,4 +550,5 @@ jobs:
         if: failure()
         run: |
           docker logs owprov 2>&1 | tail -100
+          docker logs owprov 2>&1
           docker logs postgres 2>&1 | tail -50 || true

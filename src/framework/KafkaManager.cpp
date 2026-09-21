@@ -149,7 +149,6 @@ namespace OpenWifi {
 			 {"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
 			 {"group.id", MicroServiceConfigGetString("openwifi.kafka.group.id", "")},
 			 {"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
-			 {"auto.offset.reset", "latest"},
 			 {"auto.offset.reset", "smallest"},
 			 {"allow.auto.create.topics", true},
 			 {"enable.partition.eof", false}});
@@ -203,9 +202,11 @@ namespace OpenWifi {
 						try {
 							CallbackFunc(msg.get_key(), msg.get_payload());
 						} catch(const Poco::Exception &E) {
-
+							poco_error(Logger_, fmt::format("Poco exception in Kafka callback for topic {}: {}", msg.get_topic(), E.displayText()));
+						} catch(const std::exception &E) {
+							poco_error(Logger_, fmt::format("std::exception in Kafka callback for topic {}: {}", msg.get_topic(), E.what()));
 						} catch(...) {
-
+							poco_error(Logger_, fmt::format("Unknown exception in Kafka callback for topic {}", msg.get_topic()));
 						}
 					}
 				}
