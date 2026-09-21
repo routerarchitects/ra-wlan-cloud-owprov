@@ -139,8 +139,9 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 5. After a successful PostgreSQL commit, OWPROV must invalidate all Redis cache keys affected by that write.
 6. Redis must not be updated before the PostgreSQL transaction commits.
 7. For normal data cache entries, if PostgreSQL commit succeeds but Redis invalidation fails, the API write must still return success; un-invalidated stale cache entries are bounded by the short TTL fallback, and invalidation errors are logged and monitored. Security-sensitive authorization cache entries follow the stricter invalidation policy in Section 6.2.
-8. Redis is a required dependency for service startup and readiness: if Redis is unreachable, the instance must fail startup or readiness and refuse to accept traffic.
+8. Redis is a cache layer, not a permanent source of record: if Redis is temporarily unavailable or unreachable, API reads must fall back directly to PostgreSQL or owsec authoritatively rather than failing readiness or serving stale process-local state. OWPROV operates without caching until Redis connectivity is restored.
 9. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
+10. Cache repopulation on read miss must not reintroduce stale data if a concurrent write committed in PostgreSQL: writers record the committed version/epoch in Redis alongside key invalidation (e.g. via an invalidation tombstone or version key), and readers attempting to repopulate on miss must check this marker and abort the write if their read version is older than the committed version.
 ```
 
 **Acceptance criteria**:
@@ -150,9 +151,10 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 2. Related Redis cache keys are invalidated after the PostgreSQL commit.
 3. A later read through owprov-2 either reads fresh data from Redis or reloads it from PostgreSQL on cache miss.
 4. If a Redis invalidation call fails after PostgreSQL commit, the API call returns success, an ERROR is logged, and stale Redis entries expire quickly via short TTL fallback.
-5. If Redis is offline or unreachable, readiness checks fail and the instance does not accept traffic.
+5. If Redis is offline or unreachable, API reads continue to operate correctly by querying PostgreSQL and owsec directly without failing traffic acceptance or falling back to process-local caches.
 6. Restarting one OWPROV instance does not change the data view of another instance.
 7. API behavior is the same regardless of which OWPROV replica receives the request.
+8. Verify that a slow read observing an older database snapshot cannot repopulate Redis with stale data if a concurrent write commits a newer version and invalidates the cache while the read was in-flight.
 ```
 
 ---
@@ -198,20 +200,21 @@ Authorization and authentication checks must not depend on which OWPROV instance
 
 The architecture distinguishes two distinct categories of authorization and authentication state:
 1. **OWPROV-Owned Authorization Data** (management roles, policies, entity scopes, permissions): Source of truth is OWPROV PostgreSQL. Cache misses reload from PostgreSQL. Invalidation occurs after PostgreSQL commit.
-2. **Security-Service-Owned Authentication Data** (user session tokens `Authorization: Bearer <token>`, subscriber tokens validated via `AuthClient`): Source of truth is the OpenWiFi Security Microservice (`owsec`). Cache misses query `owsec` REST endpoints (`/api/v1/validateToken`, `/api/v1/validateSubToken`), NOT OWPROV PostgreSQL. Invalidation occurs upon receiving `EVENT_REMOVE_TOKEN` broadcast over Kafka `service_events`.
+2. **Security-Service-Owned Authentication Data** (user session tokens `Authorization: Bearer <token>`, subscriber tokens validated via `AuthClient`): Source of truth is the OpenWiFi Security Microservice (`owsec`). Cache misses query `owsec` REST endpoints (`/api/v1/validateToken`, `/api/v1/validateSubToken`), NOT OWPROV PostgreSQL. When a token is revoked or a session is terminated, `owsec` directly invalidates (deletes) the corresponding shared Redis token-cache entry. Token invalidation does not depend on Kafka broadcast messages or cross-replica coordination.
 
 **Required behavior:**
 
 ```text
 1. Authorization and authentication API checks may read from Redis shared cache.
 2. If OWPROV-owned authorization data is not present in Redis, the API path must read from PostgreSQL-backed state.
-3. If token or API-key validation data is not present in Redis, AuthClient must call the Security service (owsec) REST API, not PostgreSQL.
-4. Permission, role, policy, and management-scope changes owned by OWPROV must be persisted in PostgreSQL and invalidate affected Redis keys after commit.
-5. On receiving EVENT_REMOVE_TOKEN over Kafka service_events broadcast, the instance must delete the affected Redis token key and purge any local fallback cache entry.
+3. If token or API-key validation data is not present in Redis (cache miss), AuthClient must call the Security service (owsec) REST API, not PostgreSQL, and cache the validation result in Redis with a TTL that must never exceed the token's remaining lifetime.
+4. Token revocation and session termination invalidations are the direct responsibility of owsec, which deletes the shared Redis token-cache entry. Token invalidation must not depend on Kafka offsets, consumer availability, or EVENT_REMOVE_TOKEN delivery. If owsec cannot delete the Redis token-cache key, owsec must record and retry the invalidation or otherwise prevent the revoked token from validating successfully.
+5. Permission, role, policy, and management-scope changes owned by OWPROV must be persisted in PostgreSQL and invalidate affected Redis keys after commit.
 6. Authorization and authentication behavior must not require process-local AuthCache or AuthClient cache synchronization between OWPROV instances.
 7. Security-sensitive cache entries must follow a stricter invalidation policy than normal data cache entries:
    - For normal inventory, display, and metadata caches, Redis invalidation failure after a successful PostgreSQL commit may return success if the stale window is bounded by a short TTL.
    - For authorization-sensitive data, including permissions, roles, policies, token validation, and token revocation, Redis invalidation failure must not be treated as ordinary bounded staleness. The system must record a shared durable pending invalidation and retry with backoff until the stale authorization entry is removed.
+   - The authoritative revision/epoch is maintained in PostgreSQL (or owsec). When caching in Redis, authorization entries validate against this active revision/epoch so that an older DB read cannot re-populate or re-authorize stale roles or permissions in the cache. If Redis is unavailable, authorization validates directly against PostgreSQL or owsec.
    - While a security-sensitive invalidation is pending or uncertain, OWPROV must not authorize requests only from the stale Redis entry. It must fall back to authoritative validation or fail closed.
 ```
 
@@ -224,11 +227,12 @@ The architecture distinguishes two distinct categories of authorization and auth
    - Confirm affected Redis authorization cache keys are invalidated.
    - Send an API request requiring that permission to owprov-2; confirm owprov-2 authorizes or rejects the request using Redis shared cache or PostgreSQL reload, not local AuthCache state.
 3. Revoke a user session token or log out in owsec:
-   - owsec emits EVENT_REMOVE_TOKEN over Kafka service_events.
-   - All OWPROV instances receive the event and invalidate the shared Redis token key.
-   - A subsequent request with that token to any OWPROV instance is rejected after validating against Redis/owsec.
-4. Simulate Redis DEL failure after a permission or role revocation. Verify the database change commits, a shared durable security-sensitive invalidation retry is recorded, and no OWPROV replica authorizes using the stale permission cache entry.
-5. Simulate EVENT_REMOVE_TOKEN while Redis DEL fails. Verify the local AuthClient cache entry is removed, a shared durable Redis invalidation retry is recorded, and the stale Redis token entry is not accepted as sufficient authorization while invalidation is pending.
+   - owsec directly deletes the shared Redis token-cache key.
+   - A subsequent request with that token to any OWPROV instance results in a Redis cache miss, re-validates against owsec, and is rejected.
+   - Invalidation correctness does not depend on Kafka consumer state, consumer group lag, or EVENT_REMOVE_TOKEN broadcast delivery.
+4. Verify that cached token entries in Redis have a TTL bounded by the token's remaining lifetime, ensuring expired tokens cannot remain cached even if explicit revocation was not triggered.
+5. Simulate Redis DEL failure after an OWPROV-owned permission or role revocation. Verify the database change commits, a shared durable security-sensitive invalidation retry is recorded, and no OWPROV replica authorizes using the stale permission cache entry.
+6. Verify that an older database read for authorization data cannot overwrite or re-populate a newer committed permission or role change in Redis.
 ```
 
 ---
@@ -351,15 +355,15 @@ OWPROV must support two consumer types:
 2. "service_events" must be registered on BroadcastConsumer.
 3. "connection" must be registered on GroupConsumer.
 4. GroupConsumer must use the shared group.id so one message is processed by one instance.
-5. BroadcastConsumer must use an instance-unique group.id stable across restarts (group.id = prov-<instance-id>-broadcast) with auto.offset.reset = latest. A new instance must not use Kafka history replay from earliest as the service-discovery bootstrap mechanism; it may seed its local discovery view from the shared Redis service registry snapshot when available and must continue maintaining discovery state from live service_events.
-6. Kafka client.id must also be unique per instance for logs and observability.
+5. BroadcastConsumer must use an incarnation-unique group.id generated per runtime process lifetime (e.g., group.id = prov-<incarnation-id>-broadcast using a runtime UUID or slot-qualified UUID) with auto.offset.reset = latest. Consumer group IDs must not be reused across overlapping container restarts, because Kafka would treat overlapping old and new replicas as members of the same consumer group and divide partitions between them instead of fanning out all messages to both. An instance must not use Kafka history replay from earliest as the service-discovery bootstrap mechanism; it may seed its local discovery view from the shared Redis service registry snapshot when available and must continue maintaining discovery state from live service_events.
+6. Kafka client.id must also be unique per runtime instance for logs and observability (incorporating the runtime incarnation ID).
 ```
 
 **Acceptance criteria:**
 
 ```text
 1. "service_events" is assigned to BroadcastConsumer.
-2. Every running instance receives service_events messages.
+2. Every running instance receives service_events messages, including during rolling updates and overlapping container restarts.
 3. "connection" is assigned to GroupConsumer.
 4. Each "connection" message is processed by only one instance in the service group.
 5. State written as a result of connection processing is stored in PostgreSQL and can be read by any OWPROV instance through the shared read model defined in Section 5.2.
@@ -375,10 +379,10 @@ OWPROV must support two consumer types:
 **Required behavior:**
 
 ```text
-1. Every running instance with an active BroadcastConsumer must receive live service join, keep-alive, leave, and remove-token events published after it starts consuming.
+1. Every running instance with an active BroadcastConsumer must receive live service join, keep-alive, and leave events published after it starts consuming.
 2. Every instance must maintain a compatible service discovery view.
-3. Service discovery registries must track active replicas by instance identifier so that an individual replica's departure does not unregister a shared load-balanced service endpoint while other replicas remain active.
-4. Token invalidation events must reach every instance that may hold relevant token/auth state.
+3. Service discovery registries across OpenWiFi microservices must track active replicas by instance identifier so that an individual replica's departure does not unregister a shared load-balanced service endpoint while other replicas remain active.
+4. Token invalidation is handled directly by owsec deleting shared Redis token cache keys upon revocation, decoupling authentication correctness from Kafka broadcast delivery.
 5. One instance consuming a service event must not prevent other instances from receiving it.
 6. Service discovery state must not be initialized by replaying historical service_events from earliest. A newly started instance may seed its local discovery view from the shared Redis service registry snapshot when Redis is available, and must maintain its runtime discovery view from live service_events consumed from latest/current offset.
 7. Redis service-registry snapshot unavailability must not fail service-discovery bootstrap by itself; however, the instance must not pass readiness until required upstream services are present in its local Services_ view, whether learned from Redis snapshot seeding or live JOIN/KEEP_ALIVE events.
@@ -447,27 +451,33 @@ Kafka producer behavior must not prevent partition-based scale-out for scalable 
 
 ## 9. Service Identity Requirements
 
-### 9.1: Service identity must distinguish logical service identity from instance identity
+### 9.1: Service identity must distinguish logical service identity, slot identity, and runtime incarnation identity
 
-Horizontal scaling requires a clear distinction between shared service identity and individual instance identity.
+Horizontal scaling requires a clear distinction between shared service identity, optional logical slot identity, and individual runtime incarnation identity.
 
 **Required behavior:**
 
 ```text
-1. Each instance must have a unique instance identity for logs, metrics, Kafka client id, broadcast group identity, and service_events ID.
-2. The service_events ID field must uniquely and stably identify the individual replica (derived from or mapped to instance identity) so two simultaneously running replicas never emit the same ID.
-3. The public OWPROV service endpoint must remain stable behind the load balancer.
-4. If private per-instance endpoints are advertised, they must not collide and must be reachable by intended peers.
-5. Internal API key/hash behavior must remain consistent where it depends on shared public endpoint configuration.
+1. The deployment must distinguish between:
+   - Logical service identity: Shared public and internal endpoints representing the OWPROV cluster behind the load balancer.
+   - Logical slot identifier (optional, non-normative): Administrative or orchestration slot labels (e.g., StatefulSet pod name or illustrative examples like "owprov-1", "owprov-2"). Implementations must not treat slot names as hardcoded or assume they are globally unique across overlapping deployment lifecycles.
+   - Runtime incarnation identity: A collision-resistant unique identifier (UUID) generated per process/container execution lifecycle.
+2. The runtime incarnation ID (or a composite including the slot identifier and runtime UUID) must serve as the unique instance identity for Kafka client IDs, broadcast consumer group IDs, job lease owners, and service_events ID.
+3. BroadcastConsumer group.id must use the runtime incarnation ID (e.g., prov-<incarnation-id>-broadcast). Broadcast groups must not be statically reused across container restarts so that overlapping old and replacement replicas never share a broadcast consumer group or divide partitions during rolling restarts.
+4. The service_events ID field must uniquely identify the individual runtime incarnation so two simultaneously running replicas (such as an old replica draining while a new replica initializes) never emit the same ID or collide in Redis service-registry keys.
+5. The public OWPROV service endpoint must remain stable behind the load balancer.
+6. If private per-instance endpoints are advertised, they must not collide and must be reachable by intended peers.
+7. Internal API key/hash behavior must remain consistent where it depends on shared public endpoint configuration.
 ```
 
 **Acceptance criteria:**
 
 ```text
-1. Logs clearly identify which OWPROV instance produced each entry.
-2. Kafka clients can be distinguished per running instance.
-3. Two simultaneously running replicas emit distinct service_events IDs.
-4. Service discovery does not accidentally collapse multiple replicas into ambiguous or conflicting records.
+1. Logs clearly identify which OWPROV instance and runtime incarnation produced each entry.
+2. Kafka clients can be distinguished per running instance and incarnation.
+3. Two simultaneously running replicas (including overlapping replicas during rolling restarts) emit distinct service_events IDs and maintain separate Redis service-registry keys.
+4. Overlapping replicas during rolling restarts do not share Kafka broadcast consumer group IDs, ensuring both replicas receive all broadcast messages without partition division.
+5. Service discovery does not accidentally collapse multiple replicas into ambiguous or conflicting records.
 ```
 
 ---
@@ -546,7 +556,7 @@ Required behavior:
 3. Instances must claim and reclaim pending or expired jobs through an atomic shared-state operation that increments lease_generation.
 4. Only one instance may own a job at a time.
 5. All heartbeat, progress, and terminal status updates must be fenced using the active lease_generation and owner_instance_id; if the lease was stolen during a worker pause/stall, updates must fail (0 rows modified) and the stale worker must immediately abort execution.
-6. Device operations (reboots, firmware upgrades, config pushes) must use operation/job idempotency keys and per-device progress tracking so that stalled workers or recovered jobs do not re-execute commands on already-completed devices.
+6. Device operations (reboots, firmware upgrades, config pushes) must use operation/job idempotency keys (operation_id) and explicit per-device progress state transitions (pending -> dispatching -> dispatched/acknowledged -> completed or failed). owgw and downstream device-facing services must durably de-duplicate commands by operation_id across retries and restarts so stalled workers or recovered jobs do not re-execute commands on already-completed devices.
 7. A crashed or stopped owner must not lose the job permanently; another instance may reclaim an expired job up to max_attempts.
 8. Kafka may be used to wake workers, but Kafka group leadership must not be the source of truth for job ownership.
 9. Job status query endpoint GET /api/v1/jobs/{id} must restrict access to the matching owner_user_id or callers with explicit admin/support permission for the job's scope, and job result payloads must contain only necessary fields without secrets or configuration bodies.
@@ -558,7 +568,7 @@ Acceptance criteria:
 1. A job created through owprov-1 can be queried through owprov-2.
 2. If owprov-1 stops while owning a job, owprov-2 can observe and reclaim the job using an incremented lease_generation fencing token.
 3. If owprov-1 pauses and resumes after its lease has been reclaimed by owprov-2, owprov-1 cannot overwrite job state or issue duplicate device commands.
-4. A job is not blindly executed twice during restart, rebalance, or retry.
+4. A job is not blindly executed twice during restart, rebalance, or retry, and in-flight device operations progress through explicit states (pending -> dispatching -> dispatched/acknowledged -> completed).
 5. Job progress and terminal state survive process restart.
 6. A job status read via GET /api/v1/jobs/{id} allows access only to the matching owner_user_id or a caller with authorized admin/support access to the job's resource scope, returning minimized result summaries without secrets.
 ```
@@ -608,7 +618,7 @@ Required behavior:
 4. All OWPROV instances must use the same Kafka cluster.
 5. Each OWPROV instance must have unique instance identity where required.
 6. The public OWPROV endpoint must be load-balanced through the Nginx load balancer.
-7. Health/readiness behavior must prevent instances from receiving traffic until dependencies (PostgreSQL, Redis, Kafka, and required upstream microservices) are ready.
+7. Health/readiness behavior must prevent instances from receiving traffic until core dependencies (PostgreSQL, Kafka, and required upstream microservices) are ready.
 8. Shutdown must stop accepting new traffic before terminating long-running work where possible.
 9. Instance-specific environment values must not conflict across replicas.
 ```
