@@ -143,7 +143,8 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 9. API behavior must be based on committed PostgreSQL state and shared Redis cache state, not on which OWPROV instance receives the request.
 10. Cache repopulation guarantees:
     a. Normal data cache (inventory, venues, configurations): Under normal operation, stale repopulation is prevented via version/generation tracking (writers record the committed version in Redis and readers abort repopulation if their read version is older). Across Redis outages or invalidation failures, stale repopulation is explicitly acceptable for normal data and is bounded by the configured TTL (openwifi.redis.cache.ttl, 10–60 seconds).
-    b. Security-sensitive authorization cache: Must maintain the stronger guarantee deriving directly from PostgreSQL/owsec revision epochs. An older read must never reintroduce stale authorization data or override an active revision epoch.
+    b. OWPROV-owned authorization cache (management roles, policies, entity scopes): Must maintain the stronger guarantee deriving directly from PostgreSQL revision epochs. An older read must never reintroduce stale authorization data or override an active revision epoch.
+    c. Security-service-owned authentication cache (AuthClient: user session tokens, subscriber tokens, API keys): Follows a simplified bounded eventual consistency model governed by openwifi.redis.auth-cache.ttl (capped at remaining token/key lifetime). On cache miss, AuthClient validates against owsec REST endpoints and caches the result in Redis; on cache hit, it trusts the cached validation without contacting owsec. If owsec's Redis DEL fails upon revocation, the stale window is bounded by the earliest of: invalidation retry succeeds, openwifi.redis.auth-cache.ttl expires, or token/key expiry.
 ```
 
 **Acceptance criteria**:
@@ -156,7 +157,7 @@ Redis is a shared cache layer. PostgreSQL remains the permanent source of record
 5. If Redis is offline or unreachable, API reads continue to operate correctly by querying PostgreSQL and owsec directly without failing traffic acceptance or falling back to process-local caches.
 6. Restarting one OWPROV instance does not change the data view of another instance.
 7. API behavior is the same regardless of which OWPROV replica receives the request.
-8. Verify that under normal operation, slow reads observing older database snapshots do not repopulate Redis with stale data. For normal data caches during Redis outages or invalidation failures, verify that any stale repopulation is bounded by the configured TTL. For authorization data, verify that stale reads can never reintroduce stale authorization state and must strictly validate against the authoritative PostgreSQL/owsec revision epoch.
+8. Verify that under normal operation, slow reads observing older database snapshots do not repopulate Redis with stale data. For normal data caches during Redis outages or invalidation failures, verify that any stale repopulation is bounded by openwifi.redis.cache.ttl. For OWPROV-owned authorization data, verify that stale reads cannot reintroduce stale authorization state and must validate against the authoritative PostgreSQL revision epoch. For Security-service-owned authentication data (tokens and API keys), verify that cached validations are bounded by openwifi.redis.auth-cache.ttl and remaining lifetime, and that on cache hit AuthClient trusts the cached validation without contacting owsec.
 ```
 
 ---
@@ -201,24 +202,22 @@ This section focuses on the cache-safety rule for existing process-local cache c
 Authorization and authentication checks must not depend on which OWPROV instance receives the request, nor on process-local in-memory cache state. 
 
 The architecture distinguishes two distinct categories of authorization and authentication state:
-1. **OWPROV-Owned Authorization Data** (management roles, policies, entity scopes, permissions): Source of truth is OWPROV PostgreSQL. Cache misses reload from PostgreSQL. Invalidation occurs after PostgreSQL commit.
-2. **Security-Service-Owned Authentication Data** (user session tokens `Authorization: Bearer <token>`, subscriber tokens validated via `AuthClient`): Source of truth is the OpenWiFi Security Microservice (`owsec`). Cache misses query `owsec` REST endpoints (`/api/v1/validateToken`, `/api/v1/validateSubToken`), NOT OWPROV PostgreSQL. When a token is revoked or a session is terminated, `owsec` directly invalidates (deletes) the corresponding shared Redis token-cache entry. Token invalidation does not depend on Kafka broadcast messages or cross-replica coordination.
+1. **OWPROV-Owned Authorization Data** (management roles, policies, entity scopes, permissions): Source of truth is OWPROV PostgreSQL. Cache misses reload from PostgreSQL. Invalidation occurs after PostgreSQL commit. Protected against stale repopulation via PostgreSQL revision epochs.
+2. **Security-Service-Owned Authentication Data** (user session tokens `Authorization: Bearer <token>`, subscriber tokens, client API keys `X-API-KEY` validated via `AuthClient`): Source of truth is the OpenWiFi Security Microservice (`owsec`). Cache misses query `owsec` REST endpoints (`/api/v1/validateToken`, `/api/v1/validateSubToken`, `/api/v1/validateApiKey?apiKey=<key>`), NOT OWPROV PostgreSQL. Follows a simplified bounded eventual consistency model governed by `openwifi.redis.auth-cache.ttl`. On cache hit, OWPROV trusts the cached validation. When a token is revoked, a user logs out, or an API key is deleted, `owsec` directly invalidates (deletes) the corresponding shared Redis cache entry (`DEL` shared Redis key). Token invalidation does not depend on Kafka broadcast messages or cross-replica coordination.
 
 **Required behavior:**
 
 ```text
 1. Authorization and authentication API checks may read from Redis shared cache.
 2. If OWPROV-owned authorization data is not present in Redis, the API path must read from PostgreSQL-backed state.
-3. If token or API-key validation data is not present in Redis (cache miss), AuthClient must call the Security service (owsec) REST API, not PostgreSQL, and cache the validation result in Redis with a TTL that must never exceed the token's remaining lifetime.
-4. Token revocation and session termination invalidations are the direct responsibility of owsec, which deletes the shared Redis token-cache entry. Token invalidation must not depend on Kafka offsets, consumer availability, or EVENT_REMOVE_TOKEN delivery. If owsec cannot delete the Redis token-cache key, owsec must record and retry the invalidation or otherwise prevent the revoked token from validating successfully.
+3. If token or API-key validation data is not present in Redis (cache miss), AuthClient must call the Security service (owsec) REST API (`/api/v1/validateToken`, `/api/v1/validateSubToken`, or `/api/v1/validateApiKey?apiKey=<key>`), not PostgreSQL, and cache the validation result in Redis with a TTL governed by openwifi.redis.auth-cache.ttl that must never exceed the token's remaining lifetime or the API key's expiresOn timestamp. On a Redis cache hit, AuthClient trusts the cached validation.
+4. Token revocation, session termination, and API key deletion invalidations are the direct responsibility of owsec, which deletes the shared Redis cache entry (DEL shared Redis key). Token invalidation must not depend on Kafka offsets, consumer availability, or EVENT_REMOVE_TOKEN delivery. If owsec cannot delete the Redis cache key, owsec must record and retry the invalidation with backoff; revoked tokens or API keys remain accepted only until the earliest of: (a) Redis invalidation retry succeeds, (b) openwifi.redis.auth-cache.ttl expires, or (c) original token or API key expiry is reached.
 5. Permission, role, policy, and management-scope changes owned by OWPROV must be persisted in PostgreSQL and invalidate affected Redis keys after commit.
 6. Authorization and authentication behavior must not require process-local AuthCache or AuthClient cache synchronization between OWPROV instances.
-7. Security-sensitive cache entries must follow a stricter invalidation policy than normal data cache entries:
-   - For normal inventory, display, and metadata caches, Redis invalidation failure after a successful PostgreSQL commit may return success if the stale window is bounded by a short TTL. Readers do not perform double DB validation queries before setting cache.
-   - For authorization-sensitive data, including permissions, roles, policies, token validation, and token revocation, Redis invalidation failure must not be treated as ordinary bounded staleness. For OWPROV-owned authorization data, OWPROV must create a shared durable pending invalidation record and retry with backoff. For Security-service-owned token/session data, owsec must own the durable invalidation retry because owsec is the authoritative owner of token revocation and session state.
-   - Distinct ownership boundaries: OWPROV PostgreSQL is the source of truth for management roles, policies, and entity/venue scopes; owsec is the source of truth for bearer tokens and subscriber sessions.
-   - The authoritative revision/epoch is maintained in PostgreSQL (for OWPROV authorization data) or owsec (for tokens). When caching in Redis, authorization entries validate against this active revision/epoch: before OWPROV trusts a cached authorization result or writes one into Redis, it verifies that the record's revision/epoch is current against the authoritative source of truth. Older reads bearing stale epochs are rejected and cannot repopulate the cache. If Redis is unavailable, authorization validates directly against PostgreSQL or owsec.
-   - While a security-sensitive invalidation is pending or uncertain, OWPROV must not authorize requests only from the stale Redis entry. It must fall back to authoritative validation or fail closed.
+7. Security-sensitive cache entries follow differentiated invalidation and consistency policies:
+   - For normal inventory, display, and metadata caches, Redis invalidation failure after a successful PostgreSQL commit may return success if the stale window is bounded by a short TTL (openwifi.redis.cache.ttl). Readers do not perform double DB validation queries before setting cache.
+   - For OWPROV-owned authorization data (permissions, roles, policies, entity scopes), OWPROV PostgreSQL is the source of truth. Redis invalidation failure must not be treated as ordinary bounded staleness: OWPROV must create a shared durable pending invalidation record and retry with backoff. Caching is protected by PostgreSQL revision epochs: older reads bearing stale epochs are rejected and cannot repopulate the cache. While an invalidation is pending or uncertain, OWPROV must fall back to authoritative PostgreSQL validation or fail closed.
+   - For Security-service-owned authentication data (user tokens, subscriber tokens, API keys), owsec is the authoritative owner. AuthClient follows a simplified bounded eventual consistency model: on Redis cache hit, the cached validation is trusted; on miss, AuthClient validates with owsec and caches the result with TTL <= openwifi.redis.auth-cache.ttl and <= remaining lifetime. Token revocation is handled by owsec directly deleting the Redis key (retrying if failed); no cross-service epoch checks are performed on every hit.
 ```
 
 **Acceptance criteria:**
@@ -229,13 +228,16 @@ The architecture distinguishes two distinct categories of authorization and auth
    - Confirm the change is persisted in PostgreSQL.
    - Confirm affected Redis authorization cache keys are invalidated.
    - Send an API request requiring that permission to owprov-2; confirm owprov-2 authorizes or rejects the request using Redis shared cache or PostgreSQL reload, not local AuthCache state.
-3. Revoke a user session token or log out in owsec:
-   - owsec directly deletes the shared Redis token-cache key.
-   - A subsequent request with that token to any OWPROV instance results in a Redis cache miss, re-validates against owsec, and is rejected.
+3. Validate user session tokens, subscriber tokens, and API keys via AuthClient:
+   - On Redis cache miss, AuthClient calls the appropriate owsec endpoint (/api/v1/validateToken, /api/v1/validateSubToken, or /api/v1/validateApiKey?apiKey=<key>) and caches the result in Redis with a TTL bounded by openwifi.redis.auth-cache.ttl and remaining lifetime.
+   - On Redis cache hit, AuthClient trusts the cached validation without contacting owsec.
+4. Revoke a user session token, log out, or delete an API key in owsec:
+   - owsec directly deletes the shared Redis cache key.
+   - If the Redis DEL succeeds, a subsequent request with that token/key to any OWPROV instance results in a Redis cache miss, re-validates against owsec, and is rejected.
+   - If Redis DEL fails, the token/key may remain accepted only until the earliest of: invalidation retry succeeds, openwifi.redis.auth-cache.ttl expires, or original token/API key expiry is reached.
    - Invalidation correctness does not depend on Kafka consumer state, consumer group lag, or EVENT_REMOVE_TOKEN broadcast delivery.
-4. Verify that cached token entries in Redis have a TTL bounded by the token's remaining lifetime, ensuring expired tokens cannot remain cached even if explicit revocation was not triggered.
 5. Simulate Redis DEL failure after an OWPROV-owned permission or role revocation. Verify the database change commits, a shared durable security-sensitive invalidation retry is recorded, and no OWPROV replica authorizes using the stale permission cache entry.
-6. Verify that an older database read for authorization data cannot overwrite or re-populate a newer committed permission or role change in Redis.
+6. Verify that an older database read for OWPROV-owned authorization data cannot overwrite or re-populate a newer committed permission or role change in Redis.
 ```
 
 ---
