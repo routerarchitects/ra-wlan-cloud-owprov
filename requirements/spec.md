@@ -1546,55 +1546,73 @@ runtime env files
 
 ## 20. Implementation Phases
 
-### Phase 1: Documentation and review
+### Phase 1 — Architecture and cross-service contracts
 
 ```text
-- requirements.md reviewed
-- spec.md reviewed
+- requirements.md / spec.md review
+- identify cross-service dependencies with owsec, owgw and shared framework code
 ```
 
-### Phase 2: Database startup lock and transaction safety
+### Phase 2 — Multi-instance foundation and DB safety
 
 ```text
-- PostgreSQL startup advisory lock (prevents migration race on boot)
-- PostgreSQL unique constraints on device serial numbers (prevents duplicate device creation across instances)
-- Concurrent write protection with row-level locking (SELECT ... FOR UPDATE) and transaction rollback
+- runtime incarnation ID and optional slot ID
+- shared logical service identity / shared API key / shared endpoints
+- PostgreSQL startup advisory lock
+- explicit DB transaction support
+- row-level locking (SELECT ... FOR UPDATE)
+- rollback handling
+- unique constraints
+- retryable conflict handling
+- basic 2-instance development Compose topology
 ```
 
-### Phase 3: Kafka consumer separation and service discovery
+### Phase 3 — Kafka and service discovery
 
 ```text
-- Consumer separation: BroadcastConsumer (service_events) and GroupConsumer (connection)
-- Multi-replica service discovery registry tracking (Services_[Type][InstanceId])
-- Key-based producer partitioning per device serial number
-- Consumer commit and retry safety
+- GroupConsumer / BroadcastConsumer separation
+- incarnation-specific Kafka client/group identities
+- Services_[Type][InstanceId] local registry
+- Redis service-registry snapshot
+- per-instance Redis self-registration
+- JOIN / KEEP_ALIVE / LEAVE handling
+- local last_seen tracking and independent stale-entry cleanup
+- Redis TTL cleanup
+- service-discovery bootstrap and eventual-convergence behavior
+- Kafka commit/retry/idempotency rules
+- key-based producer partitioning
 ```
 
-### Phase 4: Shared Redis caching and cache modernization
+### Phase 4 — Shared application state and caching
 
 ```text
-- Redis shared cache-aside client integration and connection pooling
-- Post-commit cache invalidation framework (tied to DB transactions)
-- AuthCache and AuthClient migrated to Redis (with DB and Security service REST fallbacks)
-- SerialNumberCache and DeviceTypeCache migrated away from process-local memory
-- Direct Redis token cache invalidation contract with owsec (removing Kafka EVENT_REMOVE_TOKEN dependency)
+- Redis cache-aside integration for API data
+- post-commit cache invalidation
+- SerialNumberCache migration
+- DeviceTypeCache migration
+- AuthCache migration
+- AuthClient / owsec token-cache behavior
+- authorization vs normal-data cache consistency policies
 ```
 
-### Phase 5: Durable background jobs and WebSocket UI notifications
+### Phase 5 — Durable async jobs and notifications
 
 ```text
-- PostgreSQL jobs table schema creation (with owner_user_id, owner_email, status, lease_generation, lease fields)
-- Background worker claim loop, fenced lease heartbeats (lease_generation token), and expired-job reclaim
-- Device operation idempotency keys and device-level execution progress tracking
-- Job status query endpoint (GET /api/v1/jobs/{id}) with owner and scope access control
-- Cross-instance UI notification delivery (Kafka fan-out with owner envelope and local socket filtering)
+- PostgreSQL jobs table
+- atomic claim / reclaim
+- lease_generation fencing
+- device operation_id and progress states
+- explicit owgw deduplication dependency
+- job status API
+- cross-instance notification delivery
 ```
 
-### Phase 6: Runtime deployment and scale-out validation
+### Phase 6 — Production deployment and validation
 
 ```text
-- Runtime shared file consistency validation
-- Docker Compose multi-instance topology and load balancer configuration
-- Readiness probes and graceful shutdown/drain handling
-- End-to-end active-active scale-out verification
+- runtime file consistency
+- load balancer/readiness behavior
+- graceful drain
+- scale-out / scale-in
+- failure-mode testing for Redis, Kafka and PostgreSQL
 ```
