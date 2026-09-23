@@ -12,6 +12,185 @@
 #include "framework/orm.h"
 #include "framework/utils.h"
 
+#include "Poco/Data/Session.h"
+#include "Poco/Thread.h"
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// DbStartupAdvisoryLock
+//
+// RAII guard that serializes the OWPROV database startup section across multiple simultaneously-starting instances.
+//
+// Lock strategy:
+//   - Uses PostgreSQL session-level advisory lock (pg_try_advisory_lock).
+//   - Lock key: 0x4F5750524F560001LL (ASCII "OWPROV" + slot 0x0001 = db startup)
+//   - Dedicated session: opened explicitly for startup lock, released on DTOR.
+//   - Monotonic deadline: retries acquisition up to timeoutSeconds.
+//     Note: Poco::Data::Session constructor may block up to
+//     storage.type.postgresql.connectiontimeout (default 60s) per attempt;
+//     keep connectiontimeout <= lock.timeout for predictable limits.
+// ---------------------------------------------------------------------------
+constexpr std::int64_t kOwprovDbStartupLockKey = 0x4F5750524F560001LL;
+constexpr int kDefaultTimeoutSeconds = 120;
+
+class DbStartupAdvisoryLock {
+  public:
+	DbStartupAdvisoryLock(const std::string &connectorName,
+	                      const std::string &connectionString,
+	                      Poco::Logger &logger,
+	                      int timeoutSeconds = kDefaultTimeoutSeconds)
+	    : session_(nullptr), logger_(logger) {
+		if (connectorName.empty() || connectionString.empty()) {
+			throw std::runtime_error("PostgreSQL startup advisory lock requires non-empty connector name and connection string.");
+		}
+
+		timeoutSeconds = std::max(1, timeoutSeconds);
+
+		const std::string tryLockSQL = "SELECT pg_try_advisory_lock(" + std::to_string(kOwprovDbStartupLockKey) + ")";
+
+		poco_information(logger_, "Waiting to acquire PostgreSQL startup advisory lock (key=" +
+			std::to_string(kOwprovDbStartupLockKey) + ", timeout=" + std::to_string(timeoutSeconds) + "s)...");
+
+		// Monotonic deadline tracking:
+		// Measures elapsed time across retries. Note that Poco::Data::Session
+		// construction may block up to PostgreSQL connectiontimeout per attempt.
+		const auto startTime = std::chrono::steady_clock::now();
+		const auto deadline = startTime + std::chrono::seconds(timeoutSeconds);
+
+		bool everConnected = false;
+		bool lockObservedHeld = false;
+
+		while (std::chrono::steady_clock::now() < deadline) {
+			const int elapsedSeconds = static_cast<int>(
+				std::chrono::duration_cast<std::chrono::seconds>(
+					std::chrono::steady_clock::now() - startTime).count());
+
+			if (!session_) {
+				try {
+					session_ = std::make_unique<Poco::Data::Session>(connectorName, connectionString);
+					everConnected = true;
+					if (std::chrono::steady_clock::now() >= deadline)
+						break;
+				} catch (const Poco::Exception &e) {
+					if (elapsedSeconds % 10 == 0) {
+						poco_warning(logger_, "Cannot establish dedicated PostgreSQL session for startup lock (retrying): " + e.displayText());
+					}
+					if (std::chrono::steady_clock::now() >= deadline)
+						break;
+					Poco::Thread::sleep(1000);
+					continue;
+				} catch (const std::exception &e) {
+					if (elapsedSeconds % 10 == 0) {
+						poco_warning(logger_, "Cannot establish dedicated PostgreSQL session for startup lock (retrying): " + std::string(e.what()));
+					}
+					if (std::chrono::steady_clock::now() >= deadline)
+						break;
+					Poco::Thread::sleep(1000);
+					continue;
+				}
+			}
+
+			bool acquired = false;
+			try {
+				*session_ << tryLockSQL,
+					Poco::Data::Keywords::into(acquired),
+					Poco::Data::Keywords::now;
+			} catch (const Poco::Exception &e) {
+				poco_error(logger_, "pg_try_advisory_lock() database session query error: " + e.displayText() +
+					"  - aborting startup advisory lock acquisition (fatal session failure).");
+				session_.reset();
+				throw;
+			} catch (const std::exception &e) {
+				poco_error(logger_, "pg_try_advisory_lock() database session query error: " + std::string(e.what()) +
+					"  - aborting startup advisory lock acquisition (fatal session failure).");
+				session_.reset();
+				throw;
+			}
+
+			if (acquired) {
+				locked_ = true;
+				poco_information(logger_, "PostgreSQL startup advisory lock acquired after " +
+					std::to_string(elapsedSeconds) + "s (key=" + std::to_string(kOwprovDbStartupLockKey) + ").");
+				return;
+			}
+
+			// Lock not acquired this attempt: another instance holds it.
+			lockObservedHeld = true;
+			if (elapsedSeconds % 10 == 0 && elapsedSeconds > 0) {
+				poco_information(logger_, "Still waiting for PostgreSQL startup advisory lock "
+					"(elapsed=" + std::to_string(elapsedSeconds) + "s, timeout=" + std::to_string(timeoutSeconds) + "s)...");
+			}
+
+			if (std::chrono::steady_clock::now() >= deadline)
+				break;
+			Poco::Thread::sleep(1000);
+		}
+
+		session_.reset();
+		// Precise timeout classification using everConnected + lockObservedHeld:
+		//   !everConnected         => PostgreSQL was never reachable (config/network issue).
+		//   everConnected+lockHeld => another instance holds the startup lock.
+		//   everConnected+!lockHeld=> connected but lock never returned false (anomaly).
+		std::string msg;
+		if (!everConnected) {
+			msg = "Timed out waiting for PostgreSQL startup advisory lock after " + std::to_string(timeoutSeconds) + " seconds: could not establish a dedicated PostgreSQL session. Check DB host, credentials, and connectivity. Aborting startup.";
+		} else if (lockObservedHeld) {
+			msg = "Timed out waiting for PostgreSQL startup advisory lock after " + std::to_string(timeoutSeconds) + " seconds: lock is held by another instance (observed contention). Aborting startup.";
+		} else {
+			msg = "Timed out waiting for PostgreSQL startup advisory lock after " + std::to_string(timeoutSeconds) + " seconds: lock state unknown (connected but lock never returned false). Aborting startup.";
+		}
+		poco_critical(logger_, msg);
+		throw std::runtime_error(msg);
+	}
+
+	~DbStartupAdvisoryLock() {
+		if (!locked_ || !session_) {
+			session_.reset();
+			return;
+		}
+
+		const std::string unlockSQL = "SELECT pg_advisory_unlock(" + std::to_string(kOwprovDbStartupLockKey) + ")";
+		try {
+			bool unlocked = false;
+			*session_ << unlockSQL,
+				Poco::Data::Keywords::into(unlocked),
+				Poco::Data::Keywords::now;
+			if (unlocked) {
+				locked_ = false;
+				poco_information(logger_, "PostgreSQL startup advisory lock released (key=" + std::to_string(kOwprovDbStartupLockKey) + ").");
+			} else {
+				poco_warning(logger_, "pg_advisory_unlock() returned false; lock was not held or already released by this session (key=" + std::to_string(kOwprovDbStartupLockKey) + ").");
+			}
+		} catch (const Poco::Exception &e) {
+			poco_critical(logger_, "Failed to explicitly release PostgreSQL startup advisory lock: " + e.displayText() + "  The lock will be released when the dedicated session closes.");
+		} catch (const std::exception &e) {
+			poco_critical(logger_, std::string("Failed to release PostgreSQL startup advisory lock: ") + e.what());
+		} catch (...) {
+			poco_critical(logger_, "Unknown error releasing PostgreSQL startup advisory lock.");
+		}
+
+		session_.reset(); // closes the dedicated session
+	}
+
+	DbStartupAdvisoryLock(const DbStartupAdvisoryLock &) = delete;
+	DbStartupAdvisoryLock &operator=(const DbStartupAdvisoryLock &) = delete;
+
+  private:
+	std::unique_ptr<Poco::Data::Session> session_;
+	Poco::Logger &logger_;
+	bool locked_ = false;
+};
+
+} // anonymous namespace
+
 namespace OpenWifi {
 
 	int Storage::Start() {
@@ -19,6 +198,27 @@ namespace OpenWifi {
 		std::lock_guard Guard(Mutex_);
 
 		StorageClass::Start();
+
+		try {
+			// PostgreSQL-only advisory lock: held via a dedicated session around DB startup
+			// initialization (DB object creation, schema setup, migrations, and system DB init).
+			// Auto-released on session close / process crash. True no-op for SQLite / MySQL.
+			std::optional<DbStartupAdvisoryLock> startupLock;
+			if (dbType_ == OpenWifi::pgsql) {
+				// Keep this connection string aligned with StorageClass::Setup_PostgreSQL().
+				auto Host = MicroServiceConfigGetString("storage.type.postgresql.host", "");
+				auto Username = MicroServiceConfigGetString("storage.type.postgresql.username", "");
+				auto Password = MicroServiceConfigGetString("storage.type.postgresql.password", "");
+				auto Database = MicroServiceConfigGetString("storage.type.postgresql.database", "");
+				auto Port = MicroServiceConfigGetString("storage.type.postgresql.port", "");
+				auto ConnectionTimeout = MicroServiceConfigGetString("storage.type.postgresql.connectiontimeout", "");
+				std::string connectionString = "host=" + Host + " user=" + Username + " password=" + Password + " dbname=" + Database + " port=" + Port + " connect_timeout=" + ConnectionTimeout;
+
+				// Read lock timeout from config (default 120 s, >= 1 s).
+				// Canonical key: storage.startup.lock.timeout
+				const int lockTimeoutSec = std::max(1, static_cast<int>(MicroServiceConfigGetInt("storage.startup.lock.timeout", 120)));
+				startupLock.emplace(PostgresConn_.name(), connectionString, Logger(), lockTimeoutSec);
+			}
 
 		EntityDB_ = std::make_unique<OpenWifi::EntityDB>(dbType_, *Pool_, Logger());
 		PolicyDB_ = std::make_unique<OpenWifi::PolicyDB>(dbType_, *Pool_, Logger());
@@ -260,6 +460,22 @@ namespace OpenWifi {
         InventoryDB_->InitializeSerialCache();
 		ConsistencyCheck();
 		InitializeSystemDBs();
+
+		if (startupLock) {
+			poco_information(Logger(), "Database startup initialization complete. Releasing startup advisory lock.");
+			startupLock.reset();
+		}
+
+		} catch (const Poco::Exception &e) {
+			poco_critical(Logger(), "Database startup failed (advisory lock or init error): " + e.displayText());
+			return -1;
+		} catch (const std::exception &e) {
+			poco_critical(Logger(), std::string("Database startup failed: ") + e.what());
+			return -1;
+		} catch (...) {
+			poco_critical(Logger(), "Database startup failed: unknown exception.");
+			return -1;
+		}
 
 		TimerCallback_ = std::make_unique<Poco::TimerCallback<Storage>>(*this, &Storage::onTimer);
 		Timer_.setStartInterval(20 * 1000);				// first run in 20 seconds
