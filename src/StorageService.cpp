@@ -44,15 +44,17 @@ constexpr int kDefaultTimeoutSeconds = 120;
 class DbStartupAdvisoryLock {
   public:
 	DbStartupAdvisoryLock(const std::string &connectorName,
-	                      const std::string &connectionString,
+	                      const std::string &baseConnectionString,
+	                      int configuredConnTimeoutSec,
 	                      Poco::Logger &logger,
 	                      int timeoutSeconds = kDefaultTimeoutSeconds)
 	    : session_(nullptr), logger_(logger) {
-		if (connectorName.empty() || connectionString.empty()) {
+		if (connectorName.empty() || baseConnectionString.empty()) {
 			throw std::runtime_error("PostgreSQL startup advisory lock requires non-empty connector name and connection string.");
 		}
 
 		timeoutSeconds = std::max(1, timeoutSeconds);
+		configuredConnTimeoutSec = std::max(1, configuredConnTimeoutSec);
 
 		const std::string tryLockSQL = "SELECT pg_try_advisory_lock(" + std::to_string(kOwprovDbStartupLockKey) + ")";
 
@@ -60,8 +62,7 @@ class DbStartupAdvisoryLock {
 			std::to_string(kOwprovDbStartupLockKey) + ", timeout=" + std::to_string(timeoutSeconds) + "s)...");
 
 		// Monotonic deadline tracking:
-		// Measures elapsed time across retries. Note that Poco::Data::Session
-		// construction may block up to PostgreSQL connectiontimeout per attempt.
+		// Measures elapsed time across retries. Clamps each session connect_timeout to remaining deadline.
 		const auto startTime = std::chrono::steady_clock::now();
 		const auto deadline = startTime + std::chrono::seconds(timeoutSeconds);
 
@@ -69,13 +70,23 @@ class DbStartupAdvisoryLock {
 		bool lockObservedHeld = false;
 
 		while (std::chrono::steady_clock::now() < deadline) {
+			const auto now = std::chrono::steady_clock::now();
 			const int elapsedSeconds = static_cast<int>(
-				std::chrono::duration_cast<std::chrono::seconds>(
-					std::chrono::steady_clock::now() - startTime).count());
+				std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count());
 
 			if (!session_) {
+				const int remainingSeconds = static_cast<int>(
+					std::chrono::duration_cast<std::chrono::seconds>(deadline - now).count());
+
+				if (remainingSeconds <= 0) {
+					break;
+				}
+
+				const int effectiveConnectTimeout = std::max(1, std::min(configuredConnTimeoutSec, remainingSeconds));
+				const std::string sessionConnStr = baseConnectionString + " connect_timeout=" + std::to_string(effectiveConnectTimeout);
+
 				try {
-					session_ = std::make_unique<Poco::Data::Session>(connectorName, connectionString);
+					session_ = std::make_unique<Poco::Data::Session>(connectorName, sessionConnStr);
 					everConnected = true;
 					if (std::chrono::steady_clock::now() >= deadline)
 						break;
@@ -197,9 +208,11 @@ namespace OpenWifi {
 		poco_information(Logger(), "Starting...");
 		std::lock_guard Guard(Mutex_);
 
-		StorageClass::Start();
-
 		try {
+			if (StorageClass::Start() != 0 || !Pool_) {
+				poco_critical(Logger(), "Failed to initialize storage backend or session pool.");
+				return -1;
+			}
 			// PostgreSQL-only advisory lock: held via a dedicated session around DB startup
 			// initialization (DB object creation, schema setup, migrations, and system DB init).
 			// Auto-released on session close / process crash. True no-op for SQLite / MySQL.
@@ -211,13 +224,14 @@ namespace OpenWifi {
 				auto Password = MicroServiceConfigGetString("storage.type.postgresql.password", "");
 				auto Database = MicroServiceConfigGetString("storage.type.postgresql.database", "");
 				auto Port = MicroServiceConfigGetString("storage.type.postgresql.port", "");
-				auto ConnectionTimeout = MicroServiceConfigGetString("storage.type.postgresql.connectiontimeout", "");
-				std::string connectionString = "host=" + Host + " user=" + Username + " password=" + Password + " dbname=" + Database + " port=" + Port + " connect_timeout=" + ConnectionTimeout;
+				std::string baseConnectionString = "host=" + Host + " user=" + Username + " password=" + Password + " dbname=" + Database + " port=" + Port;
+
+				const int configuredConnTimeoutSec = std::max(1, static_cast<int>(MicroServiceConfigGetInt("storage.type.postgresql.connectiontimeout", 60)));
 
 				// Read lock timeout from config (default 120 s, >= 1 s).
 				// Canonical key: storage.startup.lock.timeout
 				const int lockTimeoutSec = std::max(1, static_cast<int>(MicroServiceConfigGetInt("storage.startup.lock.timeout", 120)));
-				startupLock.emplace(PostgresConn_.name(), connectionString, Logger(), lockTimeoutSec);
+				startupLock.emplace(PostgresConn_.name(), baseConnectionString, configuredConnTimeoutSec, Logger(), lockTimeoutSec);
 			}
 
 		EntityDB_ = std::make_unique<OpenWifi::EntityDB>(dbType_, *Pool_, Logger());
