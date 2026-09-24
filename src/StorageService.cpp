@@ -207,15 +207,17 @@ namespace OpenWifi {
 		poco_information(Logger(), "Starting...");
 		std::lock_guard Guard(Mutex_);
 
-		try {
-			if (StorageClass::Start() != 0 || !Pool_) {
-				throw std::runtime_error("Failed to initialize storage backend or session pool.");
-			}
-			// PostgreSQL-only advisory lock: held via a dedicated session around DB startup
-			// initialization (DB object creation, schema setup, migrations, and system DB init).
-			// Auto-released on session close / process crash. True no-op for SQLite / MySQL.
-			std::optional<DbStartupAdvisoryLock> startupLock;
-			if (dbType_ == OpenWifi::pgsql) {
+		if (StorageClass::Start() != 0 || !Pool_) {
+			poco_critical(Logger(), "Failed to initialize storage backend or session pool.");
+			return -1;
+		}
+
+		// PostgreSQL-only advisory lock: held via a dedicated session around DB startup
+		// initialization (DB object creation, schema setup, migrations, and system DB init).
+		// Auto-released on session close / process crash. True no-op for SQLite / MySQL.
+		std::optional<DbStartupAdvisoryLock> startupLock;
+		if (dbType_ == OpenWifi::pgsql) {
+			try {
 				// Keep this connection string aligned with StorageClass::Setup_PostgreSQL().
 				auto Host = MicroServiceConfigGetString("storage.type.postgresql.host", "");
 				auto Username = MicroServiceConfigGetString("storage.type.postgresql.username", "");
@@ -230,7 +232,17 @@ namespace OpenWifi {
 				// Canonical key: storage.startup.lock.timeout
 				const int lockTimeoutSec = std::max(1, static_cast<int>(MicroServiceConfigGetInt("storage.startup.lock.timeout", 120)));
 				startupLock.emplace(PostgresConn_.name(), baseConnectionString, configuredConnTimeoutSec, Logger(), lockTimeoutSec);
+			} catch (const Poco::Exception &e) {
+				poco_critical(Logger(), "Database startup failed (advisory lock or init error): " + e.displayText());
+				throw;
+			} catch (const std::exception &e) {
+				poco_critical(Logger(), std::string("Database startup failed: ") + e.what());
+				throw;
+			} catch (...) {
+				poco_critical(Logger(), "Database startup failed: unknown exception.");
+				throw std::runtime_error("Database startup failed: unknown exception.");
 			}
+		}
 
 		EntityDB_ = std::make_unique<OpenWifi::EntityDB>(dbType_, *Pool_, Logger());
 		PolicyDB_ = std::make_unique<OpenWifi::PolicyDB>(dbType_, *Pool_, Logger());
@@ -261,12 +273,14 @@ namespace OpenWifi {
 		PolicyDB_->Create();
 		VenueDB_->Create();
 		if (!LocationDB_->Create()) {
-			throw std::runtime_error("LocationDB initialization or migration reported failure.");
+			poco_critical(Logger(), "LocationDB initialization or migration reported failure. Halting daemon startup.");
+			return -1;
 		}
 		ContactDB_->Create();
 		InventoryDB_->Create();
 		if (!RolesDB_->Create()) {
-			throw std::runtime_error("RolesDB initialization or migration reported failure.");
+			poco_critical(Logger(), "RolesDB initialization or migration reported failure. Halting daemon startup.");
+			return -1;
 		}
 		ConfigurationDB_->Create();
 		TagsDictionaryDB_->Create();
@@ -474,17 +488,6 @@ namespace OpenWifi {
 		if (startupLock) {
 			poco_information(Logger(), "Database startup initialization complete. Releasing startup advisory lock.");
 			startupLock.reset();
-		}
-
-		} catch (const Poco::Exception &e) {
-			poco_critical(Logger(), "Database startup failed (advisory lock or init error): " + e.displayText());
-			throw;
-		} catch (const std::exception &e) {
-			poco_critical(Logger(), std::string("Database startup failed: ") + e.what());
-			throw;
-		} catch (...) {
-			poco_critical(Logger(), "Database startup failed: unknown exception.");
-			throw std::runtime_error("Database startup failed: unknown exception.");
 		}
 
 		TimerCallback_ = std::make_unique<Poco::TimerCallback<Storage>>(*this, &Storage::onTimer);
