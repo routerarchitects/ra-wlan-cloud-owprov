@@ -75,12 +75,12 @@ class DbStartupAdvisoryLock {
 				std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count());
 
 			if (!session_) {
-				const int remainingSeconds = static_cast<int>(
-					std::chrono::duration_cast<std::chrono::seconds>(deadline - now).count());
-
-				if (remainingSeconds <= 0) {
+				if (now >= deadline) {
 					break;
 				}
+
+				const auto remainingMs = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+				const int remainingSeconds = std::max(1, static_cast<int>((remainingMs + 999) / 1000));
 
 				const int effectiveConnectTimeout = std::max(1, std::min(configuredConnTimeoutSec, remainingSeconds));
 				const std::string sessionConnStr = baseConnectionString + " connect_timeout=" + std::to_string(effectiveConnectTimeout);
