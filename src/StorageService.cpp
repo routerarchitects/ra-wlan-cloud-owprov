@@ -34,9 +34,9 @@ namespace {
 //   - Lock key: 0x4F5750524F560001LL (ASCII "OWPROV" + slot 0x0001 = db startup)
 //   - Dedicated session: opened explicitly for startup lock, released on DTOR.
 //   - Monotonic deadline: retries acquisition up to timeoutSeconds.
-//     Note: Poco::Data::Session constructor may block up to
-//     storage.type.postgresql.connectiontimeout (default 60s) per attempt;
-//     keep connectiontimeout <= lock.timeout for predictable limits.
+//   - Each dedicated session attempt uses a connect_timeout derived from the
+//     remaining lock-acquisition window, clamped to the configured PostgreSQL
+//     connection timeout and rounded up to at least 1 second.
 // ---------------------------------------------------------------------------
 constexpr std::int64_t kOwprovDbStartupLockKey = 0x4F5750524F560001LL;
 constexpr int kDefaultTimeoutSeconds = 120;
