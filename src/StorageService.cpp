@@ -158,7 +158,6 @@ class DbStartupAdvisoryLock {
 		} else {
 			msg = "Timed out waiting for PostgreSQL startup advisory lock after " + std::to_string(timeoutSeconds) + " seconds: lock state unknown (connected but lock never returned false). Aborting startup.";
 		}
-		poco_critical(logger_, msg);
 		throw std::runtime_error(msg);
 	}
 
@@ -210,8 +209,7 @@ namespace OpenWifi {
 
 		try {
 			if (StorageClass::Start() != 0 || !Pool_) {
-				poco_critical(Logger(), "Failed to initialize storage backend or session pool.");
-				return -1;
+				throw std::runtime_error("Failed to initialize storage backend or session pool.");
 			}
 			// PostgreSQL-only advisory lock: held via a dedicated session around DB startup
 			// initialization (DB object creation, schema setup, migrations, and system DB init).
@@ -263,14 +261,12 @@ namespace OpenWifi {
 		PolicyDB_->Create();
 		VenueDB_->Create();
 		if (!LocationDB_->Create()) {
-			poco_critical(Logger(), "LocationDB initialization or migration reported failure. Halting daemon startup.");
-			return -1;
+			throw std::runtime_error("LocationDB initialization or migration reported failure.");
 		}
 		ContactDB_->Create();
 		InventoryDB_->Create();
 		if (!RolesDB_->Create()) {
-			poco_critical(Logger(), "RolesDB initialization or migration reported failure. Halting daemon startup.");
-			return -1;
+			throw std::runtime_error("RolesDB initialization or migration reported failure.");
 		}
 		ConfigurationDB_->Create();
 		TagsDictionaryDB_->Create();
@@ -482,13 +478,13 @@ namespace OpenWifi {
 
 		} catch (const Poco::Exception &e) {
 			poco_critical(Logger(), "Database startup failed (advisory lock or init error): " + e.displayText());
-			return -1;
+			throw;
 		} catch (const std::exception &e) {
 			poco_critical(Logger(), std::string("Database startup failed: ") + e.what());
-			return -1;
+			throw;
 		} catch (...) {
 			poco_critical(Logger(), "Database startup failed: unknown exception.");
-			return -1;
+			throw std::runtime_error("Database startup failed: unknown exception.");
 		}
 
 		TimerCallback_ = std::make_unique<Poco::TimerCallback<Storage>>(*this, &Storage::onTimer);
