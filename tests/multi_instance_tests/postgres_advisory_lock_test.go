@@ -541,3 +541,189 @@ func TestPostgresAdvisoryLock_Case5_CleanAcquireReleaseLogVerification(t *testin
 
 	t.Log("PASS: Real OWPROV binary acquired and cleanly released lock on dedicated session.")
 }
+
+/*
+ * TestPostgresAdvisoryLock_Case6_TransientSessionInterruptionRecovery
+ *
+ * DESCRIPTION:
+ *   Validates that when a waiting OWPROV instance has its dedicated advisory-lock PostgreSQL
+ *   session terminated (e.g. pg_terminate_backend / transient network interruption),
+ *   it logs a warning, reconnects on a fresh dedicated session, continues waiting within the
+ *   configured deadline, and acquires the lock when released.
+ */
+func TestPostgresAdvisoryLock_Case6_TransientSessionInterruptionRecovery(t *testing.T) {
+	owprovBin := getOwprovBin()
+	if _, err := os.Stat(owprovBin); os.IsNotExist(err) {
+		t.Skipf("OWPROV binary not found at %s. Skipping real binary test (set OWPROV_BIN to run).", owprovBin)
+	}
+
+	tcDB := setupTestCaseDB(t, "tc6")
+	blockerDB, err := sql.Open("postgres", getDBConnStr(tcDB))
+	if err != nil {
+		t.Fatalf("Failed to open blocker DB: %v", err)
+	}
+	defer blockerDB.Close()
+
+	conn, err := blockerDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to acquire dedicated DB connection: %v", err)
+	}
+	defer conn.Close()
+
+	var blockerPid int
+	if err := conn.QueryRowContext(context.Background(), "SELECT pg_backend_pid()").Scan(&blockerPid); err != nil {
+		t.Fatalf("Failed to get blocker backend PID: %v", err)
+	}
+
+	var acquired bool
+	err = conn.QueryRowContext(context.Background(), "SELECT pg_try_advisory_lock("+LockKeyDec+")").Scan(&acquired)
+	if err != nil || !acquired {
+		t.Fatalf("Failed to acquire external blocking lock: %v", err)
+	}
+	defer func() {
+		var unl bool
+		_ = conn.QueryRowContext(context.Background(), "SELECT pg_advisory_unlock("+LockKeyDec+")").Scan(&unl)
+	}()
+
+	tmpDir, err := os.MkdirTemp("", "owprov_go_tc6_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	instDir := filepath.Join(tmpDir, "inst_reconnect")
+	_ = os.MkdirAll(instDir, 0755)
+	cfgPath := filepath.Join(instDir, "owprov.properties")
+	logPath := filepath.Join(instDir, "inst.log")
+
+	// Set lock timeout to 30 seconds
+	if err := writeTestConfig(cfgPath, tcDB, 30, 16500, 17500, 18500); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	cmd := exec.Command(owprovBin, "--file="+cfgPath)
+	f, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("Failed to create log file: %v", err)
+	}
+	cmd.Stdout = f
+	cmd.Stderr = f
+
+	if err := cmd.Start(); err != nil {
+		_ = f.Close()
+		t.Fatalf("Failed to start instance: %v", err)
+	}
+	_ = f.Close()
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	// Uniquely identify the dedicated advisory-lock session backend PID for the waiting OWPROV instance
+	// by matching datname, excluding blockerPid/query PID, and matching application_name = 'owprov-startup-lock'
+	var owprovBackendPid int
+	queryFilter := fmt.Sprintf("SELECT pid FROM pg_stat_activity WHERE datname = '%s' AND pid <> %d AND pid <> pg_backend_pid() AND application_name = 'owprov-startup-lock' LIMIT 1", tcDB, blockerPid)
+	waitDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(waitDeadline) {
+		err := blockerDB.QueryRow(queryFilter).Scan(&owprovBackendPid)
+		if err == nil && owprovBackendPid > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if owprovBackendPid == 0 {
+		data, _ := os.ReadFile(logPath)
+		var rowsStr string
+		rows, err := blockerDB.Query("SELECT pid, datname, application_name, query, state FROM pg_stat_activity")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var p int
+				var d, app, q, s sql.NullString
+				_ = rows.Scan(&p, &d, &app, &q, &s)
+				rowsStr += fmt.Sprintf("pid=%d datname=%s app=%s state=%s query=%s\n", p, d.String, app.String, s.String, q.String)
+			}
+		}
+		t.Fatalf("Failed to detect OWPROV dedicated advisory-lock session in pg_stat_activity with application_name='owprov-startup-lock'.\nOWPROV log:\n%s\npg_stat_activity rows:\n%s", string(data), rowsStr)
+	}
+
+	t.Logf("Detected OWPROV dedicated PostgreSQL session PID %d with application_name='owprov-startup-lock' while blocker PID %d holds lock. Terminating with pg_terminate_backend...",
+		owprovBackendPid, blockerPid)
+
+	var terminated bool
+	if err := blockerDB.QueryRow(fmt.Sprintf("SELECT pg_terminate_backend(%d)", owprovBackendPid)).Scan(&terminated); err != nil {
+		t.Fatalf("Failed to execute pg_terminate_backend: %v", err)
+	}
+
+	// Verify OWPROV logs warning and keeps running rather than exiting immediately
+	warnDeadline := time.Now().Add(10 * time.Second)
+	foundWarning := false
+	for time.Now().Before(warnDeadline) {
+		data, err := os.ReadFile(logPath)
+		if err == nil {
+			logStr := string(data)
+			if strings.Contains(logStr, "Dedicated PostgreSQL advisory-lock session failed or interrupted") {
+				foundWarning = true
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !foundWarning {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("Expected OWPROV to log advisory-lock session interruption warning. Log:\n%s", string(data))
+	}
+	t.Log("PASS: OWPROV detected session interruption, logged warning, and continued waiting.")
+
+	// Verify that OWPROV reconnects a NEW dedicated advisory-lock session with a distinct PID while the lock is still blocked
+	var reconnectedBackendPid int
+	reconnectSessionDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(reconnectSessionDeadline) {
+		err := blockerDB.QueryRow(
+			fmt.Sprintf("SELECT pid FROM pg_stat_activity WHERE datname = '%s' AND pid <> %d AND pid <> %d AND pid <> pg_backend_pid() AND application_name = 'owprov-startup-lock' LIMIT 1",
+				tcDB, blockerPid, owprovBackendPid),
+		).Scan(&reconnectedBackendPid)
+		if err == nil && reconnectedBackendPid > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if reconnectedBackendPid == 0 {
+		t.Fatalf("Failed to detect new reconnected OWPROV dedicated advisory-lock session in pg_stat_activity after terminating PID %d", owprovBackendPid)
+	}
+	t.Logf("PASS: Verified new dedicated advisory-lock session established with PID %d (previous was %d)", reconnectedBackendPid, owprovBackendPid)
+
+	t.Log("Releasing external blocking lock...")
+	var unl bool
+	if err := conn.QueryRowContext(context.Background(), "SELECT pg_advisory_unlock("+LockKeyDec+")").Scan(&unl); err != nil || !unl {
+		t.Fatalf("Failed to release external blocking lock: %v", err)
+	}
+
+	// Verify OWPROV acquires the lock, completes startup, and releases the lock
+	startupDeadline := time.Now().Add(25 * time.Second)
+	completed := false
+	for time.Now().Before(startupDeadline) {
+		data, err := os.ReadFile(logPath)
+		if err == nil {
+			logStr := string(data)
+			if strings.Contains(logStr, "PostgreSQL startup advisory lock acquired") &&
+				strings.Contains(logStr, "PostgreSQL startup advisory lock released") {
+				completed = true
+				break
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	if !completed {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("OWPROV failed to acquire and release startup lock after session recovery. Log:\n%s", string(data))
+	}
+
+	t.Log("PASS: OWPROV recovered from interrupted dedicated session, reconnected, acquired lock, and completed startup cleanly.")
+}

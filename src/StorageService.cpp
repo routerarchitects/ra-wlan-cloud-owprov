@@ -37,6 +37,8 @@ namespace {
 //   - Each dedicated session attempt uses a connect_timeout derived from the
 //     remaining lock-acquisition window, clamped to the configured PostgreSQL
 //     connection timeout and rounded up to at least 1 second.
+//   - If the dedicated session is lost before lock acquisition (while locked_ == false),
+//     the session is reset and re-established within the remaining timeout window.
 // ---------------------------------------------------------------------------
 constexpr std::int64_t kOwprovDbStartupLockKey = 0x4F5750524F560001LL;
 constexpr int kDefaultTimeoutSeconds = 120;
@@ -83,7 +85,7 @@ class DbStartupAdvisoryLock {
 				const int remainingSeconds = std::max(1, static_cast<int>((remainingMs + 999) / 1000));
 
 				const int effectiveConnectTimeout = std::max(1, std::min(configuredConnTimeoutSec, remainingSeconds));
-				const std::string sessionConnStr = baseConnectionString + " connect_timeout=" + std::to_string(effectiveConnectTimeout);
+				const std::string sessionConnStr = baseConnectionString + " application_name=owprov-startup-lock connect_timeout=" + std::to_string(effectiveConnectTimeout);
 
 				try {
 					session_ = std::make_unique<Poco::Data::Session>(connectorName, sessionConnStr);
@@ -115,15 +117,38 @@ class DbStartupAdvisoryLock {
 					Poco::Data::Keywords::into(acquired),
 					Poco::Data::Keywords::now;
 			} catch (const Poco::Exception &e) {
-				poco_error(logger_, "pg_try_advisory_lock() database session query error: " + e.displayText() +
-					"  - aborting startup advisory lock acquisition (fatal session failure).");
+				if (locked_) {
+					session_.reset();
+					throw;
+				}
+				poco_warning(logger_, "Dedicated PostgreSQL advisory-lock session failed or interrupted: " + e.displayText() + " (retrying session creation until deadline).");
 				session_.reset();
-				throw;
+				if (std::chrono::steady_clock::now() >= deadline)
+					break;
+				Poco::Thread::sleep(1000);
+				continue;
 			} catch (const std::exception &e) {
-				poco_error(logger_, "pg_try_advisory_lock() database session query error: " + std::string(e.what()) +
-					"  - aborting startup advisory lock acquisition (fatal session failure).");
+				if (locked_) {
+					session_.reset();
+					throw;
+				}
+				poco_warning(logger_, "Dedicated PostgreSQL advisory-lock session failed or interrupted: " + std::string(e.what()) + " (retrying session creation until deadline).");
 				session_.reset();
-				throw;
+				if (std::chrono::steady_clock::now() >= deadline)
+					break;
+				Poco::Thread::sleep(1000);
+				continue;
+			} catch (...) {
+				if (locked_) {
+					session_.reset();
+					throw;
+				}
+				poco_warning(logger_, "Dedicated PostgreSQL advisory-lock session failed or interrupted: unknown exception (retrying session creation until deadline).");
+				session_.reset();
+				if (std::chrono::steady_clock::now() >= deadline)
+					break;
+				Poco::Thread::sleep(1000);
+				continue;
 			}
 
 			if (acquired) {
@@ -212,8 +237,32 @@ namespace OpenWifi {
 			return -1;
 		}
 
-		// PostgreSQL-only advisory lock: held via a dedicated session around DB startup
-		// initialization (DB object creation, schema setup, migrations, and system DB init).
+		EntityDB_ = std::make_unique<OpenWifi::EntityDB>(dbType_, *Pool_, Logger());
+		PolicyDB_ = std::make_unique<OpenWifi::PolicyDB>(dbType_, *Pool_, Logger());
+		VenueDB_ = std::make_unique<OpenWifi::VenueDB>(dbType_, *Pool_, Logger());
+		LocationDB_ = std::make_unique<OpenWifi::LocationDB>(dbType_, *Pool_, Logger());
+		ContactDB_ = std::make_unique<OpenWifi::ContactDB>(dbType_, *Pool_, Logger());
+		InventoryDB_ = std::make_unique<OpenWifi::InventoryDB>(dbType_, *Pool_, Logger());
+		RolesDB_ = std::make_unique<OpenWifi::ManagementRoleDB>(dbType_, *Pool_, Logger());
+		ConfigurationDB_ = std::make_unique<OpenWifi::ConfigurationDB>(dbType_, *Pool_, Logger());
+		TagsDictionaryDB_ = std::make_unique<OpenWifi::TagsDictionaryDB>(dbType_, *Pool_, Logger());
+		TagsObjectDB_ = std::make_unique<OpenWifi::TagsObjectDB>(dbType_, *Pool_, Logger());
+		MapDB_ = std::make_unique<OpenWifi::MapDB>(dbType_, *Pool_, Logger());
+		SignupDB_ = std::make_unique<OpenWifi::SignupDB>(dbType_, *Pool_, Logger());
+		VariablesDB_ = std::make_unique<OpenWifi::VariablesDB>(dbType_, *Pool_, Logger());
+		OperatorDB_ = std::make_unique<OpenWifi::OperatorDB>(dbType_, *Pool_, Logger());
+		ServiceClassDB_ = std::make_unique<OpenWifi::ServiceClassDB>(dbType_, *Pool_, Logger());
+		SubscriberDeviceDB_ = std::make_unique<OpenWifi::SubscriberDeviceDB>(dbType_, *Pool_, Logger());
+		OpLocationDB_ = std::make_unique<OpenWifi::OpLocationDB>(dbType_, *Pool_, Logger());
+		OpContactDB_ = std::make_unique<OpenWifi::OpContactDB>(dbType_, *Pool_, Logger());
+		OverridesDB_ = std::make_unique<OpenWifi::OverridesDB>(dbType_, *Pool_, Logger());
+		GLBLRAccountInfoDB_ = std::make_unique<OpenWifi::GLBLRAccountInfoDB>(dbType_, *Pool_, Logger());
+		GLBLRCertsDB_ = std::make_unique<OpenWifi::GLBLRCertsDB>(dbType_, *Pool_, Logger());
+		OrionAccountsDB_ = std::make_unique<OpenWifi::OrionAccountsDB>(dbType_, *Pool_, Logger());
+		RadiusEndpointDB_ = std::make_unique<OpenWifi::RadiusEndpointDB>(dbType_, *Pool_, Logger());
+
+		// PostgreSQL-only advisory lock: held via a dedicated session around shared DB startup mutations
+		// (schema setup/migrations, consistency check, and system DB initialization).
 		// Auto-released on session close / process crash. True no-op for SQLite / MySQL.
 		std::optional<DbStartupAdvisoryLock> startupLock;
 		if (dbType_ == OpenWifi::pgsql) {
@@ -244,31 +293,6 @@ namespace OpenWifi {
 			}
 		}
 
-		EntityDB_ = std::make_unique<OpenWifi::EntityDB>(dbType_, *Pool_, Logger());
-		PolicyDB_ = std::make_unique<OpenWifi::PolicyDB>(dbType_, *Pool_, Logger());
-		VenueDB_ = std::make_unique<OpenWifi::VenueDB>(dbType_, *Pool_, Logger());
-		LocationDB_ = std::make_unique<OpenWifi::LocationDB>(dbType_, *Pool_, Logger());
-		ContactDB_ = std::make_unique<OpenWifi::ContactDB>(dbType_, *Pool_, Logger());
-		InventoryDB_ = std::make_unique<OpenWifi::InventoryDB>(dbType_, *Pool_, Logger());
-		RolesDB_ = std::make_unique<OpenWifi::ManagementRoleDB>(dbType_, *Pool_, Logger());
-		ConfigurationDB_ = std::make_unique<OpenWifi::ConfigurationDB>(dbType_, *Pool_, Logger());
-		TagsDictionaryDB_ = std::make_unique<OpenWifi::TagsDictionaryDB>(dbType_, *Pool_, Logger());
-		TagsObjectDB_ = std::make_unique<OpenWifi::TagsObjectDB>(dbType_, *Pool_, Logger());
-		MapDB_ = std::make_unique<OpenWifi::MapDB>(dbType_, *Pool_, Logger());
-		SignupDB_ = std::make_unique<OpenWifi::SignupDB>(dbType_, *Pool_, Logger());
-		VariablesDB_ = std::make_unique<OpenWifi::VariablesDB>(dbType_, *Pool_, Logger());
-		OperatorDB_ = std::make_unique<OpenWifi::OperatorDB>(dbType_, *Pool_, Logger());
-		ServiceClassDB_ = std::make_unique<OpenWifi::ServiceClassDB>(dbType_, *Pool_, Logger());
-		SubscriberDeviceDB_ =
-			std::make_unique<OpenWifi::SubscriberDeviceDB>(dbType_, *Pool_, Logger());
-		OpLocationDB_ = std::make_unique<OpenWifi::OpLocationDB>(dbType_, *Pool_, Logger());
-		OpContactDB_ = std::make_unique<OpenWifi::OpContactDB>(dbType_, *Pool_, Logger());
-		OverridesDB_ = std::make_unique<OpenWifi::OverridesDB>(dbType_, *Pool_, Logger());
-        GLBLRAccountInfoDB_ = std::make_unique<OpenWifi::GLBLRAccountInfoDB>(dbType_, *Pool_, Logger());
-        GLBLRCertsDB_ = std::make_unique<OpenWifi::GLBLRCertsDB>(dbType_, *Pool_, Logger());
-        OrionAccountsDB_ = std::make_unique<OpenWifi::OrionAccountsDB>(dbType_, *Pool_, Logger());
-        RadiusEndpointDB_ = std::make_unique<OpenWifi::RadiusEndpointDB>(dbType_, *Pool_, Logger());
-
 		EntityDB_->Create();
 		PolicyDB_->Create();
 		VenueDB_->Create();
@@ -298,6 +322,14 @@ namespace OpenWifi {
         GLBLRCertsDB_->Create();
         OrionAccountsDB_->Create();
         RadiusEndpointDB_->Create();
+
+		ConsistencyCheck();
+		InitializeSystemDBs();
+
+		if (startupLock) {
+			poco_information(Logger(), "Database startup initialization complete. Releasing startup advisory lock.");
+			startupLock.reset();
+		}
 
 		ExistFunc_[EntityDB_->Prefix()] = [=](const char *F, std::string &V) -> bool {
 			return EntityDB_->Exists(F, V);
@@ -481,14 +513,7 @@ namespace OpenWifi {
                     [[maybe_unused]] std::string &Name,
                     [[maybe_unused]] std::string &Description) -> bool { return false; };
 
-        InventoryDB_->InitializeSerialCache();
-		ConsistencyCheck();
-		InitializeSystemDBs();
-
-		if (startupLock) {
-			poco_information(Logger(), "Database startup initialization complete. Releasing startup advisory lock.");
-			startupLock.reset();
-		}
+		InventoryDB_->InitializeSerialCache();
 
 		TimerCallback_ = std::make_unique<Poco::TimerCallback<Storage>>(*this, &Storage::onTimer);
 		Timer_.setStartInterval(20 * 1000);				// first run in 20 seconds
