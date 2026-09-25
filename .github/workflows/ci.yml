@@ -91,3 +91,52 @@ jobs:
           --entrypoint /bin/bash \
           owprov:test \
           -c 'ldd /openwifi/owprov && ! ldd /openwifi/owprov | grep -q "not found"'
+
+  multi-instance-tests:
+    name: Multi-Instance Startup Lock Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: owprov_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: Build OWPROV Docker Image
+        run: |
+          docker build -t owprov:test .
+
+      - name: Run Multi-Instance Startup Lock Tests
+        run: |
+          docker run --rm --network host \
+            --entrypoint /bin/bash \
+            -e PGHOST=127.0.0.1 \
+            -e PGPORT=5432 \
+            -e PGUSER=postgres \
+            -e PGPASSWORD=postgres \
+            -e PGDATABASE=owprov_test \
+            -e OWPROV_BIN=/openwifi/owprov \
+            -v ${{ github.workspace }}:/app \
+            -w /app/tests/multi_instance_tests \
+            owprov:test -lc '
+              set -euxo pipefail
+              apt-get update -qq
+              apt-get install -y --no-install-recommends golang-go openssl
+              go test -v ./...
+            '
+
+
