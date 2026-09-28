@@ -23,6 +23,9 @@ namespace OpenWifi {
 		ManagementRoleDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L);
 		virtual ~ManagementRoleDB(){};
 
+		bool Create();
+		bool HasPolicy(const std::string &PolicyId, bool &InUse);
+
 	  private:
 		bool Upgrade(uint32_t from, uint32_t &to) override;
 	};

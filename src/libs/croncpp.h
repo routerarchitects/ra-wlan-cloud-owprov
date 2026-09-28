@@ -30,6 +30,7 @@
 #include <bitset>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <iomanip>
 #include <sstream>

@@ -270,7 +270,8 @@ namespace OpenWifi {
 					return true;
 				}
 				return false;
-			} else if (Path.find("/api/v1/managementRole") != std::string::npos) {
+			} else if (Path.find("/api/v1/managementRole") != std::string::npos ||
+					   Path.find("/api/v2/managementRole") != std::string::npos) {
 				ProvObjects::ManagementRole R;
 				if (StorageService()->RolesDB().GetRecord("id", Id, R)) {
 					TargetEntity = R.entity;
@@ -748,7 +749,8 @@ namespace OpenWifi {
 			return "overrides";
 		if (Path.find("/api/v1/configuration") != std::string::npos)
 			return "configuration";
-		if (Path.find("/api/v1/managementRole") != std::string::npos)
+		if (Path.find("/api/v1/managementRole") != std::string::npos ||
+			Path.find("/api/v2/managementRole") != std::string::npos)
 			return "managementRole";
 		if (Path.find("/api/v1/managementPolicy") != std::string::npos)
 			return "managementPolicy";
