@@ -76,7 +76,10 @@ namespace OpenWifi {
         inline OpenWifi::OrionAccountsDB &OrionAccountsDB() { return *OrionAccountsDB_; }
         inline OpenWifi::RadiusEndpointDB &RadiusEndpointDB() { return *RadiusEndpointDB_; }
 
-		// Starts a transaction using one pooled DB session.
+		// Starts a caller-owned transaction using one pooled DB session.
+		// Caller Contract:
+		// - Keep transactions narrow and DB-only.
+		// - If any required transaction-aware ORM operation fails, caller must Rollback() or let the transaction exit scope.
 		[[nodiscard]] inline DbTransaction BeginTransaction() {
 			return DbTransaction(Pool().get(), Logger());
 		}

@@ -1090,11 +1090,30 @@ namespace ORM {
 			return false;
 		}
 
+		// Transaction-aware read overloads for caller-owned transactions.
+		// Delegates execution to the session active within tx.
+
+		template <typename T>
+		bool GetRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
+		               RecordType &R) {
+			return GetRecord(tx.Session(), FieldName, Value, R);
+		}
+
+		bool GetRecords(OpenWifi::DbTransaction &tx,
+		                uint64_t Offset,
+		                uint64_t HowMany,
+		                RecordVec &Records,
+		                const std::string &Where = "",
+		                const std::string &OrderBy = "") {
+			return GetRecords(tx.Session(), Offset, HowMany, Records, Where, OrderBy);
+		}
+
 		// Transaction-aware ORM operations for caller-owned transactions.
-		// Reads use the transaction session directly (e.g., GetRecord(tx.Session(), ...)).
-		// Create/Update/Delete writes register cache changes that execute
-		// only after a successful DbTransaction::Commit().
-		bool CreateRecord(OpenWifi::DbTransaction &tx, const RecordType &R) {
+		// - Reads delegate to tx.Session() without marking failure on record-not-found.
+		// - Failing write operations mark tx failed so tx.Commit() enforces rollback.
+		// - Writes perform post-commit cache invalidation rather than direct mutation.
+		bool CreateRecord(OpenWifi::DbTransaction &tx, const RecordType &R,
+		                  OpenWifi::DbTransaction::PostCommitFunc postCommitInvalidation = nullptr) {
 			try {
 				Poco::Data::Statement Insert(tx.Session());
 				RecordTuple RT;
@@ -1103,22 +1122,25 @@ namespace ORM {
 				                 " ) values " + SelectList_;
 				Insert << ConvertParams(St), Poco::Data::Keywords::use(RT);
 				Insert.execute();
-				if (Cache_) {
-					tx.AfterCommit([this, R]() {
-						if (Cache_)
-							Cache_->Create(R);
-					});
-				}
+				RegisterPostCommitInvalidation(tx, std::move(postCommitInvalidation));
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("CreateRecord failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("CreateRecord failed: unknown exception");
+				tx.MarkFailed();
 			}
 			return false;
 		}
 
 		template <typename T>
 		bool UpdateRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
-		                  const RecordType &R) {
+		                  const RecordType &R,
+		                  OpenWifi::DbTransaction::PostCommitFunc postCommitInvalidation = nullptr) {
 			try {
 				assert(ValidFieldName(FieldName));
 				Poco::Data::Statement Update(tx.Session());
@@ -1136,24 +1158,27 @@ namespace ORM {
 						" rows in table '" + TableName_ +
 						"' for field '" + FieldName + "'."
 					);
+					tx.MarkFailed();
 					return false;
 				}
-				if (Cache_) {
-					std::string fieldName{FieldName};
-					std::string valStr{to_string(Value)};
-					tx.AfterCommit([this, R, fieldName, valStr]() {
-						UpdateCacheOrInvalidate(R, fieldName, valStr);
-					});
-				}
+				RegisterPostCommitInvalidation(tx, std::move(postCommitInvalidation), FieldName, to_string(Value));
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("UpdateRecord failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("UpdateRecord failed: unknown exception");
+				tx.MarkFailed();
 			}
 			return false;
 		}
 
 		template <typename T>
-		bool DeleteRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value) {
+		bool DeleteRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
+		                  OpenWifi::DbTransaction::PostCommitFunc postCommitInvalidation = nullptr) {
 			try {
 				assert(ValidFieldName(FieldName));
 				Poco::Data::Statement Delete(tx.Session());
@@ -1167,33 +1192,49 @@ namespace ORM {
 						" rows in table '" + TableName_ +
 						"' for field '" + FieldName + "'."
 					);
+					tx.MarkFailed();
 					return false;
 				}
-				if (Cache_) {
-					std::string fieldName{FieldName};
-					std::string valStr{to_string(Value)};
-					tx.AfterCommit([this, fieldName, valStr]() {
-						InvalidateCacheEntry(fieldName, valStr);
-					});
-				}
+				RegisterPostCommitInvalidation(tx, std::move(postCommitInvalidation), FieldName, to_string(Value));
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("DeleteRecord failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("DeleteRecord failed: unknown exception");
+				tx.MarkFailed();
 			}
 			return false;
 		}
 
-		// Low-level session operation for bulk deletion. Automatic cache synchronization is not provided for arbitrary bulk deletes.
-		bool DeleteRecords(Poco::Data::Session &session, const std::string &WhereClause) {
+		// Bulk deletion within a transaction requiring an explicit post-commit invalidation strategy.
+		bool DeleteRecords(OpenWifi::DbTransaction &tx, const std::string &WhereClause,
+		                   OpenWifi::DbTransaction::PostCommitFunc postCommitInvalidation) {
+			if (!postCommitInvalidation) {
+				Logger_.error("DeleteRecords called without required post-commit invalidation callback.");
+				tx.MarkFailed();
+				return false;
+			}
 			try {
 				assert(!WhereClause.empty());
-				Poco::Data::Statement Delete(session);
+				Poco::Data::Statement Delete(tx.Session());
 				std::string St = "delete from " + TableName_ + " where " + WhereClause;
 				Delete << St;
 				Delete.execute();
+				tx.AfterCommit(std::move(postCommitInvalidation));
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("DeleteRecords failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("DeleteRecords failed: unknown exception");
+				tx.MarkFailed();
 			}
 			return false;
 		}
@@ -1223,6 +1264,12 @@ namespace ORM {
 			}
 
 			Logger_.error("Falling back to full cache invalidation after targeted invalidation failure.");
+			InvalidateAllCache();
+		}
+
+		void InvalidateAllCache() {
+			if (!Cache_)
+				return;
 
 			try {
 				Cache_->InvalidateAll();
@@ -1235,22 +1282,21 @@ namespace ORM {
 			}
 		}
 
-		void UpdateCacheOrInvalidate(const RecordType &R, const std::string &fieldName, const std::string &value) {
-			if (!Cache_)
-				return;
-
-			try {
-				Cache_->UpdateCache(R);
-				return;
-			} catch (const Poco::Exception &E) {
-				Logger_.error("UpdateCache failed post-commit: " + E.displayText());
-			} catch (const std::exception &E) {
-				Logger_.error("UpdateCache failed post-commit: " + std::string(E.what()));
-			} catch (...) {
-				Logger_.error("UpdateCache failed post-commit: unknown exception");
+		void RegisterPostCommitInvalidation(OpenWifi::DbTransaction &tx,
+		                                    OpenWifi::DbTransaction::PostCommitFunc customCallback,
+		                                    const std::string &fieldName = "",
+		                                    const std::string &valStr = "") {
+			if (customCallback) {
+				tx.AfterCommit(std::move(customCallback));
+			} else if (Cache_) {
+				if (fieldName.empty()) {
+					tx.AfterCommit([this]() { InvalidateAllCache(); });
+				} else {
+					tx.AfterCommit([this, fieldName, valStr]() {
+						InvalidateCacheEntry(fieldName, valStr);
+					});
+				}
 			}
-
-			InvalidateCacheEntry(fieldName, value);
 		}
 
 		std::string CreateFields_;

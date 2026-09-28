@@ -157,10 +157,12 @@ int main() {
 	TestDB db(OpenWifi::DBType::sqlite, pool, logger, &mockCache);
 	TEST_ASSERT(db.Create(), "Failed to create transaction test table");
 
-	// Clear leftover test records using low-level DeleteRecords on session
+	// Clear leftover test records using direct SQL statement execution
 	{
 		Poco::Data::Session clearSession = pool.get();
-		TEST_ASSERT(db.DeleteRecords(clearSession, "1=1"), "Failed to clear transaction test table");
+		Poco::Data::Statement clearStmt(clearSession);
+		clearStmt << "delete from test_records";
+		clearStmt.execute();
 		mockCache.Clear();
 	}
 
@@ -178,14 +180,14 @@ int main() {
 		TEST_ASSERT(db.CreateRecord(tx, recA) == true, "Failed to create recA in transaction");
 		TEST_ASSERT(db.CreateRecord(tx, recB) == true, "Failed to create recB in transaction");
 
-		// 2. GetRecords(session, ...) inside transaction
+		// 2. GetRecords(tx, ...) wrapper inside transaction
 		TestDB::RecordVec insideTxRecords;
-		TEST_ASSERT(db.GetRecords(tx.Session(), 0, 10, insideTxRecords) == true, "GetRecords failed inside transaction");
+		TEST_ASSERT(db.GetRecords(tx, 0, 10, insideTxRecords) == true, "GetRecords failed inside transaction wrapper");
 		TEST_ASSERT(insideTxRecords.size() == 2, "Expected 2 records inside transaction session");
 
-		// 3. GetRecord(session, ...) inside transaction
+		// 3. GetRecord(tx, ...) wrapper inside transaction
 		OpenWifi::TestRecord insideTxRecA;
-		TEST_ASSERT(db.GetRecord(tx.Session(), "id", "rec-101", insideTxRecA) == true, "GetRecord failed inside transaction");
+		TEST_ASSERT(db.GetRecord(tx, "id", "rec-101", insideTxRecA) == true, "GetRecord failed inside transaction wrapper");
 		TEST_ASSERT(insideTxRecA.value == "Val A Initial", "recA value mismatch inside transaction");
 
 		// 4. UpdateRecord(tx, ...) inside transaction
@@ -304,27 +306,44 @@ int main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// Test 6: Mock DBCache Post-Commit Synchronization Guarantees
+	// Test 6: Mock DBCache Post-Commit Cache Invalidation Behavior
 	// -------------------------------------------------------------------------
 	{
-		std::cout << "  - Test 6: Mock DBCache Post-Commit Synchronization Guarantees... " << std::flush;
+		std::cout << "  - Test 6: Mock DBCache Post-Commit Cache Invalidation Behavior... " << std::flush;
 		mockCache.Clear();
 
-		// 6a: Transactional CreateRecord updates DBCache ONLY AFTER COMMIT
+		// 6a: Transactional CreateRecord performs conservative post-commit invalidation when Cache_ exists
 		{
+			// Pre-populate cache with an entry
+			OpenWifi::TestRecord recPre{"rec-pre", "Record Pre", "Val Pre"};
+			{
+				OpenWifi::DbTransaction txSetup(pool.get(), logger);
+				TEST_ASSERT(db.CreateRecord(txSetup, recPre) == true, "Setup create recPre failed");
+				TEST_ASSERT(txSetup.Commit() == true, "Setup commit recPre failed");
+			}
+			OpenWifi::TestRecord dummyPre;
+			TEST_ASSERT(db.GetRecord("id", "rec-pre", dummyPre) == true, "GetRecord failed for recPre setup");
+			TEST_ASSERT(mockCache.Contains("rec-pre") == true, "recPre setup missing from cache");
+
 			OpenWifi::DbTransaction tx(pool.get(), logger);
 			OpenWifi::TestRecord recH{"rec-108", "Record H", "Val H"};
 
 			TEST_ASSERT(db.CreateRecord(tx, recH) == true, "Failed to create recH");
-			// Cache MUST NOT be updated during open transaction before commit
-			TEST_ASSERT(mockCache.Contains("rec-108") == false, "MockDBCache unexpectedly updated BEFORE commit!");
+			// Cache MUST NOT be invalidated before commit
+			TEST_ASSERT(mockCache.Contains("rec-pre") == true, "MockDBCache unexpectedly invalidated BEFORE commit!");
 
 			TEST_ASSERT(tx.Commit() == true, "Commit failed in 6a");
-			// Cache MUST be updated AFTER successful commit
-			TEST_ASSERT(mockCache.Contains("rec-108") == true, "MockDBCache failed to update AFTER commit!");
+			// Post-commit conservative invalidation MUST have cleared cache entries
+			TEST_ASSERT(mockCache.InvalidateAllCalled() == true, "Post-commit InvalidateAll() was not called!");
+			TEST_ASSERT(mockCache.Contains("rec-pre") == false, "Pre-existing cache entry was not cleared after commit!");
+
+			// Subsequent GetRecord re-populates cache on miss
+			OpenWifi::TestRecord fetched;
+			TEST_ASSERT(db.GetRecord("id", "rec-108", fetched) == true, "GetRecord failed after commit");
+			TEST_ASSERT(mockCache.Contains("rec-108") == true, "MockDBCache failed to populate on subsequent read miss");
 		}
 
-		// 6b: Transactional UpdateRecord updates DBCache ONLY AFTER COMMIT
+		// 6b: Transactional UpdateRecord INVALIDATES DBCache ONLY AFTER COMMIT
 		{
 			OpenWifi::DbTransaction tx(pool.get(), logger);
 			OpenWifi::TestRecord recH_updated{"rec-108", "Record H", "Val H Updated Cache"};
@@ -332,14 +351,17 @@ int main() {
 			TEST_ASSERT(db.UpdateRecord(tx, "id", "rec-108", recH_updated) == true, "Failed to update recH");
 			// Cache must hold initial value during transaction before commit
 			OpenWifi::TestRecord cachedPre;
-			TEST_ASSERT(mockCache.GetFromCache("id", "rec-108", cachedPre) == true, "recH missing from cache");
+			TEST_ASSERT(mockCache.GetFromCache("id", "rec-108", cachedPre) == true, "recH missing from cache pre-commit");
 			TEST_ASSERT(cachedPre.value == "Val H", "Cache mutated prematurely during transaction!");
 
 			TEST_ASSERT(tx.Commit() == true, "Commit failed in 6b");
-			// Cache updated post-commit
+			// Cache MUST be invalidated post-commit, not directly updated
+			TEST_ASSERT(mockCache.Contains("rec-108") == false, "Cache entry failed to invalidate post-commit!");
+
+			// Subsequent GetRecord re-populates cache with fresh DB value
 			OpenWifi::TestRecord cachedPost;
-			TEST_ASSERT(mockCache.GetFromCache("id", "rec-108", cachedPost) == true, "recH missing from cache post-commit");
-			TEST_ASSERT(cachedPost.value == "Val H Updated Cache", "Cache failed to update post-commit!");
+			TEST_ASSERT(db.GetRecord("id", "rec-108", cachedPost) == true, "GetRecord failed after update commit");
+			TEST_ASSERT(cachedPost.value == "Val H Updated Cache", "GetRecord loaded incorrect value post-commit");
 		}
 
 		// 6c: Transactional DeleteRecord deletes from DBCache ONLY AFTER COMMIT
@@ -355,16 +377,28 @@ int main() {
 			TEST_ASSERT(mockCache.Contains("rec-108") == false, "Cache entry failed to delete post-commit!");
 		}
 
-		// 6d: Explicit Rollback() does NOT mutate DBCache
+		// 6d: Explicit Rollback() does NOT mutate or invalidate DBCache
 		{
-			OpenWifi::DbTransaction tx(pool.get(), logger);
+			// Pre-populate cache
 			OpenWifi::TestRecord recI{"rec-109", "Record I", "Val I"};
+			{
+				OpenWifi::DbTransaction txSetup(pool.get(), logger);
+				TEST_ASSERT(db.CreateRecord(txSetup, recI) == true, "Setup create recI failed");
+				TEST_ASSERT(txSetup.Commit() == true, "Setup commit recI failed");
+			}
+			OpenWifi::TestRecord dummy;
+			TEST_ASSERT(db.GetRecord("id", "rec-109", dummy) == true, "GetRecord failed for recI setup");
+			TEST_ASSERT(mockCache.Contains("rec-109") == true, "recI setup missing from cache");
 
-			TEST_ASSERT(db.CreateRecord(tx, recI) == true, "Failed to create recI in transaction");
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recI_mod{"rec-109", "Record I", "Val I Mod"};
+			TEST_ASSERT(db.UpdateRecord(tx, "id", "rec-109", recI_mod) == true, "Failed to update recI in transaction");
 			TEST_ASSERT(tx.Rollback() == true, "Rollback failed in 6d");
 
-			// Cache must NOT contain recI
-			TEST_ASSERT(mockCache.Contains("rec-109") == false, "Cache mutated after rolled back transaction!");
+			// Cache must still contain original recI entry unchanged
+			OpenWifi::TestRecord cachedRolledBack;
+			TEST_ASSERT(mockCache.GetFromCache("id", "rec-109", cachedRolledBack) == true, "Cache entry lost after rollback!");
+			TEST_ASSERT(cachedRolledBack.value == "Val I", "Cache entry modified after rolled back transaction!");
 		}
 
 		// 6e: Destructor scope-exit auto-rollback does NOT mutate DBCache
@@ -384,12 +418,11 @@ int main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// Test 7: Targeted Cache Invalidation Fallback When UpdateCache() Fails
+	// Test 7: Targeted Cache Invalidation Fallback When Delete Fails
 	// -------------------------------------------------------------------------
 	{
-		std::cout << "  - Test 7: Targeted Cache Invalidation Fallback on UpdateCache() Failure... " << std::flush;
+		std::cout << "  - Test 7: Targeted Cache Invalidation Fallback on Delete Failure... " << std::flush;
 		mockCache.Clear();
-		mockCache.SetThrowOnUpdateCache(false);
 
 		// Pre-populate database & cache
 		{
@@ -401,17 +434,21 @@ int main() {
 			TEST_ASSERT(tx.Commit() == true, "Failed to commit initial records for Test 7");
 		}
 
+		// Populate cache via read
+		OpenWifi::TestRecord dummyK, dummyL;
+		TEST_ASSERT(db.GetRecord("id", "rec-111", dummyK) == true, "GetRecord recK failed");
+		TEST_ASSERT(db.GetRecord("id", "rec-112", dummyL) == true, "GetRecord recL failed");
 		TEST_ASSERT(mockCache.Contains("rec-111") == true, "recK missing from cache");
 		TEST_ASSERT(mockCache.Contains("rec-112") == true, "recL missing from cache");
 
-		// Perform update inside transaction with mockCache set to throw on UpdateCache
+		// Perform update inside transaction with mockCache set to throw on Delete
 		{
 			OpenWifi::DbTransaction tx(pool.get(), logger);
 			OpenWifi::TestRecord recK_updated{"rec-111", "Record K", "Val K Updated"};
 			TEST_ASSERT(db.UpdateRecord(tx, "id", "rec-111", recK_updated) == true, "UpdateRecord failed inside tx");
 
-			mockCache.SetThrowOnUpdateCache(true);
-			TEST_ASSERT(tx.Commit() == true, "Commit() must succeed even if post-commit UpdateCache throws");
+			mockCache.SetThrowOnDelete(true);
+			TEST_ASSERT(tx.Commit() == true, "Commit() must succeed even if post-commit Delete throws");
 		}
 
 		// Verify 1: DB update remains committed
@@ -422,23 +459,18 @@ int main() {
 			TEST_ASSERT(checkK.value == "Val K Updated", "recK value in DB did not update");
 		}
 
-		// Verify 2: Target cache entry was invalidated due to UpdateCache failure
-		TEST_ASSERT(mockCache.Contains("rec-111") == false, "Stale cache entry rec-111 was not invalidated after UpdateCache failure!");
+		// Verify 2: InvalidateAll() was called after targeted Delete failure
+		TEST_ASSERT(mockCache.InvalidateAllCalled() == true, "InvalidateAll() was not called after Delete failure!");
 
-		// Verify 3: Unrelated cache entry remains intact
-		TEST_ASSERT(mockCache.Contains("rec-112") == true, "Unrelated cache entry rec-112 was unexpectedly removed!");
-		TEST_ASSERT(mockCache.InvalidateAllCalled() == false, "InvalidateAll() was unexpectedly called when targeted invalidation succeeded");
+		// Verify 3: Stale cache entry rec-111 is gone
+		TEST_ASSERT(mockCache.Contains("rec-111") == false, "Stale cache entry rec-111 was not invalidated!");
 
 		// Verify 4: Subsequent GetRecord re-populates cache with fresh DB value
-		mockCache.SetThrowOnUpdateCache(false);
+		mockCache.SetThrowOnDelete(false);
 		OpenWifi::TestRecord reFetchedRec;
 		TEST_ASSERT(db.GetRecord("id", "rec-111", reFetchedRec) == true, "GetRecord failed after cache invalidation");
 		TEST_ASSERT(reFetchedRec.value == "Val K Updated", "GetRecord returned incorrect value after re-populating cache");
 		TEST_ASSERT(mockCache.Contains("rec-111") == true, "Cache was not re-populated after GetRecord miss");
-
-		OpenWifi::TestRecord refreshedCachedRec;
-		TEST_ASSERT(mockCache.GetFromCache("id", "rec-111", refreshedCachedRec) == true, "rec-111 missing from cache after re-population");
-		TEST_ASSERT(refreshedCachedRec.value == "Val K Updated", "Cache was re-populated with stale value");
 
 		std::cout << "PASSED" << std::endl;
 	}
@@ -460,6 +492,9 @@ int main() {
 			TEST_ASSERT(tx.Commit() == true, "Failed to commit initial records for Test 8");
 		}
 
+		OpenWifi::TestRecord dummyM, dummyN;
+		TEST_ASSERT(db.GetRecord("id", "rec-113", dummyM) == true, "GetRecord recM failed");
+		TEST_ASSERT(db.GetRecord("id", "rec-114", dummyN) == true, "GetRecord recN failed");
 		TEST_ASSERT(mockCache.Contains("rec-113") == true, "recM missing from cache");
 		TEST_ASSERT(mockCache.Contains("rec-114") == true, "recN missing from cache");
 
@@ -511,6 +546,9 @@ int main() {
 			// Attempt deleting a non-existent row inside the transaction
 			TEST_ASSERT(db.DeleteRecord(tx, "id", "does-not-exist") == false, "DeleteRecord unexpectedly succeeded for missing row");
 
+			// Transaction failure flag is set
+			TEST_ASSERT(tx.HasFailed() == true, "tx.HasFailed() was not set after failed operation!");
+
 			// Caller rolls back due to failure of required delete step
 			TEST_ASSERT(tx.Rollback() == true, "Rollback failed after DeleteRecord failure");
 		}
@@ -539,6 +577,8 @@ int main() {
 			TEST_ASSERT(tx.Commit() == true, "Failed to commit initial record for Test 10");
 		}
 
+		OpenWifi::TestRecord dummyP;
+		TEST_ASSERT(db.GetRecord("id", "rec-116", dummyP) == true, "GetRecord recP failed");
 		TEST_ASSERT(mockCache.Contains("rec-116") == true, "recP missing from cache");
 
 		// Perform transactional DeleteRecord with both Delete and InvalidateAll set to throw
@@ -591,6 +631,107 @@ int main() {
 		}
 
 		TEST_ASSERT(usedInsideCallback == usedBefore, "DB session was still checked out during AfterCommit callback");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test 12: Unsafe Bulk Delete Overload Invalidation & Rollback Requirements
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 12: Transactional Bulk DeleteRecords Invalidation & Rollback... " << std::flush;
+		bool invalidationCallbackRan = false;
+
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recQ{"rec-117", "Record Q", "Val Q"};
+			TEST_ASSERT(db.CreateRecord(tx, recQ) == true, "CreateRecord failed in Test 12");
+			TEST_ASSERT(tx.Commit() == true, "Commit failed in Test 12 setup");
+		}
+
+		// Pre-populate cache for rec-117
+		OpenWifi::TestRecord dummyQ;
+		TEST_ASSERT(db.GetRecord("id", "rec-117", dummyQ) == true, "GetRecord recQ failed");
+		TEST_ASSERT(mockCache.Contains("rec-117") == true, "recQ missing from cache pre-delete");
+
+		// 1. Bulk delete without post-commit invalidation callback fails gracefully and marks tx as failed
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			TEST_ASSERT(db.DeleteRecords(tx, "id='rec-117'", nullptr) == false, "DeleteRecords unexpectedly succeeded without invalidation callback");
+			TEST_ASSERT(tx.HasFailed() == true, "tx.HasFailed() was not set after missing callback!");
+			TEST_ASSERT(tx.Commit() == false, "tx.Commit() unexpectedly succeeded on failed transaction!");
+		}
+
+		// 2. Bulk delete with explicit post-commit invalidation callback succeeds and clears cache
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			TEST_ASSERT(db.DeleteRecords(tx, "id='rec-117'", [&]() {
+				invalidationCallbackRan = true;
+				mockCache.Clear();
+			}) == true, "DeleteRecords failed with explicit invalidation callback");
+			TEST_ASSERT(invalidationCallbackRan == false, "Invalidation callback ran BEFORE commit!");
+			TEST_ASSERT(tx.Commit() == true, "Commit failed for bulk delete");
+			TEST_ASSERT(invalidationCallbackRan == true, "Invalidation callback failed to run AFTER commit!");
+			TEST_ASSERT(mockCache.Contains("rec-117") == false, "Cache entry rec-117 still in cache after bulk delete commit!");
+		}
+
+		// Verify record Q is gone from DB
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkQ;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-117", checkQ) == false, "recQ still exists in DB after bulk delete");
+		}
+
+		// 3. Rollback case: callback must NOT run and cache must NOT be invalidated
+		{
+			OpenWifi::DbTransaction txSetup(pool.get(), logger);
+			OpenWifi::TestRecord recR{"rec-118", "Record R", "Val R"};
+			TEST_ASSERT(db.CreateRecord(txSetup, recR) == true, "CreateRecord recR failed");
+			TEST_ASSERT(txSetup.Commit() == true, "Commit recR failed");
+		}
+		OpenWifi::TestRecord dummyR;
+		TEST_ASSERT(db.GetRecord("id", "rec-118", dummyR) == true, "GetRecord recR failed");
+		TEST_ASSERT(mockCache.Contains("rec-118") == true, "recR missing from cache");
+
+		{
+			bool rollbackCallbackRan = false;
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			TEST_ASSERT(db.DeleteRecords(tx, "id='rec-118'", [&]() {
+				rollbackCallbackRan = true;
+				mockCache.Clear();
+			}) == true, "DeleteRecords failed");
+
+			TEST_ASSERT(tx.Rollback() == true, "Rollback failed");
+			TEST_ASSERT(rollbackCallbackRan == false, "Callback unexpectedly ran after Rollback()!");
+			TEST_ASSERT(mockCache.Contains("rec-118") == true, "Cache entry rec-118 was unexpectedly invalidated after Rollback()!");
+		}
+
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test 13: Transaction Failure Flag Enforces Rollback on Commit Attempt
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 13: Transaction Failure Flag Enforces Rollback on Commit Attempt... " << std::flush;
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recS{"rec-119", "Record S", "Val S"};
+			TEST_ASSERT(db.CreateRecord(tx, recS) == true, "CreateRecord recS failed");
+
+			// Trigger a failure inside transaction
+			TEST_ASSERT(db.DeleteRecord(tx, "id", "non-existent-id") == false, "DeleteRecord unexpectedly succeeded");
+			TEST_ASSERT(tx.HasFailed() == true, "tx.HasFailed() was not set after failed operation");
+
+			// Caller attempts to commit despite operation failure
+			TEST_ASSERT(tx.Commit() == false, "tx.Commit() unexpectedly succeeded on failed transaction!");
+		}
+
+		// Verify record S was rolled back from DB because tx.Commit() refused to commit
+		{
+			Poco::Data::Session verifySession = pool.get();
+			OpenWifi::TestRecord checkS;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-119", checkS) == false, "recS exists in DB after failed transaction commit attempt");
+		}
 		std::cout << "PASSED" << std::endl;
 	}
 

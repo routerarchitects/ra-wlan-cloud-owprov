@@ -18,7 +18,14 @@
 
 namespace OpenWifi {
 
-	// Note: Keep transactions narrow and DB-only. Perform network/JSON operations before opening DbTransaction to prevent pool exhaustion.
+	// Caller Contract for DbTransaction:
+	// 1. Keep transactions narrow and DB-only. Perform network/JSON operations before opening DbTransaction to prevent pool exhaustion.
+	// 2. API workflows that require multi-operation atomicity, row-level locking,
+	//    or rollback across related DB writes must use StorageService()->BeginTransaction()
+	//    to define the transaction boundary.
+	// 3. If any required transaction-aware ORM operation returns false, the caller MUST call Rollback() or allow the DbTransaction object to exit scope (RAII auto-rollback).
+	// 4. Calling Commit() after a failed required operation is a caller bug.
+	// 5. AfterCommit callbacks run ONLY after a successful DB commit and after DB session resources are released. Callbacks must NOT be used to make a committed DB transaction appear failed.
 	class DbTransaction final {
 	  public:
 		using PostCommitFunc = std::function<void()>;
@@ -58,10 +65,26 @@ namespace OpenWifi {
 			}
 		}
 
+		// Marks transaction as failed when an operation within it encounters an error.
+		// A failed transaction refuses to commit and enforces rollback.
+		void MarkFailed() noexcept {
+			failed_ = true;
+		}
+
+		[[nodiscard]] bool HasFailed() const noexcept {
+			return failed_;
+		}
+
 		[[nodiscard]] bool Commit() noexcept {
 			std::vector<PostCommitFunc> actions;
 
 			try {
+				if (failed_) {
+					logger_.error("Cannot commit database transaction: an operation within the transaction failed");
+					(void)Rollback();
+					return false;
+				}
+
 				if (!resources_ || !resources_->transaction.isActive()) {
 					return false;
 				}
@@ -132,6 +155,7 @@ namespace OpenWifi {
 		Poco::Logger &logger_;
 		std::optional<Resources> resources_;
 		std::vector<PostCommitFunc> after_commit_actions_;
+		bool failed_ = false;
 	};
 
 } // namespace OpenWifi
