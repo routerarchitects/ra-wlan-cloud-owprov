@@ -1210,11 +1210,16 @@ namespace ORM {
 			return false;
 		}
 
-		// Bulk deletion within a transaction requiring an explicit post-commit invalidation strategy.
-		bool DeleteRecords(OpenWifi::DbTransaction &tx, const std::string &WhereClause,
-		                   OpenWifi::DbTransaction::PostCommitFunc postCommitInvalidation) {
+		// Low-level unsafe transaction bulk deletion.
+		// WARNING:
+		// - WhereClause is interpolated directly into raw SQL without parameter binding.
+		//   It MUST be constructed exclusively from trusted internal predicates.
+		//   NEVER pass API or user-supplied text directly (SQL injection hazard).
+		// - Caller MUST provide an explicit post-commit invalidation callback, as generic
+		//   ORM cannot deduce which cached keys or entries are affected by arbitrary WHERE clauses.
+		bool DeleteRecordsUnsafe(OpenWifi::DbTransaction &tx, const std::string &WhereClause, OpenWifi::DbTransaction::PostCommitFunc postCommitInvalidation) {
 			if (!postCommitInvalidation) {
-				Logger_.error("DeleteRecords called without required post-commit invalidation callback.");
+				Logger_.error("DeleteRecordsUnsafe called without required post-commit invalidation callback.");
 				tx.MarkFailed();
 				return false;
 			}
@@ -1230,10 +1235,10 @@ namespace ORM {
 				Logger_.log(E);
 				tx.MarkFailed();
 			} catch (const std::exception &E) {
-				Logger_.error("DeleteRecords failed: " + std::string(E.what()));
+				Logger_.error("DeleteRecordsUnsafe failed: " + std::string(E.what()));
 				tx.MarkFailed();
 			} catch (...) {
-				Logger_.error("DeleteRecords failed: unknown exception");
+				Logger_.error("DeleteRecordsUnsafe failed: unknown exception");
 				tx.MarkFailed();
 			}
 			return false;

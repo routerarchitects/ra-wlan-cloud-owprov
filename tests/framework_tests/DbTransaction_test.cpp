@@ -638,7 +638,7 @@ int main() {
 	// Test 12: Unsafe Bulk Delete Overload Invalidation & Rollback Requirements
 	// -------------------------------------------------------------------------
 	{
-		std::cout << "  - Test 12: Transactional Bulk DeleteRecords Invalidation & Rollback... " << std::flush;
+		std::cout << "  - Test 12: Transactional Bulk DeleteRecordsUnsafe Invalidation & Rollback... " << std::flush;
 		bool invalidationCallbackRan = false;
 
 		{
@@ -656,7 +656,7 @@ int main() {
 		// 1. Bulk delete without post-commit invalidation callback fails gracefully and marks tx as failed
 		{
 			OpenWifi::DbTransaction tx(pool.get(), logger);
-			TEST_ASSERT(db.DeleteRecords(tx, "id='rec-117'", nullptr) == false, "DeleteRecords unexpectedly succeeded without invalidation callback");
+			TEST_ASSERT(db.DeleteRecordsUnsafe(tx, "id='rec-117'", nullptr) == false, "DeleteRecordsUnsafe unexpectedly succeeded without invalidation callback");
 			TEST_ASSERT(tx.HasFailed() == true, "tx.HasFailed() was not set after missing callback!");
 			TEST_ASSERT(tx.Commit() == false, "tx.Commit() unexpectedly succeeded on failed transaction!");
 		}
@@ -664,10 +664,10 @@ int main() {
 		// 2. Bulk delete with explicit post-commit invalidation callback succeeds and clears cache
 		{
 			OpenWifi::DbTransaction tx(pool.get(), logger);
-			TEST_ASSERT(db.DeleteRecords(tx, "id='rec-117'", [&]() {
+			TEST_ASSERT(db.DeleteRecordsUnsafe(tx, "id='rec-117'", [&]() {
 				invalidationCallbackRan = true;
 				mockCache.Clear();
-			}) == true, "DeleteRecords failed with explicit invalidation callback");
+			}) == true, "DeleteRecordsUnsafe failed with explicit invalidation callback");
 			TEST_ASSERT(invalidationCallbackRan == false, "Invalidation callback ran BEFORE commit!");
 			TEST_ASSERT(tx.Commit() == true, "Commit failed for bulk delete");
 			TEST_ASSERT(invalidationCallbackRan == true, "Invalidation callback failed to run AFTER commit!");
@@ -695,10 +695,10 @@ int main() {
 		{
 			bool rollbackCallbackRan = false;
 			OpenWifi::DbTransaction tx(pool.get(), logger);
-			TEST_ASSERT(db.DeleteRecords(tx, "id='rec-118'", [&]() {
+			TEST_ASSERT(db.DeleteRecordsUnsafe(tx, "id='rec-118'", [&]() {
 				rollbackCallbackRan = true;
 				mockCache.Clear();
-			}) == true, "DeleteRecords failed");
+			}) == true, "DeleteRecordsUnsafe failed");
 
 			TEST_ASSERT(tx.Rollback() == true, "Rollback failed");
 			TEST_ASSERT(rollbackCallbackRan == false, "Callback unexpectedly ran after Rollback()!");
