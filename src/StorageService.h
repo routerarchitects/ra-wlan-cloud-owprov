@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "framework/DbTransaction.h"
 #include "framework/MicroServiceFuncs.h"
 #include "framework/StorageClass.h"
 #include "storage/storage_configurations.h"
@@ -74,6 +75,14 @@ namespace OpenWifi {
         inline OpenWifi::GLBLRCertsDB &GLBLRCertsDB() { return *GLBLRCertsDB_; }
         inline OpenWifi::OrionAccountsDB &OrionAccountsDB() { return *OrionAccountsDB_; }
         inline OpenWifi::RadiusEndpointDB &RadiusEndpointDB() { return *RadiusEndpointDB_; }
+
+		// Starts a caller-owned transaction using one pooled DB session.
+		// Caller Contract:
+		// - Keep transactions narrow and DB-only.
+		// - If any required transaction-aware ORM operation fails, caller must Rollback() or let the transaction exit scope.
+		[[nodiscard]] inline DbTransaction BeginTransaction() {
+			return DbTransaction(Pool().get(), Logger());
+		}
 
 		bool Validate(const Poco::URI::QueryParameters &P, RESTAPI::Errors::msg &Error);
 		bool Validate(const Types::StringVec &P, std::string &Error);
