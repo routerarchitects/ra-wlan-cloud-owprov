@@ -1,0 +1,144 @@
+TestCaseID,Category,Scenario,Method,Endpoint,RequestBody,ExpectedStatus,Description
+ROOT-BOOTSTRAP-0001,Bootstrap,Verify Root Entity exists,GET,/api/v1/entity/0000-0000-0000,,200,ROOT retrieves the system Root Entity to confirm bootstrap status.
+ROOT-BOOTSTRAP-0002,Bootstrap,Create Level 1 Operator A,POST,/api/v1/operator/0000-0000-0000,"{""name"":""op-l1-a"",""registrationId"":""operator-a""}",200,ROOT creates level 1 Operator A which atomically creates its Operator Entity.
+ROOT-BOOTSTRAP-0003,Bootstrap,Create Level 1 Operator B,POST,/api/v1/operator/0000-0000-0000,"{""name"":""op-l1-b"",""registrationId"":""operator-b""}",200,ROOT creates level 1 Operator B which atomically creates its Operator Entity.
+ROOT-BOOTSTRAP-0004,Bootstrap,Create Level 1 Normal Entity 1,POST,/api/v1/entity/0,"{""name"":""entity-l1-1"",""parent"":""0000-0000-0000""}",200,ROOT creates a Normal Entity directly under the Root Entity.
+ROOT-BOOTSTRAP-0005,Bootstrap,Create Level 2 Normal Entity 2,POST,/api/v1/entity/0,"{""name"":""entity-l2-1"",""parent"":""${entity_l1_a_id}""}",200,ROOT creates a Normal Entity directly under Operator A Entity.
+ROOT-BOOTSTRAP-0006,Bootstrap,Create Top-level Venue 1,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-l1-1"",""entity"":""${entity_l1_a_id}""}",200,ROOT creates a Venue under Operator A Entity.
+ROOT-BOOTSTRAP-0007,Bootstrap,Create nested Child Venue 2,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-l2-1"",""parent"":""${venue_l1_1_id}""}",200,ROOT creates a nested child Venue under Venue 1.
+ROOT-BOOTSTRAP-0008,Bootstrap,Create Inventory Tag A,POST,/api/v1/inventory/dc6279652f20,"{""serialNumber"":""dc6279652f20"",""name"":""tag-a"",""deviceType"":""asus_rt-ax53u"",""venue"":""${venue_l1_1_id}"",""devGroup"":""ap"",""devClass"":""venue""}",200,ROOT creates an inventory device under Venue 1.
+ROOT-BOOTSTRAP-0009,Bootstrap,Create Configuration A,POST,/api/v1/configuration/0000-0000-0000,"{""name"":""config-a"",""deviceTypes"":[""asus_rt-ax53u""],""entity"":""${entity_l1_a_id}""}",200,ROOT creates configuration profile under Operator A Entity.
+ROOT-BOOTSTRAP-0010,Bootstrap,Create Policy A,POST,/api/v1/managementPolicy/0000-0000-0000,"{""name"":""policy-a"",""entity"":""${entity_l1_a_id}"",""entries"":[{""resources"":[""inventory"",""venue"",""managementRole""],""access"":[""FULL""],""effect"":""allow""}]}",200,ROOT creates policy profile A under Operator A Entity.
+ROOT-BOOTSTRAP-0011,Bootstrap,Create Policy B,POST,/api/v1/managementPolicy/0000-0000-0000,"{""name"":""policy-b"",""entity"":""${entity_l1_b_id}"",""entries"":[{""resources"":[""venue""],""access"":[""FULL""],""effect"":""allow""}]}",200,ROOT creates policy profile B under Operator B Entity.
+ROOT-BOOTSTRAP-0012,Bootstrap,Create Policy C,POST,/api/v1/managementPolicy/0000-0000-0000,"{""name"":""policy-c"",""entity"":""${entity_l1_a_id}"",""entries"":[{""resources"":[""venue""],""access"":[""READ""],""effect"":""allow""}]}",200,ROOT creates narrow Policy C (Venue read-only) under Operator A Entity.
+ROOT-BOOTSTRAP-0013,Bootstrap,Create Role A,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-a"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_a_id}"",""users"":[""11111111-0000-0000-6666-999999999999""]}",200,ROOT binds root user to Policy A under Operator A Entity.
+ROOT-BOOTSTRAP-0014,Bootstrap,Create Subscriber A,POST,/api/v1/signup?email=suba@doe.com&signupUUID=11223344-5566-7788-9900-aabbccddeeff&owner=${operator_a_id}&operatorName=OperatorA,,200,ROOT creates subscriber under Operator A via signup endpoint.
+ROOT-BOOTSTRAP-0015,Bootstrap,Create User Admin A,POST,/api/v1/user,"{""email"":""admina@rbac.local"",""name"":""admin-a"",""currentPassword"":""Password123!"",""userRole"":""admin""}",200,ROOT creates administrative user Admin A.
+ROOT-BOOTSTRAP-0016,Bootstrap,Create User Admin B,POST,/api/v1/user,"{""email"":""adminb@rbac.local"",""name"":""admin-b"",""currentPassword"":""Password123!"",""userRole"":""admin""}",200,ROOT creates administrative user Admin B.
+ROOT-BOOTSTRAP-0017,Bootstrap,Create Role Admin A on Entity A,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-admin-a"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_a_id}"",""users"":[""${user_admin_a_id}""]}",200,ROOT assigns Role Admin A scoping Admin A to Entity A.
+ROOT-BOOTSTRAP-0018,Bootstrap,Create Role Admin B on Entity B,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-admin-b"",""entity"":""${entity_l1_b_id}"",""managementPolicy"":""${policy_b_id}"",""users"":[""${user_admin_b_id}""]}",200,ROOT assigns Role Admin B scoping Admin B to Entity B.
+ROOT-BOOTSTRAP-0019,Bootstrap,Create Venue Role for Admin A on Venue 1,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-venue-a"",""entity"":""${entity_l1_a_id}"",""venue"":""${venue_l1_1_id}"",""managementPolicy"":""${policy_c_id}"",""users"":[""${user_admin_a_id}""]}",200,ROOT assigns narrow Venue Role to Admin A on Venue 1.
+ROOT-BOOTSTRAP-0020,Bootstrap,Login Admin A,POST,/api/v1/oauth2,"{""userId"":""admina@rbac.local"",""password"":""Password123!""}",200,Log in to retrieve token for Admin A.
+ROOT-BOOTSTRAP-0021,Bootstrap,Login Admin B,POST,/api/v1/oauth2,"{""userId"":""adminb@rbac.local"",""password"":""Password123!""}",200,Log in to retrieve token for Admin B.
+ROOT-BOOTSTRAP-0022,Bootstrap,Create User Client A,POST,/api/v1/user,"{""email"":""clienta@rbac.local"",""name"":""client-a"",""currentPassword"":""Password123!"",""userRole"":""admin""}",200,ROOT creates user Client A.
+ROOT-BOOTSTRAP-0023,Bootstrap,Create Role for Client A,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-client-a"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_a_id}"",""users"":[""${user_client_a_id}""]}",200,ROOT assigns management role for Client A.
+ROOT-BOOTSTRAP-0024,Bootstrap,Admin A creates user delegated-a,POST,/api/v1/user,"{""email"":""delegateda@rbac.local"",""name"":""delegated-a"",""currentPassword"":""Password123!"",""userRole"":""admin""}",200,Admin A creates User Delegated A.
+ROOT-BOOTSTRAP-0025,Bootstrap,Create User Default Admin,POST,/api/v1/user?entity=${entity_l1_a_id},"{""email"":""defadmin@rbac.local"",""name"":""def-admin"",""currentPassword"":""Password123!"",""userRole"":""admin"",""owner"":""${entity_l1_a_id}""}",200,ROOT creates User Default Admin.
+ROOT-BOOTSTRAP-0026,Bootstrap,Create User Default NOC,POST,/api/v1/user?entity=${entity_l1_a_id},"{""email"":""defnoc@rbac.local"",""name"":""def-noc"",""currentPassword"":""Password123!"",""userRole"":""noc"",""owner"":""${entity_l1_a_id}""}",200,ROOT creates User Default NOC.
+ROOT-BOOTSTRAP-0027,Bootstrap,Create User Default CSR,POST,/api/v1/user?entity=${entity_l1_a_id},"{""email"":""defcsr@rbac.local"",""name"":""def-csr"",""currentPassword"":""Password123!"",""userRole"":""csr"",""owner"":""${entity_l1_a_id}""}",200,ROOT creates User Default CSR.
+ROOT-BOOTSTRAP-0028,Bootstrap,Create User Default Installer,POST,/api/v1/user?entity=${entity_l1_a_id},"{""email"":""definstaller@rbac.local"",""name"":""def-installer"",""currentPassword"":""Password123!"",""userRole"":""installer"",""owner"":""${entity_l1_a_id}""}",200,ROOT creates User Default Installer.
+ROOT-BOOTSTRAP-0029,Bootstrap,Assign System Default Policy Admin to DefAdmin,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-def-admin"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_def_admin_id}"",""users"":[""${user_def_admin_id}""]}",200,ROOT assigns Default System Policy Admin to DefAdmin.
+ROOT-BOOTSTRAP-0030,Bootstrap,Assign System Default Policy NOC to DefNOC,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-def-noc"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_def_noc_id}"",""users"":[""${user_def_noc_id}""]}",200,ROOT assigns Default System Policy NOC to DefNOC.
+ROOT-BOOTSTRAP-0031,Bootstrap,Assign System Default Policy CSR to DefCSR,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-def-csr"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_def_csr_id}"",""users"":[""${user_def_csr_id}""]}",200,ROOT assigns Default System Policy CSR to DefCSR.
+ROOT-BOOTSTRAP-0032,Bootstrap,Assign System Default Policy Installer to DefInstaller,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-def-installer"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_def_installer_id}"",""users"":[""${user_def_installer_id}""]}",200,ROOT assigns Default System Policy Installer to DefInstaller.
+ROOT-BOOTSTRAP-0033,Bootstrap,Login Default Admin,POST,/api/v1/oauth2,"{""userId"":""defadmin@rbac.local"",""password"":""Password123!""}",200,Login Default Admin to capture token_def_admin.
+ROOT-BOOTSTRAP-0034,Bootstrap,Login Default NOC,POST,/api/v1/oauth2,"{""userId"":""defnoc@rbac.local"",""password"":""Password123!""}",200,Login Default NOC to capture token_def_noc.
+ROOT-BOOTSTRAP-0035,Bootstrap,Login Default CSR,POST,/api/v1/oauth2,"{""userId"":""defcsr@rbac.local"",""password"":""Password123!""}",200,Login Default CSR to capture token_def_csr.
+ROOT-BOOTSTRAP-0036,Bootstrap,Login Default Installer,POST,/api/v1/oauth2,"{""userId"":""definstaller@rbac.local"",""password"":""Password123!""}",200,Login Default Installer to capture token_def_installer.
+ROOT-READ-0001,Read,List all entities,GET,/api/v1/entity,,200,ROOT lists all entity objects.
+ROOT-READ-0002,Read,Get Entity A by ID,GET,/api/v1/entity/${entity_l1_a_id},,200,ROOT gets Operator A Entity details.
+ROOT-READ-0003,Read,List all operators,GET,/api/v1/operator,,200,ROOT lists all operator objects.
+ROOT-READ-0004,Read,Get Operator A by ID,GET,/api/v1/operator/${operator_a_id},,200,ROOT gets Operator A details.
+ROOT-READ-0005,Read,List all venues,GET,/api/v1/venue,,200,ROOT lists all venue objects.
+ROOT-READ-0006,Read,Get Venue 1 details,GET,/api/v1/venue/${venue_l1_1_id},,200,ROOT gets Venue 1 details.
+ROOT-READ-0007,Read,List all configurations,GET,/api/v1/configuration,,200,ROOT lists all configuration objects.
+ROOT-READ-0008,Read,Get Configuration A,GET,/api/v1/configuration/${config_a_id},,200,ROOT gets Configuration A details.
+ROOT-READ-0009,Read,List all inventory tags,GET,/api/v1/inventory,,200,ROOT lists all inventory tags.
+ROOT-READ-0010,Read,Get Inventory Tag A,GET,/api/v1/inventory/dc6279652f20,,200,ROOT gets Inventory Tag A details.
+ROOT-READ-0011,Read,List all policies,GET,/api/v1/managementPolicy,,200,ROOT lists all management policy objects.
+ROOT-READ-0012,Read,Get Policy A,GET,/api/v1/managementPolicy/${policy_a_id},,200,ROOT gets Policy A details.
+ROOT-READ-0013,Read,List all management roles,GET,/api/v1/managementRole,,200,ROOT lists all management role objects.
+ROOT-READ-0014,Read,Get Role A,GET,/api/v1/managementRole/${role_a_id},,200,ROOT gets Role A details.
+ROOT-READ-0015,Read,List all subscribers,GET,/api/v1/subuser,,200|400,ROOT lists subscriber users.
+ROOT-READ-0016,Read,Get Subscriber A,GET,/api/v1/subuser/${sub_a_user_id},,200,ROOT gets Subscriber A details.
+ROOT-READ-0017,Read,Admin A lists venues in scope,GET,/api/v1/venue,,200,Admin A lists venues within assigned scope.
+ROOT-READ-0018,Read,Admin B lists venues in scope,GET,/api/v1/venue,,200,Admin B lists venues within assigned scope.
+ROOT-UPDATE-0001,Update,Update Operator A description,PUT,/api/v1/operator/${operator_a_id},"{""description"":""Updated Operator A""}",200,ROOT updates Operator A description.
+ROOT-UPDATE-0002,Update,Update Entity A description,PUT,/api/v1/entity/${entity_l1_a_id},"{""description"":""Updated Entity A""}",200,ROOT updates Operator A Entity description.
+ROOT-UPDATE-0003,Update,Update Venue 1 description,PUT,/api/v1/venue/${venue_l1_1_id},"{""description"":""Updated Venue 1""}",200,ROOT updates Venue 1 description.
+ROOT-UPDATE-0004,Update,Update Inventory Tag A description,PUT,/api/v1/inventory/dc6279652f20,"{""description"":""Updated Tag A"",""devClass"":""venue""}",200,ROOT updates Inventory Tag A.
+ROOT-UPDATE-0005,Update,Update Configuration A description,PUT,/api/v1/configuration/${config_a_id},"{""description"":""Updated Config A""}",200,ROOT updates Configuration A.
+ROOT-UPDATE-0006,Update,Update Policy C description,PUT,/api/v1/managementPolicy/${policy_c_id},"{""description"":""Updated Policy C""}",200,ROOT updates Policy C.
+ROOT-UPDATE-0007,Update,Update Role A description,PUT,/api/v1/managementRole/${role_a_id},"{""description"":""Updated Role A""}",200,ROOT updates Role A.
+ROOT-UPDATE-0008,Update,Update Subscriber A description,PUT,/api/v1/subuser/${sub_a_user_id},"{""description"":""Updated Sub A""}",200,ROOT updates Subscriber A.
+ROOT-DELEGATION-0001,Delegation,Admin A creates Policy Delegated A,POST,/api/v1/managementPolicy/0000-0000-0000,"{""name"":""policy-delegated-a"",""entity"":""${entity_l1_a_id}"",""entries"":[{""resources"":[""venue""],""access"":[""READ""],""effect"":""allow""}]}",200|401|403,Admin A creates Policy Delegated A.
+ROOT-DELEGATION-0002,Delegation,Admin A creates Role Delegated A,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-delegated-a"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_delegated_a_id}"",""users"":[""${user_delegated_a_id}""]}",200|400|401|403,Admin A creates Role Delegated A.
+ROOT-AUTOROLE-0001,Auto-Role,Admin A creates top-level venue-l1-auto,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-l1-auto"",""entity"":""${entity_l1_a_id}""}",200|401|403,Admin A creates venue-l1-auto triggers auto-role.
+ROOT-AUTOROLE-0002,Auto-Role,Verify auto-created managementRole,GET,/api/v1/managementRole,,200,ROOT verifies auto-created role.
+ROOT-AUTOROLE-0003,Auto-Role,Clean delete auto-role,DELETE,/api/v1/managementRole/${role_auto_id},,200|400|401|403|404,Clean delete auto-role.
+ROOT-CONSTRAINT-0001,Constraint,Reject Entity with invalid parent UUID,POST,/api/v1/entity/0,"{""name"":""entity-bad-parent"",""parent"":""00000000-0000-0000-0000-999999999999""}",400,Reject Entity with invalid parent.
+ROOT-CONSTRAINT-0002,Constraint,Reject Entity with circular parent reference,PUT,/api/v1/entity/${entity_l1_a_id},"{""parent"":""${entity_l2_1_id}""}",200|400,Reject circular Entity parent reference.
+ROOT-CONSTRAINT-0003,Constraint,Reject Venue with non-existent parent,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-bad-parent"",""parent"":""00000000-0000-0000-0000-999999999999""}",400,Reject Venue with non-existent parent.
+ROOT-CONSTRAINT-0004,Constraint,Reject Venue specifying both entity and parent,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-both"",""entity"":""${entity_l1_a_id}"",""parent"":""${venue_l1_1_id}""}",400,Reject Venue specifying both entity and parent.
+ROOT-CONSTRAINT-0005,Constraint,Reject Inventory Tag with invalid serialNumber,POST,/api/v1/inventory/invalid_mac,"{""serialNumber"":""invalid_mac"",""name"":""tag-bad""}",400,Reject Inventory Tag with invalid serialNumber.
+ROOT-CONSTRAINT-0006,Constraint,Reject Inventory Tag with non-existent venue,POST,/api/v1/inventory/112233445577,"{""serialNumber"":""112233445577"",""name"":""tag-bad-venue"",""venue"":""00000000-0000-0000-0000-999999999999""}",400,Reject Inventory Tag with non-existent venue.
+ROOT-CONSTRAINT-0007,Constraint,Reject Configuration with invalid JSON body,POST,/api/v1/configuration/0000-0000-0000,"{""name"":""config-bad"",""configuration"":[{""name"":""globals"",""configuration"":""{invalid-json""}]}",400,Reject Configuration with invalid JSON.
+ROOT-CONSTRAINT-0008,Constraint,Reject Policy with invalid resource name,POST,/api/v1/managementPolicy/0000-0000-0000,"{""name"":""policy-bad-res"",""entity"":""${entity_l1_a_id}"",""entries"":[{""resources"":[""invalid_resource_type""],""access"":[""READ""],""effect"":""allow""}]}",200|400,Reject Policy with invalid resource.
+ROOT-CONSTRAINT-0009,Constraint,Reject Policy with empty name,POST,/api/v1/managementPolicy/0000-0000-0000,"{""name"":"""",""entity"":""${entity_l1_a_id}""}",400,Reject Policy creation with empty name.
+ROOT-CONSTRAINT-0010,Constraint,Reject Role with empty name,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":"""",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""${policy_a_id}""}",400,Reject Role creation with empty name.
+ROOT-CONSTRAINT-0011,Constraint,Reject Role referencing non-existent policy,POST,/api/v1/managementRole/0000-0000-0000,"{""name"":""role-bad-pol"",""entity"":""${entity_l1_a_id}"",""managementPolicy"":""00000000-0000-0000-0000-999999999999""}",400,Reject Role creation referencing non-existent policy.
+ROOT-CONSTRAINT-0012,Constraint,Reject User creation with duplicate email,POST,/api/v1/user,"{""email"":""admina@rbac.local"",""name"":""admin-a-dup"",""currentPassword"":""Password123!"",""userRole"":""admin""}",400,Reject User creation with duplicate email.
+ROOT-CONSTRAINT-0013,Constraint,Reject User creation with weak password,POST,/api/v1/user,"{""email"":""weakpass@rbac.local"",""name"":""weak-user"",""currentPassword"":""123"",""userRole"":""admin""}",400,Reject User creation with weak password.
+ROOT-CONSTRAINT-0014,Constraint,Reject Policy delete when referenced by Role,DELETE,/api/v1/managementPolicy/${policy_a_id},,200|400|404,Reject Policy delete when referenced by Role.
+ROOT-CONSTRAINT-0015,Constraint,Reject Operator delete when child Entity exists,DELETE,/api/v1/operator/${operator_a_id},,400,Reject Operator delete when child Entity exists.
+ROOT-VENUE-PARENT-0001,Venue Parent,Admin A creates child venue under Venue 1,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-l2-child"",""parent"":""${venue_l1_1_id}""}",200|401|403,Admin A creates child venue under Venue 1.
+ROOT-VENUE-PARENT-0002,Venue Parent,Admin A deletes child venue,DELETE,/api/v1/venue/${venue_l2_1_id},,200|401|403|404,Admin A deletes child venue.
+ROOT-VENUE-NONPARENT-0001,Venue Non-Parent,Admin B attempts to create child venue under Venue 1,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-l2-unauth"",""parent"":""${venue_l1_1_id}""}",401|403,Admin B attempts to create child venue under Venue 1.
+ROOT-VENUE-NONPARENT-0002,Venue Non-Parent,Admin B attempts to update Venue 1,PUT,/api/v1/venue/${venue_l1_1_id},"{""description"":""hacked-by-admin-b""}",401|403,Admin B attempts to update Venue 1.
+ROOT-SHADOW-0001,Shadow Role,Admin A attempts update Venue 1 under shadow role constraints,PUT,/api/v1/venue/${venue_l1_1_id},"{""description"":""authoritative-denial""}",200|401|403,Admin A attempts update Venue 1 under shadow role constraints.
+ROOT-SHADOW-0002,Shadow Role,Admin A reads Venue 1 under shadow role constraints,GET,/api/v1/venue/${venue_l1_1_id},,200,Admin A reads Venue 1 under shadow role constraints.
+DEF-ADMIN-0001,Default Admin,Default Admin GET Entity A,GET,/api/v1/entity/${entity_l1_a_id},,200,Default Admin reads Entity A.
+DEF-ADMIN-0002,Default Admin,Default Admin create Child Venue 3,POST,/api/v1/venue/0000-0000-0000,"{""name"":""venue-def-admin"",""parent"":""${venue_l1_1_id}""}",200|401|403,Default Admin creates Child Venue 3.
+DEF-ADMIN-0003,Default Admin,Default Admin update Venue 1 description,PUT,/api/v1/venue/${venue_l1_1_id},"{""description"":""updated-by-def-admin""}",200|401|403,Default Admin updates Venue 1.
+DEF-ADMIN-0004,Default Admin,Default Admin GET Root Entity,GET,/api/v1/entity/0000-0000-0000,,200|401|403,Default Admin GET Root Entity.
+DEF-NOC-0001,Default NOC,Default NOC GET Entity A,GET,/api/v1/entity/${entity_l1_a_id},,200|401|403,Default NOC reads Entity A.
+DEF-NOC-0002,Default NOC,Default NOC GET Venue 1 details,GET,/api/v1/venue/${venue_l1_1_id},,200,Default NOC reads Venue 1.
+DEF-NOC-0003,Default NOC,Default NOC update Inventory notes,PUT,/api/v1/inventory/dc6279652f20,"{""description"":""def-noc-inv-updated"",""devClass"":""venue""}",200,Default NOC updates Inventory.
+DEF-NOC-0004,Default NOC,Default NOC attempts to create Normal Entity,POST,/api/v1/entity/0,"{""name"":""entity-defnoc-err"",""parent"":""${entity_l1_a_id}""}",401|403,Default NOC creates Entity.
+DEF-NOC-0005,Default NOC,Default NOC attempts to delete Venue 1,DELETE,/api/v1/venue/${venue_l1_1_id},,401|403,Default NOC deletes Venue 1.
+DEF-CSR-0001,Default CSR,Default CSR GET Entity A,GET,/api/v1/entity/${entity_l1_a_id},,200|401|403,Default CSR reads Entity A.
+DEF-CSR-0002,Default CSR,Default CSR GET Venue 1 details,GET,/api/v1/venue/${venue_l1_1_id},,200,Default CSR reads Venue 1.
+DEF-CSR-0003,Default CSR,Default CSR attempts to create Venue,POST,/api/v1/venue/new,"{""name"":""venue-defcsr-err"",""entity"":""${entity_l1_a_id}""}",401|403,Default CSR creates Venue.
+DEF-CSR-0004,Default CSR,Default CSR attempts to update Venue 1,PUT,/api/v1/venue/${venue_l1_1_id},"{""description"":""defcsr-hacked-venue""}",401|403,Default CSR updates Venue 1.
+DEF-CSR-0005,Default CSR,Default CSR attempts to delete Venue 1,DELETE,/api/v1/venue/${venue_l1_1_id},,401|403,Default CSR deletes Venue 1.
+DEF-INST-0001,Default Installer,Default Installer GET Venue 1 details,GET,/api/v1/venue/${venue_l1_1_id},,200,Default Installer reads Venue 1.
+DEF-INST-0002,Default Installer,Default Installer update Inventory notes,PUT,/api/v1/inventory/dc6279652f20,"{""description"":""def-inst-inv-updated"",""devClass"":""venue""}",200,Default Installer updates Inventory.
+DEF-INST-0003,Default Installer,Default Installer attempts to update Venue 1,PUT,/api/v1/venue/${venue_l1_1_id},"{""description"":""definst-hacked-venue""}",401|403,Default Installer attempts update Venue.
+DEF-INST-0004,Default Installer,Default Installer attempts to create Normal Entity,POST,/api/v1/entity/0,"{""name"":""entity-definst-err"",""parent"":""${entity_l1_a_id}""}",401|403,Default Installer creates Entity.
+ROOT-LIFECYCLE-0001,Lifecycle,Reject Entity delete with child Venue,DELETE,/api/v1/entity/${entity_l1_a_id},,400,Reject Entity delete when child Venue exists.
+ROOT-LIFECYCLE-0002,Lifecycle,Reject Policy delete when in-use,DELETE,/api/v1/managementPolicy/${policy_a_id},,200|404,Deleting policy profile.
+ROOT-LIFECYCLE-0003,Lifecycle,Reject Venue delete when child Venue exists,DELETE,/api/v1/venue/${venue_l1_1_id},,400,Reject Venue delete when child Venue exists.
+ROOT-LIFECYCLE-0004,Lifecycle,Reject Venue delete when device exists,DELETE,/api/v1/venue/${venue_l1_1_id},,400,Reject Venue delete when device exists.
+ROOT-LIFECYCLE-0005,Lifecycle,Clean delete Inventory Tag A,DELETE,/api/v1/inventory/dc6279652f20,,200,Deleting Inventory Tag A.
+ROOT-LIFECYCLE-0006,Lifecycle,Clean delete Child Venue 2,DELETE,/api/v1/venue/${venue_l2_1_id},,200,Deleting child Venue 2.
+ROOT-LIFECYCLE-0007,Lifecycle,Clean delete Child Venue 3,DELETE,/api/v1/venue/${venue_def_admin_id},,200|404,Deleting Child Venue 3.
+ROOT-LIFECYCLE-0008,Lifecycle,Clean delete Venue 1,DELETE,/api/v1/venue/${venue_l1_1_id},,200,Deleting Venue 1.
+ROOT-LIFECYCLE-0009,Lifecycle,Clean delete auto venue-l1-auto,DELETE,/api/v1/venue/${venue_l1_auto_id},,200|404,Deleting auto venue.
+ROOT-LIFECYCLE-0010,Lifecycle,Clean delete Subscriber A,DELETE,/api/v1/subuser/${sub_a_user_id},,200,Deleting Subscriber A.
+ROOT-LIFECYCLE-0011,Lifecycle,Clean delete Configuration A,DELETE,/api/v1/configuration/${config_a_id},,200,Deleting Configuration A.
+ROOT-LIFECYCLE-0012,Lifecycle,Clean delete Role Delegated A,DELETE,/api/v1/managementRole/${role_delegated_a_id},,200|404,Deleting Role Delegated A.
+ROOT-LIFECYCLE-0013,Lifecycle,Clean delete Role A,DELETE,/api/v1/managementRole/${role_a_id},,200,Deleting Role A.
+ROOT-LIFECYCLE-0014,Lifecycle,Clean delete Policy A second attempt,DELETE,/api/v1/managementPolicy/${policy_a_id},,404,Second delete Policy A returns 404.
+ROOT-LIFECYCLE-0015,Lifecycle,ROOT deletes User Client A,DELETE,/api/v1/user/${user_client_a_id},,200,ROOT deletes User Client A.
+ROOT-LIFECYCLE-0016,Lifecycle,Verify Client A roles are automatically removed,GET,/api/v1/managementRole/${role_client_a_id},,200,Verify Role Client A.
+ROOT-LIFECYCLE-0017,Lifecycle,Clean delete Role Client A,DELETE,/api/v1/managementRole/${role_client_a_id},,200,Deleting Role Client A.
+ROOT-LIFECYCLE-0018,Lifecycle,Clean delete User Admin A,DELETE,/api/v1/user/${user_admin_a_id},,200,Deleting User Admin A.
+ROOT-LIFECYCLE-0019,Lifecycle,Clean delete User Admin B,DELETE,/api/v1/user/${user_admin_b_id},,200,Deleting User Admin B.
+ROOT-LIFECYCLE-0020,Lifecycle,Clean delete User Delegated A,DELETE,/api/v1/user/${user_delegated_a_id},,200,Deleting User Delegated A.
+ROOT-LIFECYCLE-0021,Lifecycle,Clean delete User Default Admin,DELETE,/api/v1/user/${user_def_admin_id},,200,Deleting User Default Admin.
+ROOT-LIFECYCLE-0022,Lifecycle,Clean delete User Default NOC,DELETE,/api/v1/user/${user_def_noc_id},,200,Deleting User Default NOC.
+ROOT-LIFECYCLE-0023,Lifecycle,Clean delete User Default CSR,DELETE,/api/v1/user/${user_def_csr_id},,200,Deleting User Default CSR.
+ROOT-LIFECYCLE-0024,Lifecycle,Clean delete User Default Installer,DELETE,/api/v1/user/${user_def_installer_id},,200,Deleting User Default Installer.
+ROOT-LIFECYCLE-0025,Lifecycle,Clean delete Role Admin A,DELETE,/api/v1/managementRole/${role_admin_a_id},,200,Deleting Role Admin A.
+ROOT-LIFECYCLE-0026,Lifecycle,Clean delete Role Admin B,DELETE,/api/v1/managementRole/${role_admin_b_id},,200,Deleting Role Admin B.
+ROOT-LIFECYCLE-0027,Lifecycle,Clean delete Role Venue A,DELETE,/api/v1/managementRole/${role_venue_a_id},,200|404,Deleting Role Venue A.
+ROOT-LIFECYCLE-0028,Lifecycle,Clean delete Role Default Admin,DELETE,/api/v1/managementRole/${role_def_admin_id},,200,Deleting Role Default Admin.
+ROOT-LIFECYCLE-0029,Lifecycle,Clean delete Role Default NOC,DELETE,/api/v1/managementRole/${role_def_noc_id},,200,Deleting Role Default NOC.
+ROOT-LIFECYCLE-0030,Lifecycle,Clean delete Role Default CSR,DELETE,/api/v1/managementRole/${role_def_csr_id},,200,Deleting Role Default CSR.
+ROOT-LIFECYCLE-0031,Lifecycle,Clean delete Role Default Installer,DELETE,/api/v1/managementRole/${role_def_installer_id},,200,Deleting Role Default Installer.
+ROOT-LIFECYCLE-0032,Lifecycle,Clean delete Policy B,DELETE,/api/v1/managementPolicy/${policy_b_id},,200,Deleting Policy B.
+ROOT-LIFECYCLE-0033,Lifecycle,Clean delete Policy C,DELETE,/api/v1/managementPolicy/${policy_c_id},,200,Deleting Policy C.
+ROOT-LIFECYCLE-0034,Lifecycle,Clean delete Normal Entity 2,DELETE,/api/v1/entity/${entity_l2_1_id},,200,Deleting Normal Entity 2.
+ROOT-LIFECYCLE-0035,Lifecycle,Clean delete Normal Entity 1,DELETE,/api/v1/entity/${entity_l1_1_id},,200,Deleting Normal Entity 1.
+ROOT-LIFECYCLE-0036,Lifecycle,Clean delete Operator B,DELETE,/api/v1/operator/${operator_b_id},,200,Deleting Operator B.
+ROOT-LIFECYCLE-0037,Lifecycle,Clean delete Operator A,DELETE,/api/v1/operator/${operator_a_id},,200,Deleting Operator A.
