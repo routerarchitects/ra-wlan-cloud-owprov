@@ -1091,12 +1091,34 @@ namespace ORM {
 		}
 
 		// Transaction-aware read overloads for caller-owned transactions.
-		// Delegates execution to the session active within tx.
+		// - 0 rows returned: normal "not found", returns false, transaction remains valid.
+		// - DB/statement exception: returns false and marks tx failed, forcing rollback.
 
 		template <typename T>
 		bool GetRecord(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
 		               RecordType &R) {
-			return GetRecord(tx.Session(), FieldName, Value, R);
+			try {
+				assert(ValidFieldName(FieldName));
+				Poco::Data::Statement Select(tx.Session());
+				RecordTuple RT;
+				std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " + FieldName + "=? limit 1";
+				auto tValue{Value};
+				Select << ConvertParams(St), Poco::Data::Keywords::into(RT), Poco::Data::Keywords::use(tValue);
+				if (Select.execute() == 1) {
+					Convert(RT, R);
+					return true;
+				}
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("GetRecord failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("GetRecord failed: unknown exception");
+				tx.MarkFailed();
+			}
+			return false;
 		}
 
 		bool GetRecords(OpenWifi::DbTransaction &tx,
@@ -1105,11 +1127,34 @@ namespace ORM {
 		                RecordVec &Records,
 		                const std::string &Where = "",
 		                const std::string &OrderBy = "") {
-			return GetRecords(tx.Session(), Offset, HowMany, Records, Where, OrderBy);
+			try {
+				Poco::Data::Statement Select(tx.Session());
+				RecordList RL;
+				std::string St = "select " + SelectFields_ + " from " + TableName_ + (Where.empty() ? "" : " where " + Where) + OrderBy + ComputeRange(Offset, HowMany);
+				Select << St, Poco::Data::Keywords::into(RL);
+				Select.execute();
+				if (Select.rowsExtracted() > 0) {
+					for (auto &i : RL) {
+						RecordType R;
+						Convert(i, R);
+						Records.emplace_back(R);
+					}
+					return true;
+				}
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("GetRecords failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("GetRecords failed: unknown exception");
+				tx.MarkFailed();
+			}
+			return false;
 		}
 
 		// Transaction-aware ORM operations for caller-owned transactions.
-		// - Reads delegate to tx.Session() without marking failure on record-not-found.
 		// - Failing write operations mark tx failed so tx.Commit() enforces rollback.
 		// - Writes perform post-commit cache invalidation rather than direct mutation.
 		bool CreateRecord(OpenWifi::DbTransaction &tx, const RecordType &R,

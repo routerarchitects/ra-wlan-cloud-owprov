@@ -136,8 +136,10 @@ void ORM::DB<OpenWifi::TestRecordTuple, OpenWifi::TestRecord>::Convert(
 
 class TestDB : public ORM::DB<OpenWifi::TestRecordTuple, OpenWifi::TestRecord> {
   public:
-	TestDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L, ORM::DBCache<OpenWifi::TestRecord> *Cache = nullptr)
-		: DB(T, "test_records",
+	TestDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+	       ORM::DBCache<OpenWifi::TestRecord> *Cache = nullptr,
+	       const char *TableName = "test_records")
+		: DB(T, TableName,
 			 ORM::FieldVec{
 				 ORM::Field{"id", ORM::FieldType::FT_TEXT, 0, true},
 				 ORM::Field{"name", ORM::FieldType::FT_TEXT},
@@ -732,6 +734,79 @@ int main() {
 			OpenWifi::TestRecord checkS;
 			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-119", checkS) == false, "recS exists in DB after failed transaction commit attempt");
 		}
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test 14: Transactional Read — Not-Found vs. DB Error Transaction Poisoning
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test 14: Transactional Read Not-Found vs. DB Error Transaction Poisoning... " << std::flush;
+
+		// Part 1: GetRecord(tx) not-found returns false but leaves tx healthy for commit.
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recT{"rec-200", "Record T", "Val T"};
+			TEST_ASSERT(db.CreateRecord(tx, recT) == true, "CreateRecord recT failed");
+
+			OpenWifi::TestRecord notFound;
+			const bool found = db.GetRecord(tx, "id", std::string("non-existent-id"), notFound);
+			TEST_ASSERT(found == false, "GetRecord(tx) unexpectedly returned true for non-existent record");
+			TEST_ASSERT(tx.HasFailed() == false, "tx.HasFailed() was set after normal not-found GetRecord(tx)!");
+			TEST_ASSERT(tx.Commit() == true, "tx.Commit() failed after not-found GetRecord(tx)!");
+
+			auto verifySession = pool.get();
+			OpenWifi::TestRecord checkT;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-200", checkT) == true, "recT missing from DB after commit");
+		}
+
+		// Part 2: GetRecord(tx) DB/statement exception marks tx failed and causes tx.Commit() to refuse.
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recU{"rec-201", "Record U", "Val U"};
+			TEST_ASSERT(db.CreateRecord(tx, recU) == true, "CreateRecord recU failed");
+
+			TestDB badDb(OpenWifi::DBType::sqlite, pool, logger, nullptr, "nonexistent_table_xyz");
+			OpenWifi::TestRecord badRec;
+			const bool found = badDb.GetRecord(tx, "id", std::string("rec-xyz"), badRec);
+			TEST_ASSERT(found == false, "GetRecord(tx) on bad DB unexpectedly returned true");
+			TEST_ASSERT(tx.HasFailed() == true, "tx.HasFailed() was not set by GetRecord(tx) catch block on DB exception!");
+			TEST_ASSERT(tx.Commit() == false, "tx.Commit() succeeded despite tx being marked failed from GetRecord(tx) error!");
+
+			auto verifySession = pool.get();
+			OpenWifi::TestRecord checkU;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-201", checkU) == false, "recU exists in DB after transactional read failure rollback");
+		}
+
+		// Part 3: GetRecords(tx) DB/statement exception also marks tx failed and causes tx.Commit() to refuse.
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			TestDB badDb(OpenWifi::DBType::sqlite, pool, logger, nullptr, "nonexistent_table_xyz");
+			std::vector<OpenWifi::TestRecord> records;
+			const bool found = badDb.GetRecords(tx, 0, 10, records);
+			TEST_ASSERT(found == false, "GetRecords(tx) on bad DB unexpectedly returned true");
+			TEST_ASSERT(tx.HasFailed() == true, "tx.HasFailed() was not set by GetRecords(tx) catch block on DB exception!");
+			TEST_ASSERT(tx.Commit() == false, "tx.Commit() succeeded despite tx being marked failed from GetRecords(tx) error!");
+		}
+
+		// Part 4: GetRecords(tx) empty result returns false but leaves tx healthy for commit.
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::TestRecord recV{"rec-202", "Record V", "Val V"};
+			TEST_ASSERT(db.CreateRecord(tx, recV) == true, "CreateRecord recV failed");
+
+			std::vector<OpenWifi::TestRecord> records;
+			const bool found = db.GetRecords(tx, 100000, 10, records);
+			TEST_ASSERT(found == false, "GetRecords(tx) unexpectedly returned true for empty result set");
+			TEST_ASSERT(records.empty(), "GetRecords(tx) populated records for empty result set");
+			TEST_ASSERT(tx.HasFailed() == false, "tx.HasFailed() was set after normal empty GetRecords(tx)!");
+			TEST_ASSERT(tx.Commit() == true, "tx.Commit() failed after empty GetRecords(tx)!");
+
+			auto verifySession = pool.get();
+			OpenWifi::TestRecord checkV;
+			TEST_ASSERT(db.GetRecord(verifySession, "id", "rec-202", checkV) == true, "recV missing from DB after commit");
+		}
+
 		std::cout << "PASSED" << std::endl;
 	}
 
