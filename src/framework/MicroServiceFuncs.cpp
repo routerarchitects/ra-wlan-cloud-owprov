@@ -138,4 +138,16 @@ namespace OpenWifi {
         return MicroService::instance().GetPrivateEndPointServiceKey(servicePrivateEndPoint);
     }
 
+	std::string MicroServiceRuntimeIncarnationId() {
+		return MicroService::instance().RuntimeIncarnationId();
+	}
+
+	std::string MicroServiceSlotId() {
+		return MicroService::instance().SlotId();
+	}
+
+	std::string MicroServiceRuntimeInstanceId() {
+		return MicroService::instance().InstanceId();
+	}
+
 } // namespace OpenWifi

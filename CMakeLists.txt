@@ -256,4 +256,12 @@ target_link_libraries(db_transaction_test PRIVATE
 enable_testing()
 add_test(NAME db_transaction_test COMMAND db_transaction_test)
 
+add_executable(instance_identity_test
+        tests/framework_tests/InstanceIdentity_test.cpp
+)
+target_link_libraries(instance_identity_test PRIVATE
+        ${Poco_LIBRARIES})
+
+add_test(NAME instance_identity_test COMMAND instance_identity_test)
+
 
