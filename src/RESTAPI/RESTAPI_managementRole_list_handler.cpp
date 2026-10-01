@@ -51,22 +51,6 @@ namespace OpenWifi {
 				ProvObjects::ManagementRoleVec EmptyRoles;
 				return MakeJSONObjectArray("roles", EmptyRoles, *this);
 			}
-
-			if (!entityParam.empty() && !AllowedEntities.count(entityParam)) {
-				if (QB_.CountOnly) {
-					return ReturnCountOnly(0);
-				}
-				ProvObjects::ManagementRoleVec EmptyRoles;
-				return MakeJSONObjectArray("roles", EmptyRoles, *this);
-			}
-
-			if (!venueParam.empty() && !AllowedVenues.count(venueParam)) {
-				if (QB_.CountOnly) {
-					return ReturnCountOnly(0);
-				}
-				ProvObjects::ManagementRoleVec EmptyRoles;
-				return MakeJSONObjectArray("roles", EmptyRoles, *this);
-			}
 		}
 
 		if (!userParam.empty()) {
@@ -107,7 +91,7 @@ namespace OpenWifi {
 				Where += " AND venue='" + venueParam + "'";
 			}
 
-			if (!isRoot && entityParam.empty() && venueParam.empty()) {
+			if (!isRoot) {
 				auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
 					if (ids.empty()) return "";
 					std::string res = field + " IN (";

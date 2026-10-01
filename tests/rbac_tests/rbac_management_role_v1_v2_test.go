@@ -909,6 +909,20 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Positive: Entity-scoped user can query venue-filtered role under their entity", func(t *testing.T) {
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		if tokenAdminA == "" {
+			t.Skip("TOKEN_ADMIN_OPERATOR_A not provided; skipping entity-scoped query test")
+		}
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s", fixtures.policyValid, fixtures.venueA1), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&venue failed for entity admin: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for entity admin querying venue in their entity, got %d. Body: %s", status, string(body))
+		}
+	})
+
 	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
 		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
 		if err != nil {
