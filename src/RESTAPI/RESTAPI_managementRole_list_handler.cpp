@@ -53,27 +53,64 @@ namespace OpenWifi {
 			}
 		}
 
+		std::string Where;
+		if (!policyParam.empty()) {
+			Where = "managementPolicy='" + policyParam + "'";
+		}
+		if (!entityParam.empty()) {
+			if (!Where.empty()) {
+				Where += " AND ";
+			}
+			Where += "entity='" + entityParam + "'";
+		}
+		if (!venueParam.empty()) {
+			if (!Where.empty()) {
+				Where += " AND ";
+			}
+			Where += "venue='" + venueParam + "'";
+		}
+
+		if (!isRoot) {
+			auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+				if (ids.empty()) return "";
+				std::string res = field + " IN (";
+				bool first = true;
+				for (const auto &id : ids) {
+					if (!first) res += ",";
+					res += "'" + ORM::Escape(id) + "'";
+					first = false;
+				}
+				res += ")";
+				return res;
+			};
+
+			std::string entityClause = makeInClause("entity", AllowedEntities);
+			std::string venueClause = makeInClause("venue", AllowedVenues);
+			std::string rbacClause;
+			if (!entityClause.empty() && !venueClause.empty()) {
+				rbacClause = "(" + entityClause + " OR " + venueClause + ")";
+			} else if (!entityClause.empty()) {
+				rbacClause = entityClause;
+			} else if (!venueClause.empty()) {
+				rbacClause = venueClause;
+			}
+			if (!rbacClause.empty()) {
+				if (!Where.empty()) {
+					Where += " AND ";
+				}
+				Where += rbacClause;
+			}
+		}
+
 		if (!userParam.empty()) {
 			ProvObjects::ManagementRoleVec Roles;
 			auto lambda = [&](const ProvObjects::ManagementRole &role) {
-				if (!policyParam.empty() && role.managementPolicy != policyParam) {
-					return true;
-				}
-				if (!entityParam.empty() && role.entity != entityParam) {
-					return true;
-				}
-				if (!venueParam.empty() && role.venue != venueParam) {
-					return true;
-				}
-				if (std::find(role.users.begin(), role.users.end(), userParam) == role.users.end()) {
-					return true;
-				}
-				if (isRoot || AllowedEntities.count(role.entity) || AllowedVenues.count(role.venue)) {
+				if (std::find(role.users.begin(), role.users.end(), userParam) != role.users.end()) {
 					Roles.push_back(role);
 				}
 				return true;
 			};
-			DB_.Iterate(lambda);
+			DB_.Iterate(lambda, Where);
 
 			if (QB_.CountOnly) {
 				return ReturnCountOnly(Roles.size());
@@ -83,39 +120,6 @@ namespace OpenWifi {
 		}
 
 		if (!policyParam.empty()) {
-			std::string Where = " managementPolicy='" + policyParam + "'";
-			if (!entityParam.empty()) {
-				Where += " AND entity='" + entityParam + "'";
-			}
-			if (!venueParam.empty()) {
-				Where += " AND venue='" + venueParam + "'";
-			}
-
-			if (!isRoot) {
-				auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
-					if (ids.empty()) return "";
-					std::string res = field + " IN (";
-					bool first = true;
-					for (const auto &id : ids) {
-						if (!first) res += ",";
-						res += "'" + ORM::Escape(id) + "'";
-						first = false;
-					}
-					res += ")";
-					return res;
-				};
-
-				std::string entityClause = makeInClause("entity", AllowedEntities);
-				std::string venueClause = makeInClause("venue", AllowedVenues);
-				if (!entityClause.empty() && !venueClause.empty()) {
-					Where += " AND (" + entityClause + " OR " + venueClause + ")";
-				} else if (!entityClause.empty()) {
-					Where += " AND " + entityClause;
-				} else if (!venueClause.empty()) {
-					Where += " AND " + venueClause;
-				}
-			}
-
 			if (QB_.CountOnly) {
 				auto C = DB_.Count(Where);
 				return ReturnCountOnly(C);

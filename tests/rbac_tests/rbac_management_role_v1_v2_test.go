@@ -829,6 +829,37 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Positive: Filter roles by policyId and user returns matching role", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&user=%s", fixtures.policyValid, fixtures.userValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&user failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID               string   `json:"id"`
+				ManagementPolicy string   `json:"managementPolicy"`
+				Users            []string `json:"users"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdRole.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for policyId %s and user %s", createdRole.ID, fixtures.policyValid, fixtures.userValid)
+		}
+	})
+
 	t.Run("Positive: Filter roles by non-matching policy returns empty array", func(t *testing.T) {
 		dummyPolicyID := "00000000-0000-0000-0000-999999999999"
 		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", dummyPolicyID), fixtures.token, nil)
