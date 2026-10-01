@@ -15,46 +15,77 @@ namespace OpenWifi {
 		}
 
 		auto policyParam = GetParameter("policyId", "");
-
 		if (!policyParam.empty() && !Utils::ValidUUID(policyParam)) {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
-		if (!userParam.empty()) {
-			bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
+		auto entityParam = GetParameter("entity", "");
+		if (!entityParam.empty() && !Utils::ValidUUID(entityParam)) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		}
 
-			std::set<std::string> AllowedEntities;
-			std::set<std::string> AllowedVenues;
+		auto venueParam = GetParameter("venue", "");
+		if (!venueParam.empty() && !Utils::ValidUUID(venueParam)) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		}
 
-			if (!isRoot) {
-				std::vector<ProvObjects::ManagementRole> RequesterRoles;
-				if (FindAllUserRoles(UserInfo_.userinfo.id, RequesterRoles)) {
-					for (const auto &role : RequesterRoles) {
-						if (!role.venue.empty()) {
-							AllowedVenues.insert(role.venue);
-						} else if (!role.entity.empty()) {
-							AllowedEntities.insert(role.entity);
-						}
+		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
+		std::set<std::string> AllowedEntities;
+		std::set<std::string> AllowedVenues;
+
+		if (!isRoot) {
+			std::vector<ProvObjects::ManagementRole> RequesterRoles;
+			if (FindAllUserRoles(UserInfo_.userinfo.id, RequesterRoles)) {
+				for (const auto &role : RequesterRoles) {
+					if (!role.venue.empty()) {
+						AllowedVenues.insert(role.venue);
+					} else if (!role.entity.empty()) {
+						AllowedEntities.insert(role.entity);
 					}
-				}
-				if (AllowedEntities.empty() && AllowedVenues.empty()) {
-					if (QB_.CountOnly) {
-						return ReturnCountOnly(0);
-					}
-					ProvObjects::ManagementRoleVec EmptyRoles;
-					return MakeJSONObjectArray("roles", EmptyRoles, *this);
 				}
 			}
+			if (AllowedEntities.empty() && AllowedVenues.empty()) {
+				if (QB_.CountOnly) {
+					return ReturnCountOnly(0);
+				}
+				ProvObjects::ManagementRoleVec EmptyRoles;
+				return MakeJSONObjectArray("roles", EmptyRoles, *this);
+			}
 
+			if (!entityParam.empty() && !AllowedEntities.count(entityParam)) {
+				if (QB_.CountOnly) {
+					return ReturnCountOnly(0);
+				}
+				ProvObjects::ManagementRoleVec EmptyRoles;
+				return MakeJSONObjectArray("roles", EmptyRoles, *this);
+			}
+
+			if (!venueParam.empty() && !AllowedVenues.count(venueParam)) {
+				if (QB_.CountOnly) {
+					return ReturnCountOnly(0);
+				}
+				ProvObjects::ManagementRoleVec EmptyRoles;
+				return MakeJSONObjectArray("roles", EmptyRoles, *this);
+			}
+		}
+
+		if (!userParam.empty()) {
 			ProvObjects::ManagementRoleVec Roles;
 			auto lambda = [&](const ProvObjects::ManagementRole &role) {
 				if (!policyParam.empty() && role.managementPolicy != policyParam) {
 					return true;
 				}
-				if (std::find(role.users.begin(), role.users.end(), userParam) != role.users.end()) {
-					if (isRoot || AllowedEntities.count(role.entity) || AllowedVenues.count(role.venue)) {
-						Roles.push_back(role);
-					}
+				if (!entityParam.empty() && role.entity != entityParam) {
+					return true;
+				}
+				if (!venueParam.empty() && role.venue != venueParam) {
+					return true;
+				}
+				if (std::find(role.users.begin(), role.users.end(), userParam) == role.users.end()) {
+					return true;
+				}
+				if (isRoot || AllowedEntities.count(role.entity) || AllowedVenues.count(role.venue)) {
+					Roles.push_back(role);
 				}
 				return true;
 			};
@@ -68,85 +99,36 @@ namespace OpenWifi {
 		}
 
 		if (!policyParam.empty()) {
-			bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
-
 			std::string Where = " managementPolicy='" + policyParam + "'";
-			auto entityParam = GetParameter("entity", "");
 			if (!entityParam.empty()) {
-				if (!Utils::ValidUUID(entityParam)) {
-					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-				}
 				Where += " AND entity='" + entityParam + "'";
 			}
-			auto venueParam = GetParameter("venue", "");
 			if (!venueParam.empty()) {
-				if (!Utils::ValidUUID(venueParam)) {
-					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-				}
 				Where += " AND venue='" + venueParam + "'";
 			}
 
-			if (!isRoot) {
-				std::set<std::string> AllowedEntities;
-				std::set<std::string> AllowedVenues;
-
-				std::vector<ProvObjects::ManagementRole> RequesterRoles;
-				if (FindAllUserRoles(UserInfo_.userinfo.id, RequesterRoles)) {
-					for (const auto &role : RequesterRoles) {
-						if (!role.venue.empty()) {
-							AllowedVenues.insert(role.venue);
-						} else if (!role.entity.empty()) {
-							AllowedEntities.insert(role.entity);
-						}
+			if (!isRoot && entityParam.empty() && venueParam.empty()) {
+				auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+					if (ids.empty()) return "";
+					std::string res = field + " IN (";
+					bool first = true;
+					for (const auto &id : ids) {
+						if (!first) res += ",";
+						res += "'" + ORM::Escape(id) + "'";
+						first = false;
 					}
-				}
-				if (AllowedEntities.empty() && AllowedVenues.empty()) {
-					if (QB_.CountOnly) {
-						return ReturnCountOnly(0);
-					}
-					ProvObjects::ManagementRoleVec EmptyRoles;
-					return MakeJSONObjectArray("roles", EmptyRoles, *this);
-				}
+					res += ")";
+					return res;
+				};
 
-				if (!entityParam.empty() && !AllowedEntities.count(entityParam)) {
-					if (QB_.CountOnly) {
-						return ReturnCountOnly(0);
-					}
-					ProvObjects::ManagementRoleVec EmptyRoles;
-					return MakeJSONObjectArray("roles", EmptyRoles, *this);
-				}
-
-				if (!venueParam.empty() && !AllowedVenues.count(venueParam)) {
-					if (QB_.CountOnly) {
-						return ReturnCountOnly(0);
-					}
-					ProvObjects::ManagementRoleVec EmptyRoles;
-					return MakeJSONObjectArray("roles", EmptyRoles, *this);
-				}
-
-				if (entityParam.empty() && venueParam.empty()) {
-					auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
-						if (ids.empty()) return "";
-						std::string res = field + " IN (";
-						bool first = true;
-						for (const auto &id : ids) {
-							if (!first) res += ",";
-							res += "'" + ORM::Escape(id) + "'";
-							first = false;
-						}
-						res += ")";
-						return res;
-					};
-
-					std::string entityClause = makeInClause("entity", AllowedEntities);
-					std::string venueClause = makeInClause("venue", AllowedVenues);
-					if (!entityClause.empty() && !venueClause.empty()) {
-						Where += " AND (" + entityClause + " OR " + venueClause + ")";
-					} else if (!entityClause.empty()) {
-						Where += " AND " + entityClause;
-					} else if (!venueClause.empty()) {
-						Where += " AND " + venueClause;
-					}
+				std::string entityClause = makeInClause("entity", AllowedEntities);
+				std::string venueClause = makeInClause("venue", AllowedVenues);
+				if (!entityClause.empty() && !venueClause.empty()) {
+					Where += " AND (" + entityClause + " OR " + venueClause + ")";
+				} else if (!entityClause.empty()) {
+					Where += " AND " + entityClause;
+				} else if (!venueClause.empty()) {
+					Where += " AND " + venueClause;
 				}
 			}
 
