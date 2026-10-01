@@ -74,6 +74,12 @@ jobs:
             -print0
         )
 
+    - name: Run Entrypoint & Templating Integration Tests
+      run: |
+        chmod +x ./tests/framework_tests/instance_identity_integration_test.sh
+        ./tests/framework_tests/instance_identity_integration_test.sh
+
+
   docker-build:
     name: Build Docker Image
     runs-on: ubuntu-latest
