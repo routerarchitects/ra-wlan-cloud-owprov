@@ -17,6 +17,8 @@ if [[ "$TEMPLATE_CONFIG" = 'true' ]]; then
     fi
   fi
 
+  OWPROV_TEMPLATE=${OWPROV_TEMPLATE:-/owprov.properties.tmpl}
+
   RESTAPI_HOST_ROOTCA=${RESTAPI_HOST_ROOTCA:-"\$OWPROV_ROOT/certs/restapi-ca.pem"} \
   RESTAPI_HOST_PORT=${RESTAPI_HOST_PORT:-"16005"} \
   RESTAPI_HOST_CERT=${RESTAPI_HOST_CERT:-"\$OWPROV_ROOT/certs/restapi-cert.pem"} \
@@ -56,7 +58,6 @@ if [[ "$TEMPLATE_CONFIG" = 'true' ]]; then
   STORAGE_TYPE_MYSQL_DATABASE=${STORAGE_TYPE_MYSQL_DATABASE:-"owprov"} \
   STORAGE_TYPE_MYSQL_PORT=${STORAGE_TYPE_MYSQL_PORT:-"3306"} \
   RRM_PROVIDERS=${RRM_PROVIDERS:-"owrrm"} \
-  OWPROV_TEMPLATE=${OWPROV_TEMPLATE:-/owprov.properties.tmpl}
   envsubst < "$OWPROV_TEMPLATE" > $OWPROV_CONFIG/owprov.properties
 fi
 
