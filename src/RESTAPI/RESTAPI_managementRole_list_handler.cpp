@@ -119,7 +119,7 @@ namespace OpenWifi {
 			return MakeJSONObjectArray("roles", Roles, *this);
 		}
 
-		if (!policyParam.empty()) {
+		if (!policyParam.empty() || !venueParam.empty() || !entityParam.empty() || !isRoot) {
 			if (QB_.CountOnly) {
 				auto C = DB_.Count(Where);
 				return ReturnCountOnly(C);

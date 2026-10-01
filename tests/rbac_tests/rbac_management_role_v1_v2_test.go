@@ -881,33 +881,30 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("Positive: Filter roles by policyId and venue returns matching role", func(t *testing.T) {
-		venueRoleName := fmt.Sprintf("test-venue-filter-%d", time.Now().UnixNano())
-		venuePayload := map[string]interface{}{
-			"name":             venueRoleName,
-			"entity":           fixtures.entityA,
-			"venue":            fixtures.venueA1,
-			"managementPolicy": fixtures.policyValid,
-			"users":            []string{fixtures.userValid},
-		}
+	venueRoleName := fmt.Sprintf("test-venue-filter-%d", time.Now().UnixNano())
+	venuePayload := map[string]interface{}{
+		"name":             venueRoleName,
+		"entity":           fixtures.entityA,
+		"venue":            fixtures.venueA1,
+		"managementPolicy": fixtures.policyValid,
+		"users":            []string{fixtures.userValid},
+	}
 
-		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venuePayload)
-		if err != nil {
-			t.Fatalf("POST /managementRole/0 failed: %v", err)
-		}
-		if status != http.StatusOK {
-			t.Fatalf("Failed to create test venue role: status %d, body: %s", status, string(body))
-		}
-
-		var createdVenueRole struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(body, &createdVenueRole); err != nil {
-			t.Fatalf("Failed to unmarshal created role: %v", err)
-		}
+	var createdVenueRole struct {
+		ID string `json:"id"`
+	}
+	if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venuePayload); err == nil && status == http.StatusOK {
+		_ = json.Unmarshal(body, &createdVenueRole)
+	}
+	if createdVenueRole.ID != "" {
 		defer client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", createdVenueRole.ID), fixtures.token, nil)
+	}
 
-		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s", fixtures.policyValid, fixtures.venueA1), fixtures.token, nil)
+	t.Run("Positive: Filter roles by policyId and venue returns matching role", func(t *testing.T) {
+		if createdVenueRole.ID == "" {
+			t.Fatal("Test venue role was not created")
+		}
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s", fixtures.policyValid, fixtures.venueA1), fixtures.token, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?policyId&venue failed: %v", err)
 		}
@@ -940,6 +937,57 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Positive: Filter roles by venue alone returns matching role", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueA1), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID    string `json:"id"`
+				Venue string `json:"venue"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdVenueRole.ID {
+				found = true
+				if r.Venue != fixtures.venueA1 {
+					t.Errorf("Expected venue %s, got %s", fixtures.venueA1, r.Venue)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for standalone venue %s", createdVenueRole.ID, fixtures.venueA1)
+		}
+
+		// Check countOnly=true
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueA1), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for countOnly, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count == 0 {
+			t.Errorf("Expected count > 0 for venue %s, got 0", fixtures.venueA1)
+		}
+	})
+
 	t.Run("Positive: Entity-scoped user can query venue-filtered role under their entity", func(t *testing.T) {
 		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
 		if tokenAdminA == "" {
@@ -951,6 +999,56 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 		if status != http.StatusOK {
 			t.Fatalf("Expected 200 OK for entity admin querying venue in their entity, got %d. Body: %s", status, string(body))
+		}
+
+		// Also check countOnly=true for entity-scoped user
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, fixtures.venueA1), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&venue&countOnly failed for entity admin: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for entity admin countOnly, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Positive: Non-root user querying unauthorized venue returns empty list", func(t *testing.T) {
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		if tokenAdminA == "" || fixtures.venueB1 == "" {
+			t.Skip("TOKEN_ADMIN_OPERATOR_A or venueB1 not provided; skipping unauthorized venue test")
+		}
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueB1), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for unauthorized venue query, got %d. Body: %s", status, string(body))
+		}
+		var resp struct {
+			Roles []interface{} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(resp.Roles) != 0 {
+			t.Errorf("Expected 0 roles for unauthorized venue query, got %d", len(resp.Roles))
+		}
+
+		// Verify countOnly=true returns 0
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueB1), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for countOnly unauthorized venue, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count != 0 {
+			t.Errorf("Expected count 0 for unauthorized venue, got %d", countResp.Count)
 		}
 	})
 
