@@ -128,6 +128,12 @@ namespace OpenWifi {
 			auto Last = Raw.find_last_not_of(" \t\r\n");
 			std::string Trimmed = Raw.substr(First, Last - First + 1);
 
+			if (Trimmed.size() > 64) {
+				throw std::invalid_argument(
+					"openwifi.system.slot.id length (" + std::to_string(Trimmed.size()) +
+					") exceeds maximum allowed (64 characters)");
+			}
+
 			for (char C : Trimmed) {
 				if (!((C >= 'A' && C <= 'Z') ||
 					  (C >= 'a' && C <= 'z') ||

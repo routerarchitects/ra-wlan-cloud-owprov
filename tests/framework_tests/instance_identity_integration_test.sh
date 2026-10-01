@@ -146,5 +146,30 @@ if ! grep -q "^openwifi.system.slot.id = OWPROV_1.east-zone_02$" "$OWPROV_CONFIG
 fi
 echo "  PASS: Character allowlist verification"
 
+# Test 9: Verify non-slot defaults are correctly exported and templated (not blanked)
+echo "Test 9: Non-slot default property templating..."
+unset OWPROV_SLOT_ID
+rm -f "$OWPROV_CONFIG/owprov.properties"
+bash "$ENTRYPOINT" true
+
+if ! grep -q "^openwifi.system.uri.private = https://localhost:17005$" "$OWPROV_CONFIG/owprov.properties"; then
+    echo "FAILED: openwifi.system.uri.private was blank or incorrect in default templated config"
+    exit 1
+fi
+if ! grep -q "^openwifi.system.data = \$OWPROV_ROOT/data$" "$OWPROV_CONFIG/owprov.properties"; then
+    echo "FAILED: openwifi.system.data was blank or incorrect in default templated config"
+    exit 1
+fi
+if ! grep -q "^openwifi.restapi.host.0.port = 16005$" "$OWPROV_CONFIG/owprov.properties"; then
+    echo "FAILED: openwifi.restapi.host.0.port was blank or incorrect in default templated config"
+    exit 1
+fi
+if ! grep -q "^storage.type = sqlite$" "$OWPROV_CONFIG/owprov.properties"; then
+    echo "FAILED: storage.type was blank or incorrect in default templated config"
+    exit 1
+fi
+echo "  PASS: Non-slot default property templating"
+
 echo "=== All Instance Identity Integration Tests Passed ==="
 exit 0
+

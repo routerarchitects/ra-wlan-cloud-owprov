@@ -295,11 +295,8 @@ namespace OpenWifi {
 		return Identity_.SlotId();
 	}
 
-	const std::string &MicroService::InstanceId() const noexcept {
-		if (Identity_.IsInitialized()) {
-			return Identity_.InstanceId();
-		}
-		return Identity_.RuntimeIncarnationId();
+	const std::string &MicroService::InstanceId() const {
+		return Identity_.InstanceId();
 	}
 
 	void MicroService::InitializeLoggingSystem() {

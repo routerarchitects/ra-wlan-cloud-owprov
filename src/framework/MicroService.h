@@ -96,11 +96,13 @@ namespace OpenWifi {
 		// Safe by design: pure const read of the captured slot identity.
 		[[nodiscard]] const std::string &SlotId() const noexcept;
 		// Composite identity: <slot>-<incarnation-uuid> or just <incarnation-uuid>.
-		// Safe by design: pure const read of the captured instance identity.
-		// If called before initialization, falls back to RuntimeIncarnationId(). Never throws.
-		[[nodiscard]] const std::string &InstanceId() const noexcept;
+		// Requires identity initialization (LoadConfigurationFile / LoadMyConfig).
+		// Throws std::logic_error if called before initialization to enforce value stability
+		// and prevent observing a value that changes after config load.
+		// Early callers prior to config load must use RuntimeIncarnationId() instead.
+		[[nodiscard]] const std::string &InstanceId() const;
 		// Named alias used by MicroServiceRuntimeInstanceId() helper.
-		[[nodiscard]] const std::string &RuntimeInstanceId() const noexcept {
+		[[nodiscard]] const std::string &RuntimeInstanceId() const {
 			return InstanceId();
 		}
 		[[nodiscard]] const SubSystemVec &GetFullSubSystems() { return SubSystems_; }

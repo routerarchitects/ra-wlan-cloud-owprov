@@ -416,24 +416,87 @@ static void test_poco_property_file_loading_and_reload() {
 	std::cout << "  PASS: test_poco_property_file_loading_and_reload" << std::endl;
 }
 
-// R. Verify safe accessor pattern (matching MicroService accessor contract).
-static void test_safe_accessor_fallback_semantics() {
+// R. Slot length validation: max 64 characters allowed.
+static void test_slot_id_max_length_enforcement() {
+	std::string slot64(64, 'a');
+	std::string slot65(65, 'a');
+
+	// 64 characters must be valid
+	std::string validated64;
+	bool ok64 = false;
+	try {
+		validated64 = OpenWifi::InstanceIdentity::ValidateSlotId(slot64);
+		ok64 = true;
+	} catch (...) {}
+	TEST_ASSERT(ok64, "Slot with exactly 64 characters must be accepted");
+	TEST_ASSERT(validated64 == slot64, "Validated 64-char slot must match input");
+
+	// 65 characters must throw std::invalid_argument
+	bool threw65 = false;
+	try {
+		OpenWifi::InstanceIdentity::ValidateSlotId(slot65);
+	} catch (const std::invalid_argument &) {
+		threw65 = true;
+	}
+	TEST_ASSERT(threw65, "Slot with 65 characters must throw std::invalid_argument");
+
+	// Direct config / Initialize with 64 characters
+	OpenWifi::InstanceIdentity id64(kUUID1);
+	TEST_ASSERT(id64.Initialize(slot64), "Initialize with 64-char slot must succeed");
+	TEST_ASSERT(id64.SlotId() == slot64, "SlotId must match 64-char slot");
+	TEST_ASSERT(id64.InstanceId() == slot64 + "-" + kUUID1, "InstanceId must be <slot64>-<UUID>");
+
+	// Direct config / Initialize with 65 characters must warn and fallback unslotted
+	OpenWifi::InstanceIdentity id65(kUUID1);
+	std::string warnMsg;
+	TEST_ASSERT(id65.Initialize(slot65, &warnMsg), "Initialize with 65-char slot must succeed with fallback");
+	TEST_ASSERT(!warnMsg.empty(), "Warning message must be set for >64 char slot");
+	TEST_ASSERT(id65.SlotId().empty(), "SlotId must fall back to empty for >64 char slot");
+	TEST_ASSERT(id65.InstanceId() == kUUID1, "InstanceId must fall back to unslotted UUID");
+
+	// Poco property file loading with 65-char slot
+	std::string badConfig = "openwifi.system.slot.id = " + slot65 + "\n";
+	std::istringstream isBad(badConfig);
+	Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> pConfigBad(
+		new Poco::Util::PropertyFileConfiguration(isBad));
+	OpenWifi::InstanceIdentity idPoco(kUUID1);
+	std::string warnPoco;
+	std::string rawSlotPoco = pConfigBad->getString("openwifi.system.slot.id", "");
+	idPoco.Initialize(rawSlotPoco, &warnPoco);
+	TEST_ASSERT(!warnPoco.empty(), "Warning message must be set for >64 char slot from property file");
+	TEST_ASSERT(idPoco.SlotId().empty(), "SlotId from property file must fall back to empty");
+	TEST_ASSERT(idPoco.InstanceId() == kUUID1, "InstanceId must fall back to unslotted UUID");
+
+	std::cout << "  PASS: test_slot_id_max_length_enforcement" << std::endl;
+}
+
+// S. Verify InstanceId value stability contract.
+// InstanceId() must throw before Initialize() so callers cannot observe an unslotted
+// value early that would later change into a slotted value after config load.
+static void test_instance_id_stability_contract() {
 	OpenWifi::InstanceIdentity id(kUUID1);
 
 	// Before init: SlotId() is empty, RuntimeIncarnationId() is valid
 	TEST_ASSERT(id.SlotId().empty(), "SlotId must be empty before init");
 	TEST_ASSERT(id.RuntimeIncarnationId() == kUUID1, "RuntimeIncarnationId is available before init");
 
-	// Safe read simulation: if uninitialized, safe accessor returns RuntimeIncarnationId
-	const std::string &effectivePre = id.IsInitialized() ? id.InstanceId() : id.RuntimeIncarnationId();
-	TEST_ASSERT(effectivePre == kUUID1, "Safe accessor fallback must return RuntimeIncarnationId");
+	// Calling InstanceId() before Initialize() throws std::logic_error
+	bool threwBeforeInit = false;
+	try {
+		(void)id.InstanceId();
+	} catch (const std::logic_error &) {
+		threwBeforeInit = true;
+	}
+	TEST_ASSERT(threwBeforeInit, "InstanceId() must throw std::logic_error before Initialize()");
 
-	// Initialize
+	// Initialize with slot
 	id.Initialize("owprov-1");
-	const std::string &effectivePost = id.IsInitialized() ? id.InstanceId() : id.RuntimeIncarnationId();
-	TEST_ASSERT(effectivePost == "owprov-1-" + kUUID1, "Safe accessor must return composite ID post-init");
+	TEST_ASSERT(id.InstanceId() == "owprov-1-" + kUUID1,
+		"InstanceId must return composite ID post-init");
+	TEST_ASSERT(id.InstanceId() == "owprov-1-" + kUUID1,
+		"Repeated calls to InstanceId must return the exact same value");
 
-	std::cout << "  PASS: test_safe_accessor_fallback_semantics" << std::endl;
+	std::cout << "  PASS: test_instance_id_stability_contract" << std::endl;
 }
 
 int main() {
@@ -456,7 +519,8 @@ int main() {
 	test_real_uuid_generation_path();
 	test_config_reload_behavior();
 	test_poco_property_file_loading_and_reload();
-	test_safe_accessor_fallback_semantics();
+	test_slot_id_max_length_enforcement();
+	test_instance_id_stability_contract();
 
 	std::cout << "All tests passed." << std::endl;
 	return 0;
