@@ -375,6 +375,67 @@ static void test_invalid_slot_at_init_falls_back_to_unslotted() {
 	std::cout << "  PASS: test_invalid_slot_at_init_falls_back_to_unslotted" << std::endl;
 }
 
+#include "Poco/Util/PropertyFileConfiguration.h"
+#include <sstream>
+
+// Q. Poco PropertyFileConfiguration loading and reload simulation (matching MicroService paths).
+static void test_poco_property_file_loading_and_reload() {
+	std::string config1 = "openwifi.system.slot.id = owprov-1\nopenwifi.system.debug = false\n";
+	std::istringstream is1(config1);
+	Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> pConfig1(
+		new Poco::Util::PropertyFileConfiguration(is1));
+
+	OpenWifi::InstanceIdentity id(kUUID1);
+	std::string warnMsg;
+	std::string slotFromConfig = pConfig1->getString("openwifi.system.slot.id", "");
+	bool initOk = id.Initialize(slotFromConfig, &warnMsg);
+
+	TEST_ASSERT(initOk, "Initialize from Poco config must succeed");
+	TEST_ASSERT(warnMsg.empty(), "No warning on valid slot");
+	TEST_ASSERT(id.SlotId() == "owprov-1", "SlotId must be owprov-1");
+	TEST_ASSERT(id.InstanceId() == "owprov-1-" + kUUID1,
+		"InstanceId must be owprov-1-<UUID>");
+
+	// Reload with different slot: identity must remain locked, warning produced
+	std::string config2 = "openwifi.system.slot.id = owprov-2\n";
+	std::istringstream is2(config2);
+	Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> pConfig2(
+		new Poco::Util::PropertyFileConfiguration(is2));
+
+	warnMsg.clear();
+	std::string reloadedSlot = pConfig2->getString("openwifi.system.slot.id", "");
+	auto reloadRes = id.HandleConfigReload(reloadedSlot, &warnMsg);
+
+	TEST_ASSERT(reloadRes == OpenWifi::InstanceIdentity::ReloadResult::SlotChangedIgnored,
+		"Reload with different slot must be SlotChangedIgnored");
+	TEST_ASSERT(!warnMsg.empty(), "Warning message must be set for slot change");
+	TEST_ASSERT(id.SlotId() == "owprov-1", "SlotId must remain owprov-1 across reload");
+	TEST_ASSERT(id.InstanceId() == "owprov-1-" + kUUID1,
+		"InstanceId must remain owprov-1-<UUID> across reload");
+
+	std::cout << "  PASS: test_poco_property_file_loading_and_reload" << std::endl;
+}
+
+// R. Verify safe accessor pattern (matching MicroService accessor contract).
+static void test_safe_accessor_fallback_semantics() {
+	OpenWifi::InstanceIdentity id(kUUID1);
+
+	// Before init: SlotId() is empty, RuntimeIncarnationId() is valid
+	TEST_ASSERT(id.SlotId().empty(), "SlotId must be empty before init");
+	TEST_ASSERT(id.RuntimeIncarnationId() == kUUID1, "RuntimeIncarnationId is available before init");
+
+	// Safe read simulation: if uninitialized, safe accessor returns RuntimeIncarnationId
+	const std::string &effectivePre = id.IsInitialized() ? id.InstanceId() : id.RuntimeIncarnationId();
+	TEST_ASSERT(effectivePre == kUUID1, "Safe accessor fallback must return RuntimeIncarnationId");
+
+	// Initialize
+	id.Initialize("owprov-1");
+	const std::string &effectivePost = id.IsInitialized() ? id.InstanceId() : id.RuntimeIncarnationId();
+	TEST_ASSERT(effectivePost == "owprov-1-" + kUUID1, "Safe accessor must return composite ID post-init");
+
+	std::cout << "  PASS: test_safe_accessor_fallback_semantics" << std::endl;
+}
+
 int main() {
 	std::cout << "InstanceIdentity tests:" << std::endl;
 
@@ -394,6 +455,8 @@ int main() {
 	test_invalid_slot_at_init_falls_back_to_unslotted();
 	test_real_uuid_generation_path();
 	test_config_reload_behavior();
+	test_poco_property_file_loading_and_reload();
+	test_safe_accessor_fallback_semantics();
 
 	std::cout << "All tests passed." << std::endl;
 	return 0;

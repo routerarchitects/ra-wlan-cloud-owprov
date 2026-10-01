@@ -263,5 +263,7 @@ target_link_libraries(instance_identity_test PRIVATE
         ${Poco_LIBRARIES})
 
 add_test(NAME instance_identity_test COMMAND instance_identity_test)
+add_test(NAME instance_identity_integration_test
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/framework_tests/instance_identity_integration_test.sh)
 
 
