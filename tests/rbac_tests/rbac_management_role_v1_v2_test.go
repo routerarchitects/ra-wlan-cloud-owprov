@@ -1001,6 +1001,25 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			t.Fatalf("Expected 200 OK for entity admin querying venue in their entity, got %d. Body: %s", status, string(body))
 		}
 
+		var resp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdVenueRole.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s to be visible to entity admin for venue %s under their entity", createdVenueRole.ID, fixtures.venueA1)
+		}
+
 		// Also check countOnly=true for entity-scoped user
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, fixtures.venueA1), tokenAdminA, nil)
 		if err != nil {
@@ -1008,6 +1027,160 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 		if status != http.StatusOK {
 			t.Fatalf("Expected 200 OK for entity admin countOnly, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count == 0 {
+			t.Errorf("Expected count > 0 for entity admin countOnly, got 0")
+		}
+	})
+
+	t.Run("Positive: Admin of Entity A querying roles under Entity B does not see them", func(t *testing.T) {
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		if tokenAdminA == "" || fixtures.entityB == "" {
+			t.Skip("TOKEN_ADMIN_OPERATOR_A or entityB not provided; skipping cross-tenant isolation test")
+		}
+
+		// Create a role under Entity B using root token
+		bRolePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("entity-b-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityB,
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, bRolePayload)
+		if err != nil || status != http.StatusOK {
+			t.Skipf("Could not create test role under entity B: %v, status %d", err, status)
+		}
+		var createdRoleB struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(body, &createdRoleB)
+		if createdRoleB.ID != "" {
+			defer client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", createdRoleB.ID), fixtures.token, nil)
+		}
+
+		// Admin A queries GET /managementRole?policyId=fixtures.policyValid
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", fixtures.policyValid), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed for Admin A: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+		var resp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		for _, r := range resp.Roles {
+			if r.ID == createdRoleB.ID {
+				t.Errorf("Cross-tenant leakage: Admin A can see role %s belonging to Entity B!", createdRoleB.ID)
+			}
+		}
+
+		// Also verify Admin A directly filtering by entity B returns empty list
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s", fixtures.policyValid, fixtures.entityB), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&entity failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+		var respEntB struct {
+			Roles []interface{} `json:"roles"`
+		}
+		_ = json.Unmarshal(body, &respEntB)
+		if len(respEntB.Roles) != 0 {
+			t.Errorf("Expected 0 roles when Admin A filters for Entity B, got %d", len(respEntB.Roles))
+		}
+	})
+
+	t.Run("Positive: Explicit countOnly=true coverage across policyId filter combinations", func(t *testing.T) {
+		// 1. policyId + countOnly
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&countOnly=true", fixtures.policyValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count < 1 {
+			t.Errorf("Expected count >= 1 for policyId=%s, got %d", fixtures.policyValid, countResp.Count)
+		}
+
+		// 2. policyId + entity + countOnly
+		if fixtures.entityA != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s&countOnly=true", fixtures.policyValid, fixtures.entityA), fixtures.token, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?policyId&entity&countOnly failed: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+			}
+			var countEntResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countEntResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countEntResp.Count < 1 {
+				t.Errorf("Expected count >= 1 for policyId + entity, got %d", countEntResp.Count)
+			}
+		}
+
+		// 3. policyId + venue + countOnly
+		if fixtures.venueA1 != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, fixtures.venueA1), fixtures.token, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?policyId&venue&countOnly failed: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+			}
+			var countVenResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countVenResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countVenResp.Count < 1 {
+				t.Errorf("Expected count >= 1 for policyId + venue, got %d", countVenResp.Count)
+			}
+		}
+
+		// 4. non-root + policyId + countOnly
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		if tokenAdminA != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&countOnly=true", fixtures.policyValid), tokenAdminA, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?policyId&countOnly failed for non-root: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK for non-root countOnly, got %d. Body: %s", status, string(body))
+			}
+			var countNonRootResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countNonRootResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countNonRootResp.Count < 1 {
+				t.Errorf("Expected count >= 1 for non-root policyId, got %d", countNonRootResp.Count)
+			}
 		}
 	})
 
