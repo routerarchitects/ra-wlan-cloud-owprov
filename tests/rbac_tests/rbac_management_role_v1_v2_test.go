@@ -850,6 +850,65 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Positive: Filter roles by policyId and venue returns matching role", func(t *testing.T) {
+		venueRoleName := fmt.Sprintf("test-venue-filter-%d", time.Now().UnixNano())
+		venuePayload := map[string]interface{}{
+			"name":             venueRoleName,
+			"entity":           fixtures.entityA,
+			"venue":            fixtures.venueA1,
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venuePayload)
+		if err != nil {
+			t.Fatalf("POST /managementRole/0 failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Failed to create test venue role: status %d, body: %s", status, string(body))
+		}
+
+		var createdVenueRole struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(body, &createdVenueRole); err != nil {
+			t.Fatalf("Failed to unmarshal created role: %v", err)
+		}
+		defer client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", createdVenueRole.ID), fixtures.token, nil)
+
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s", fixtures.policyValid, fixtures.venueA1), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID               string `json:"id"`
+				ManagementPolicy string `json:"managementPolicy"`
+				Venue            string `json:"venue"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdVenueRole.ID {
+				found = true
+				if r.Venue != fixtures.venueA1 {
+					t.Errorf("Expected venue %s, got %s", fixtures.venueA1, r.Venue)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for policyId %s and venue %s", createdVenueRole.ID, fixtures.policyValid, fixtures.venueA1)
+		}
+	})
+
 	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
 		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
 		if err != nil {
@@ -857,6 +916,14 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 		if status != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for malformed policy UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?venue=invalid-venue-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed venue UUID, got %d", status)
 		}
 	})
 }
