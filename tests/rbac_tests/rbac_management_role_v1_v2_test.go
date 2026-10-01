@@ -767,3 +767,96 @@ func TestManagementRole_V2_Negative_Scenarios(t *testing.T) {
 		}
 	})
 }
+
+func TestManagementRolePolicyQueryFilter(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	fixtures := getTestFixtures(t, client)
+
+	roleName := fmt.Sprintf("test-policy-filter-%d", time.Now().UnixNano())
+	createPayload := map[string]interface{}{
+		"name":             roleName,
+		"entity":           fixtures.entityA,
+		"managementPolicy": fixtures.policyValid,
+		"users":            []string{fixtures.userValid},
+	}
+
+	status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, createPayload)
+	if err != nil {
+		t.Fatalf("POST /managementRole/0 failed: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("Failed to create test role: status %d, body: %s", status, string(body))
+	}
+
+	var createdRole struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &createdRole); err != nil {
+		t.Fatalf("Failed to unmarshal created role: %v", err)
+	}
+	defer client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", createdRole.ID), fixtures.token, nil)
+
+	t.Run("Positive: Filter roles by policyId returns matching role", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", fixtures.policyValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID               string `json:"id"`
+				ManagementPolicy string `json:"managementPolicy"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ManagementPolicy != fixtures.policyValid {
+				t.Errorf("Expected managementPolicy %s, got %s for role %s", fixtures.policyValid, r.ManagementPolicy, r.ID)
+			}
+			if r.ID == createdRole.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for policyId %s", createdRole.ID, fixtures.policyValid)
+		}
+	})
+
+	t.Run("Positive: Filter roles by non-matching policy returns empty array", func(t *testing.T) {
+		dummyPolicyID := "00000000-0000-0000-0000-999999999999"
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", dummyPolicyID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []interface{} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(resp.Roles) != 0 {
+			t.Errorf("Expected 0 roles for non-existent policy, got %d", len(resp.Roles))
+		}
+	})
+
+	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
+		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed policy UUID, got %d", status)
+		}
+	})
+}

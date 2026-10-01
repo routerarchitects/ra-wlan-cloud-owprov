@@ -3198,6 +3198,20 @@ paths:
             format: uuid
           required: false
         - in: query
+          name: policyId
+          description: Filter management roles by management policy ID
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
+          name: user
+          description: Filter management roles by assigned user ID
+          schema:
+            type: string
+            format: uuid
+          required: false
+        - in: query
           description: 'How many items to skip from the start (default: 0).'
           name: offset
           schema:
