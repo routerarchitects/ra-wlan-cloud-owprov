@@ -534,7 +534,7 @@ jobs:
       # ── Run RBAC immutability, policy protection, and v1/v2 role tests ─────────
       - name: Execute RBAC Immutability and Policy Protection Tests
         run: |
-          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection|TestManagementRole_V1|TestManagementRole_V2"
+          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection|TestManagementRole_V1|TestManagementRole_V2|TestManagementRolePolicyQueryFilter"
         working-directory: ${{ github.workspace }}/tests/rbac_tests
         env:
           OWPROV_URL: "https://localhost:16005/api/v1"

@@ -107,7 +107,7 @@ namespace OpenWifi {
 
 				if (!isRoot) {
 					if (!role.venue.empty() && DeniedVenues.count(role.venue)) {
-						continue;
+						return BadRequest(RESTAPI::Errors::UnknownId);
 					}
 					bool inScope = false;
 					if (!role.venue.empty() && AllowedVenues.count(role.venue)) {
@@ -116,7 +116,7 @@ namespace OpenWifi {
 						inScope = true;
 					}
 					if (!inScope) {
-						continue;
+						return BadRequest(RESTAPI::Errors::UnknownId);
 					}
 				}
 
