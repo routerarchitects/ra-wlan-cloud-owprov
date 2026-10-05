@@ -542,6 +542,8 @@ jobs:
           OWPROV_V2_URL: "https://localhost:16005/api/v2"
           TOKEN_ROOT: "Bearer root-test-token"
           TOKEN_NO_ACCESS: "Bearer user-read-only-token"
+          TOKEN_ADMIN_OPERATOR_A: "Bearer user-admin-operator-a-token"
+          TOKEN_VENUE_SHADOWED: "Bearer user-venue-shadowed-token"
 
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts

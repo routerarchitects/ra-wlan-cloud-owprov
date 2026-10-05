@@ -842,6 +842,116 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 	}
 	defer safeDeleteRole(createdRole.ID)
 
+	// ── Hermetic Setup for Non-Root Admin A and Shadowed User ────────────────
+	tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "Bearer user-admin-operator-a-token")
+	adminAUserID := getEnvOrDefault("USER_ADMIN_OPERATOR_A_ID", "00000000-0000-0000-0000-000000000003")
+
+	tokenShadowedUser := getEnvOrDefault("TOKEN_VENUE_SHADOWED", "Bearer user-venue-shadowed-token")
+	shadowedUserID := getEnvOrDefault("USER_VENUE_SHADOWED_ID", "00000000-0000-0000-0000-000000000002")
+
+	// 1. Assign Admin A an entity-scoped role on fixtures.entityA
+	if fixtures.entityA != "" {
+		adminARolePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("fixture-admin-a-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            "",
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{adminAUserID},
+		}
+		var createdAdminARole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, adminARolePayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdAdminARole)
+			if createdAdminARole.ID != "" {
+				defer safeDeleteRole(createdAdminARole.ID)
+			}
+		}
+	}
+
+	// 2. Create restricted policy that denies managementRole for venue shadowing
+	restrictPolicyID := fmt.Sprintf("00000000-0000-0000-0000-%012d", time.Now().UnixNano()%1000000000000)
+	restrictPolicyPayload := map[string]interface{}{
+		"name":        fmt.Sprintf("restrict-policy-%d", time.Now().UnixNano()),
+		"description": "Restricted policy for venue shadowing test",
+		"entries": []map[string]interface{}{
+			{
+				"resources": []string{"inventory"},
+				"actions":   []string{"read"},
+			},
+		},
+	}
+	statusPol, bodyPol, errPol := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", restrictPolicyID), fixtures.token, restrictPolicyPayload)
+	if errPol == nil && (statusPol == http.StatusOK || statusPol == http.StatusCreated) {
+		var createdPol struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(bodyPol, &createdPol)
+		if createdPol.ID != "" {
+			restrictPolicyID = createdPol.ID
+		}
+		defer client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", restrictPolicyID), fixtures.token, nil)
+	}
+
+	// 3. Assign Shadowed User:
+	// a) Base entity role on fixtures.entityA allowing GET
+	if fixtures.entityA != "" {
+		shadowEntityPayload := map[string]interface{}{
+			"name":             fmt.Sprintf("shadow-entity-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            "",
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{shadowedUserID},
+		}
+		var createdShadowEntityRole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, shadowEntityPayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdShadowEntityRole)
+			if createdShadowEntityRole.ID != "" {
+				defer safeDeleteRole(createdShadowEntityRole.ID)
+			}
+		}
+	}
+
+	// b) Venue-specific role on fixtures.venueA1 with restricted policy (causing venue shadowing)
+	if fixtures.venueA1 != "" {
+		shadowVenuePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("shadow-venue-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            fixtures.venueA1,
+			"managementPolicy": restrictPolicyID,
+			"users":            []string{shadowedUserID},
+		}
+		var createdShadowVenueRole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, shadowVenuePayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdShadowVenueRole)
+			if createdShadowVenueRole.ID != "" {
+				defer safeDeleteRole(createdShadowVenueRole.ID)
+			}
+		}
+
+		// Also create a test role in fixtures.venueA1 so there is an actual role to be shadowed
+		venueA1TestPayload := map[string]interface{}{
+			"name":             fmt.Sprintf("venue-a1-test-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            fixtures.venueA1,
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		var createdVenueA1TestRole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venueA1TestPayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdVenueA1TestRole)
+			if createdVenueA1TestRole.ID != "" {
+				defer safeDeleteRole(createdVenueA1TestRole.ID)
+			}
+		}
+	}
+
 	t.Run("Positive: Filter roles by policyId returns matching role", func(t *testing.T) {
 		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", fixtures.policyValid), fixtures.token, nil)
 		if err != nil {
@@ -1042,7 +1152,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 	})
 
 	t.Run("Positive: Entity-scoped user can query venue-filtered role under their entity", func(t *testing.T) {
-		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA == "" {
 			t.Skip("TOKEN_ADMIN_OPERATOR_A not provided; skipping entity-scoped query test")
 		}
@@ -1093,7 +1203,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 	})
 
 	t.Run("Positive: Admin of Entity A querying roles under Entity B does not see them", func(t *testing.T) {
-		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA == "" || fixtures.entityB == "" {
 			t.Skip("TOKEN_ADMIN_OPERATOR_A or entityB not provided; skipping cross-tenant isolation test")
 		}
@@ -1245,7 +1355,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 
 		// 4. non-root + policyId + countOnly
-		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA != "" {
 			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&countOnly=true", fixtures.policyValid), tokenAdminA, nil)
 			if err != nil {
@@ -1267,7 +1377,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 	})
 
 	t.Run("Positive: Non-root user querying unauthorized venue returns empty list", func(t *testing.T) {
-		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA == "" || fixtures.venueB1 == "" {
 			t.Skip("TOKEN_ADMIN_OPERATOR_A or venueB1 not provided; skipping unauthorized venue test")
 		}
@@ -1310,7 +1420,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 	})
 
 	t.Run("Positive: Venue role shadowing excludes roles in denied venue for shadowed user", func(t *testing.T) {
-		tokenShadowedUser := getEnvOrDefault("TOKEN_VENUE_SHADOWED", "")
+		tokenShadowedUser := getEnvOrDefault("TOKEN_VENUE_SHADOWED", tokenShadowedUser)
 		if tokenShadowedUser == "" {
 			t.Skip("TOKEN_VENUE_SHADOWED not provided; skipping venue role shadowing test")
 		}
@@ -1396,7 +1506,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			t.Errorf("Expected exactly role %s in select response, got %d roles", createdRole.ID, len(rootResp.Roles))
 		}
 
-		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA != "" {
 			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRole.ID), tokenAdminA, nil)
 			if err != nil {
@@ -1442,7 +1552,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 
 		// 3. Admin A selecting unauthorized role from Entity B vs nonexistent ID:
 		// Both must return 400 Bad Request UnknownId to prevent object existence oracle
-		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA != "" {
 			if createdRoleB.ID != "" {
 				status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRoleB.ID), tokenAdminA, nil)
