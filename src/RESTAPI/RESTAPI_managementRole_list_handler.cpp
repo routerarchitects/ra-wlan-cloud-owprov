@@ -7,10 +7,16 @@
 namespace OpenWifi {
 	void RESTAPI_managementRole_list_handler::DoGet() {
 		std::string userParam;
-		if (HasParameter("user", userParam) || HasParameter("userId", userParam) ||
-			HasParameter("user_id", userParam)) {
-			if (!Utils::ValidUUID(userParam)) {
-				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		for (const auto &alias : {"user", "userId", "user_id"}) {
+			std::string val;
+			if (HasParameter(alias, val)) {
+				if (!Utils::ValidUUID(val)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+				}
+				if (!userParam.empty() && userParam != val) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+				}
+				userParam = val;
 			}
 		}
 

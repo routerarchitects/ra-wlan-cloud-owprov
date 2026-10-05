@@ -1640,5 +1640,38 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		if status != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for supplied empty user, got %d", status)
 		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?userId=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?userId= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty userId, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?user_id=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user_id= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty user_id, got %d", status)
+		}
+
+		// 3. Conflicting and empty aliases
+		status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?user=&userId=%s", fixtures.userValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user=&userId= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for empty user alias alongside valid userId, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?userId=&user=%s", fixtures.userValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?userId=&user= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for empty userId alias alongside valid user, got %d", status)
+		}
 	})
 }
