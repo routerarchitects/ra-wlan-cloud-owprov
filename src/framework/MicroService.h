@@ -132,7 +132,9 @@ namespace OpenWifi {
 		void LoadConfigurationFile();
 		void Reload();
 		void LoadMyConfig();
+		void InitializeInstanceIdentity(const std::string &ConfiguredSlot);
 		void InitializeInstanceIdentityFromConfig();
+		void ReloadInstanceIdentityFromConfigFile();
 		void initialize(Poco::Util::Application &self) override;
         void StartEverything(Poco::Util::Application &self);
         void StopEverything(Poco::Util::Application &self);
