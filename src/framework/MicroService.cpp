@@ -260,6 +260,78 @@ namespace OpenWifi {
 		MyPublicEndPoint_ = ConfigGetString("openwifi.system.uri.public");
 		UIURI_ = ConfigGetString("openwifi.system.uri.ui");
 		MyHash_ = Utils::ComputeHash(MyPublicEndPoint_);
+
+		InitializeInstanceIdentityFromConfig();
+	}
+
+	void MicroService::InitializeInstanceIdentity(const std::string &ConfiguredSlot) {
+		// Instance identity is captured once at initial startup and must not change on config reload.
+		// ValidateSlotId trims whitespace and enforces the ASCII allowlist [A-Za-z0-9._-].
+		if (!Identity_.IsInitialized()) {
+			std::string WarnMsg;
+			Identity_.Initialize(ConfiguredSlot, &WarnMsg);
+			if (!WarnMsg.empty()) {
+				Logger_.warning(WarnMsg);
+			}
+		} else {
+			// Config reload: identity is already locked in. Never terminate the running
+			// service over a slot ID change. Changing slot requires a process restart.
+			std::string WarnMsg;
+			auto ReloadRes = Identity_.HandleConfigReload(ConfiguredSlot, &WarnMsg);
+			if (ReloadRes != InstanceIdentity::ReloadResult::Unchanged) {
+				Logger_.warning(WarnMsg);
+			}
+		}
+	}
+
+	void MicroService::InitializeInstanceIdentityFromConfig() {
+		// Ensure configuration file is loaded so openwifi.system.slot.id can be read.
+		if (PropConfigurationFile_ == nullptr) {
+			LoadConfigurationFile();
+		}
+		InitializeInstanceIdentity(ConfigGetString("openwifi.system.slot.id", ""));
+	}
+
+	void MicroService::ReloadInstanceIdentityFromConfigFile() {
+		// Read openwifi.system.slot.id from the property file using a local config object.
+		// This deliberately does NOT call LoadConfigurationFile() or configPtr()->addWriteable()
+		// to avoid mutating the global Poco config layer while other cached MicroService
+		// fields (endpoints, hash, security settings) remain unchanged.
+		// Note: PropertyFileConfiguration has a protected destructor (Poco RefCounted pattern),
+		// so it must be heap-allocated via Poco::AutoPtr, not stack-allocated.
+		try {
+			std::string ConfiguredSlot;
+
+			if (ConfigContent_.empty()) {
+				std::string Location = Poco::Environment::get(DAEMON_CONFIG_ENV_VAR, ".");
+				std::string FileName = ConfigFileName_.empty() ? Location + "/" + DAEMON_PROPERTIES_FILENAME : ConfigFileName_;
+
+				Poco::Path ConfigFile(FileName);
+				if (!ConfigFile.isFile()) {
+					Logger_.warning(fmt::format("Cannot reload openwifi.system.slot.id: configuration file '{}' does not exist.", ConfigFile.toString()));
+					return;
+				}
+
+				Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> LocalConfig(new Poco::Util::PropertyFileConfiguration(ConfigFile.toString()));
+				ConfiguredSlot = LocalConfig->getString("openwifi.system.slot.id", "");
+			} else {
+				std::istringstream is(ConfigContent_);
+				Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> LocalConfig(new Poco::Util::PropertyFileConfiguration(is));
+				ConfiguredSlot = LocalConfig->getString("openwifi.system.slot.id", "");
+			}
+
+			InitializeInstanceIdentity(ConfiguredSlot);
+		} catch (const Poco::Exception &E) {
+			Logger_.warning(fmt::format("Cannot reload openwifi.system.slot.id from configuration: {}", E.displayText()));
+		}
+	}
+
+	const std::string &MicroService::SlotId() const noexcept {
+		return Identity_.SlotId();
+	}
+
+	const std::string &MicroService::InstanceId() const {
+		return Identity_.InstanceId();
 	}
 
 	void MicroService::InitializeLoggingSystem() {
@@ -504,7 +576,13 @@ namespace OpenWifi {
 
 	void MicroService::reinitialize(Poco::Util::Application &self) {
 		ServerApplication::reinitialize(self);
-		// add your own reinitialization code here
+
+		// Do not call Reload()/LoadMyConfig() here. Full MicroService config hot-reload
+		// is intentionally out of scope for this runtime identity PR and would refresh
+		// cached fields (endpoints, hash, security settings, debug settings,
+		// signer/cipher, etc.) without restarting dependent runtime components.
+		// Only the instance identity slot is re-checked from the property file.
+		ReloadInstanceIdentityFromConfigFile();
 	}
 
 	void MicroService::defineOptions(Poco::Util::OptionSet &options) {
@@ -796,6 +874,20 @@ namespace OpenWifi {
 			if (config().getBool("application.runAsDaemon", false)) {
 				poco_information(logger, "Starting as a daemon.");
 			}
+
+			// In Medusa builds, StartEverything() is not called from initialize(),
+			// so identity may not be initialized yet. Ensure configuration file
+			// is loaded before capturing instance identity from config.
+			if (!Identity_.IsInitialized()) {
+				if (PropConfigurationFile_ == nullptr) {
+					LoadConfigurationFile();
+				}
+				InitializeInstanceIdentityFromConfig();
+			}
+
+			poco_information(logger, fmt::format("Runtime incarnation ID: {}", RuntimeIncarnationId()));
+			poco_information(logger, fmt::format("Slot ID: {}", SlotId().empty() ? std::string("<not configured>") : SlotId()));
+			poco_information(logger, fmt::format("Effective runtime instance ID: {}", InstanceId()));
 
 #ifdef USE_MEDUSA_CLIENT
             MedusaClient::instance()->SetSubSystems(SubSystems_);

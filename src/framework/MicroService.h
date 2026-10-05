@@ -45,6 +45,7 @@ namespace OpenWifi {
 #include "framework/OpenWifiTypes.h"
 
 #include "framework/EventBusManager.h"
+#include "framework/InstanceIdentity.h"
 #include "framework/SubSystemServer.h"
 #include "framework/ow_constants.h"
 #include "framework/utils.h"
@@ -65,7 +66,8 @@ namespace OpenWifi {
 			: DAEMON_PROPERTIES_FILENAME(std::move(PropFile)),
 			  DAEMON_ROOT_ENV_VAR(std::move(RootEnv)), DAEMON_CONFIG_ENV_VAR(std::move(ConfigVar)),
 			  DAEMON_APP_NAME(std::move(AppName)), DAEMON_BUS_TIMER(BusTimer),
-			  SubSystems_(std::move(Subsystems)), Logger_(Poco::Logger::get("FRAMEWORK")) {
+			  SubSystems_(std::move(Subsystems)), Logger_(Poco::Logger::get("FRAMEWORK")),
+			  Identity_(InstanceIdentity::GenerateUUID()) {
 			instance_ = this;
 			RandomEngine_.seed(std::chrono::steady_clock::now().time_since_epoch().count());
 		}
@@ -85,6 +87,24 @@ namespace OpenWifi {
 		[[nodiscard]] std::string ServiceType() const { return DAEMON_APP_NAME; };
 		[[nodiscard]] std::string PrivateEndPoint() const { return MyPrivateEndPoint_; };
 		[[nodiscard]] std::string PublicEndPoint() const { return MyPublicEndPoint_; };
+		// UUID generated once at process startup. Stable for the process lifetime.
+		// Safe to call at any time, including during early startup before LoadMyConfig().
+		[[nodiscard]] const std::string &RuntimeIncarnationId() const noexcept {
+			return Identity_.RuntimeIncarnationId();
+		}
+		// Returns the configured slot label, or empty when none is set.
+		// Safe by design: pure const read of the captured slot identity.
+		[[nodiscard]] const std::string &SlotId() const noexcept;
+		// Composite identity: <slot>-<incarnation-uuid> or just <incarnation-uuid>.
+		// Requires prior initialization via LoadMyConfig(); throws std::logic_error if called
+		// before that to enforce value stability and prevent observing a value that changes
+		// after config load.
+		// Early callers prior to LoadMyConfig() must use RuntimeIncarnationId() instead.
+		[[nodiscard]] const std::string &InstanceId() const;
+		// Named alias used by MicroServiceRuntimeInstanceId() helper.
+		[[nodiscard]] const std::string &RuntimeInstanceId() const {
+			return InstanceId();
+		}
 		[[nodiscard]] const SubSystemVec &GetFullSubSystems() { return SubSystems_; }
 		inline uint64_t DaemonBusTimer() const { return DAEMON_BUS_TIMER; };
 		[[nodiscard]] const std::string &AppName() { return DAEMON_APP_NAME; }
@@ -112,6 +132,9 @@ namespace OpenWifi {
 		void LoadConfigurationFile();
 		void Reload();
 		void LoadMyConfig();
+		void InitializeInstanceIdentity(const std::string &ConfiguredSlot);
+		void InitializeInstanceIdentityFromConfig();
+		void ReloadInstanceIdentityFromConfigFile();
 		void initialize(Poco::Util::Application &self) override;
         void StartEverything(Poco::Util::Application &self);
         void StopEverything(Poco::Util::Application &self);
@@ -213,6 +236,7 @@ namespace OpenWifi {
 		bool AllowExternalMicroServices_ = false;
 		Poco::JWT::Signer Signer_;
 		Poco::Logger &Logger_;
+		InstanceIdentity Identity_;
 		Poco::ThreadPool TimerPool_{"timer:pool", 2, 32};
         ArgVec Args_;
 	};

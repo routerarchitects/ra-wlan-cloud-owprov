@@ -39,6 +39,12 @@ openwifi.system.uri.private = ${SYSTEM_URI_PRIVATE}
 openwifi.system.uri.public = ${SYSTEM_URI_PUBLIC}
 openwifi.system.commandchannel = /tmp/app.owprov
 openwifi.system.uri.ui = ${SYSTEM_URI_UI}
+# Logical slot / host identifier (optional, e.g. owprov-1, owprov-2).
+# Allowed characters: [A-Za-z0-9._-], max 64 chars.
+# Direct configuration: if invalid characters or length > 64 are detected, a warning is logged and the service runs unslotted.
+# Docker templating (TEMPLATE_CONFIG=true): invalid OWPROV_SLOT_ID is rejected at container startup for injection safety.
+# A change to slot id requires a service restart to take effect.
+openwifi.system.slot.id = ${OWPROV_SLOT_ID}
 openwifi.security.restapi.disable = ${SECURITY_RESTAPI_DISABLE}
 
 rrm.providers = ${RRM_PROVIDERS}

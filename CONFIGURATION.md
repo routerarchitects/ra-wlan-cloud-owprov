@@ -121,6 +121,7 @@ openwifi.system.uri.ui = https://provisionins-ui.example.com
 openwifi.security.restapi.disable = false
 openwifi.system.commandchannel = /tmp/app.ucentralprov
 openwifi.autoprovisioning = true
+openwifi.system.slot.id = 
 ```
 #### openwifi.service.key
 From time to time, the microservice must encrypt information. This is the key it should use. You may use the
@@ -142,6 +143,14 @@ sits behind an application load balancer that will actually do TLS. Setting this
 The UNIX socket command channel used by this service.
 #### openwifi.autoprovisioning
 Allow unknown devices to be provisioned by the system.
+#### openwifi.system.slot.id
+Optional logical slot identifier (e.g. `owprov-1`, `owprov-2`, Kubernetes pod name, or StatefulSet slot).
+- **Environment variable equivalent:** `OWPROV_SLOT_ID` (used by `docker-entrypoint.sh` when `TEMPLATE_CONFIG=true`).
+- **Format:** Maximum 64 characters. Allowed characters: ASCII alphanumeric (`A-Z`, `a-z`, `0-9`), period (`.`), underscore (`_`), hyphen (`-`).
+- **Default:** Empty (unslotted).
+- **Composite identity:** When configured, the effective runtime instance ID becomes `<slot-id>-<runtime-incarnation-uuid>`. When unslotted, the effective runtime instance ID is `<runtime-incarnation-uuid>`.
+- **Reload behavior:** Slot identity is captured once at initial startup and is immutable for the lifetime of the process. If changed in `owprov.properties` during runtime reload, a warning is logged and a service restart is required for the change to take effect.
+- **Validation behavior:** If direct static configuration contains invalid characters or exceeds 64 characters, a warning is logged at startup and the service runs unslotted. In Docker deployments using `TEMPLATE_CONFIG=true`, invalid `OWPROV_SLOT_ID` values are rejected during container startup to prevent configuration injection.
 
 ### ALB Support
 In order to support an application load balancer health check verification, your need to provide the following parameters.

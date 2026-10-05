@@ -6,6 +6,19 @@ if [ "$SELFSIGNED_CERTS" = 'true' ]; then
 fi
 
 if [[ "$TEMPLATE_CONFIG" = 'true' ]]; then
+  if [ -n "$OWPROV_SLOT_ID" ]; then
+    if [ ${#OWPROV_SLOT_ID} -gt 64 ]; then
+      echo "ERROR: OWPROV_SLOT_ID length (${#OWPROV_SLOT_ID}) exceeds maximum allowed (64 characters)" >&2
+      exit 1
+    fi
+    if ! [[ "$OWPROV_SLOT_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      echo "ERROR: OWPROV_SLOT_ID contains invalid characters: '${OWPROV_SLOT_ID}'. Allowed characters are: A-Z, a-z, 0-9, ., _, -" >&2
+      exit 1
+    fi
+  fi
+
+  OWPROV_TEMPLATE=${OWPROV_TEMPLATE:-/owprov.properties.tmpl}
+
   RESTAPI_HOST_ROOTCA=${RESTAPI_HOST_ROOTCA:-"\$OWPROV_ROOT/certs/restapi-ca.pem"} \
   RESTAPI_HOST_PORT=${RESTAPI_HOST_PORT:-"16005"} \
   RESTAPI_HOST_CERT=${RESTAPI_HOST_CERT:-"\$OWPROV_ROOT/certs/restapi-cert.pem"} \
@@ -25,6 +38,7 @@ if [[ "$TEMPLATE_CONFIG" = 'true' ]]; then
   SYSTEM_URI_PUBLIC=${SYSTEM_URI_PUBLIC:-"https://localhost:16005"} \
   SYSTEM_URI_UI=${SYSTEM_URI_UI:-"http://localhost"} \
   SECURITY_RESTAPI_DISABLE=${SECURITY_RESTAPI_DISABLE:-"false"} \
+  OWPROV_SLOT_ID=${OWPROV_SLOT_ID:-""} \
   KAFKA_ENABLE=${KAFKA_ENABLE:-"true"} \
   KAFKA_BROKERLIST=${KAFKA_BROKERLIST:-"localhost:9092"} \
   KAFKA_SSL_CA_LOCATION=${KAFKA_SSL_CA_LOCATION:-""} \
@@ -44,7 +58,7 @@ if [[ "$TEMPLATE_CONFIG" = 'true' ]]; then
   STORAGE_TYPE_MYSQL_DATABASE=${STORAGE_TYPE_MYSQL_DATABASE:-"owprov"} \
   STORAGE_TYPE_MYSQL_PORT=${STORAGE_TYPE_MYSQL_PORT:-"3306"} \
   RRM_PROVIDERS=${RRM_PROVIDERS:-"owrrm"} \
-  envsubst < /owprov.properties.tmpl > $OWPROV_CONFIG/owprov.properties
+  envsubst < "$OWPROV_TEMPLATE" > $OWPROV_CONFIG/owprov.properties
 fi
 
 if [ "$1" = '/openwifi/owprov' -a "$(id -u)" = '0' ]; then

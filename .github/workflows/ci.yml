@@ -74,6 +74,12 @@ jobs:
             -print0
         )
 
+    - name: Run Entrypoint & Templating Integration Tests
+      run: |
+        chmod +x ./tests/framework_tests/instance_identity_integration_test.sh
+        ./tests/framework_tests/instance_identity_integration_test.sh
+
+
   docker-build:
     name: Build Docker Image
     runs-on: ubuntu-latest
@@ -81,7 +87,15 @@ jobs:
     - name: Checkout Repository Code
       uses: actions/checkout@v4
 
-    - name: Build Docker Image
+    - name: Build Test Image
+      run: |
+        docker build --target owprov-build -t owprov-build:test .
+
+    - name: Run C++ Unit Tests (CTest)
+      run: |
+        docker run --rm owprov-build:test ctest -R instance_identity_test --output-on-failure
+
+    - name: Build Runtime Docker Image
       run: |
         docker build -t owprov:test .
 
