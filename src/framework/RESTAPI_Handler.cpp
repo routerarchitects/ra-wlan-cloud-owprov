@@ -70,18 +70,6 @@ namespace OpenWifi {
 			return res;
 		};
 
-		if (Resource == "managementRole" && Method == Poco::Net::HTTPRequest::HTTP_GET &&
-			Bindings_.find("id") == Bindings_.end()) {
-			for (const auto &role : Roles) {
-				if (CheckRolePolicy(role)) {
-					return true;
-				}
-			}
-			Reason = "No authorized role found for managementRole listing.";
-			Logger_.information(fmt::format("AUTH_DEBUG: Denied - No role permits managementRole GET"));
-			return false;
-		}
-
 		// 3. Resolve target Entity and Venue
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {

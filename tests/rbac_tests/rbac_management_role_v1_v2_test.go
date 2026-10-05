@@ -1252,42 +1252,22 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			}
 		}
 
-		// Verify Admin A directly filtering by unauthorized entity B returns 200 OK with empty roles list
+		// Verify Admin A directly filtering by unauthorized entity B returns 403 Forbidden
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s", fixtures.policyValid, fixtures.entityB), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?policyId&entity failed: %v", err)
 		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK when Admin A queries unauthorized entity B, got %d. Body: %s", status, string(body))
-		}
-		var emptyResp struct {
-			Roles []struct {
-				ID string `json:"id"`
-			} `json:"roles"`
-		}
-		if err := json.Unmarshal(body, &emptyResp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-		if len(emptyResp.Roles) != 0 {
-			t.Fatalf("Expected empty roles list for unauthorized entity B, got %d roles", len(emptyResp.Roles))
+		if status != http.StatusForbidden {
+			t.Fatalf("Expected 403 Forbidden when Admin A queries unauthorized entity B, got %d. Body: %s", status, string(body))
 		}
 
-		// Also verify countOnly=true returns 200 OK with count=0 for unauthorized entity B
+		// Also verify countOnly=true returns 403 Forbidden for unauthorized entity B
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s&countOnly=true", fixtures.policyValid, fixtures.entityB), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?policyId&entity&countOnly failed: %v", err)
 		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK for countOnly unauthorized entity B, got %d. Body: %s", status, string(body))
-		}
-		var countEntResp struct {
-			Count int `json:"count"`
-		}
-		if err := json.Unmarshal(body, &countEntResp); err != nil {
-			t.Fatalf("Failed to parse count response: %v", err)
-		}
-		if countEntResp.Count != 0 {
-			t.Fatalf("Expected count=0 for countOnly unauthorized entity B, got %d", countEntResp.Count)
+		if status != http.StatusForbidden {
+			t.Fatalf("Expected 403 Forbidden for countOnly unauthorized entity B, got %d. Body: %s", status, string(body))
 		}
 	})
 
@@ -1376,7 +1356,7 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("Positive: Non-root user querying unauthorized venue returns empty list", func(t *testing.T) {
+	t.Run("Positive: Non-root user querying unauthorized venue returns 403 Forbidden", func(t *testing.T) {
 		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
 		if tokenAdminA == "" || fixtures.venueB1 == "" {
 			t.Skip("TOKEN_ADMIN_OPERATOR_A or venueB1 not provided; skipping unauthorized venue test")
@@ -1385,37 +1365,17 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /managementRole?venue failed: %v", err)
 		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK for unauthorized venue query, got %d. Body: %s", status, string(body))
-		}
-		var emptyResp struct {
-			Roles []struct {
-				ID string `json:"id"`
-			} `json:"roles"`
-		}
-		if err := json.Unmarshal(body, &emptyResp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-		if len(emptyResp.Roles) != 0 {
-			t.Fatalf("Expected 0 roles for unauthorized venue query, got %d", len(emptyResp.Roles))
+		if status != http.StatusForbidden {
+			t.Fatalf("Expected 403 Forbidden for unauthorized venue query, got %d. Body: %s", status, string(body))
 		}
 
-		// Verify countOnly=true also returns 200 OK with count=0
+		// Verify countOnly=true also returns 403 Forbidden
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueB1), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
 		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK for countOnly unauthorized venue, got %d. Body: %s", status, string(body))
-		}
-		var countResp struct {
-			Count int `json:"count"`
-		}
-		if err := json.Unmarshal(body, &countResp); err != nil {
-			t.Fatalf("Failed to parse count response: %v", err)
-		}
-		if countResp.Count != 0 {
-			t.Fatalf("Expected count=0 for countOnly unauthorized venue, got %d", countResp.Count)
+		if status != http.StatusForbidden {
+			t.Fatalf("Expected 403 Forbidden for countOnly unauthorized venue, got %d. Body: %s", status, string(body))
 		}
 	})
 
@@ -1447,42 +1407,22 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			}
 		}
 
-		// 2. Explicit query for shadowed venue returns 200 OK with empty roles list
+		// 2. Explicit query for shadowed venue returns 403 Forbidden
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueA1), tokenShadowedUser, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?venue failed: %v", err)
 		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK for explicit query of shadowed venue, got %d. Body: %s", status, string(body))
-		}
-		var shadowedResp struct {
-			Roles []struct {
-				ID string `json:"id"`
-			} `json:"roles"`
-		}
-		if err := json.Unmarshal(body, &shadowedResp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-		if len(shadowedResp.Roles) != 0 {
-			t.Fatalf("Expected 0 roles for shadowed venue query, got %d", len(shadowedResp.Roles))
+		if status != http.StatusForbidden {
+			t.Fatalf("Expected 403 Forbidden for explicit query of shadowed venue, got %d", status)
 		}
 
-		// 3. Verify countOnly=true returns 200 OK with count=0 for shadowed venue
+		// 3. Verify countOnly=true returns 403 Forbidden for shadowed venue
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueA1), tokenShadowedUser, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
 		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK for countOnly shadowed venue, got %d. Body: %s", status, string(body))
-		}
-		var countShadowedResp struct {
-			Count int `json:"count"`
-		}
-		if err := json.Unmarshal(body, &countShadowedResp); err != nil {
-			t.Fatalf("Failed to parse count response: %v", err)
-		}
-		if countShadowedResp.Count != 0 {
-			t.Fatalf("Expected count=0 for countOnly shadowed venue, got %d", countShadowedResp.Count)
+		if status != http.StatusForbidden {
+			t.Fatalf("Expected 403 Forbidden for countOnly shadowed venue, got %d", status)
 		}
 	})
 
