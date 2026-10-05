@@ -1382,7 +1382,8 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
+	t.Run("Negative: Filter roles with invalid or empty UUID parameters returns 400 Bad Request", func(t *testing.T) {
+		// 1. Malformed UUIDs
 		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?policyId failed: %v", err)
@@ -1397,6 +1398,47 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 		if status != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for malformed venue UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?entity=invalid-entity-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?entity failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed entity UUID, got %d", status)
+		}
+
+		// 2. Supplied but empty parameters
+		status, _, err = client.DoRequest("GET", "/managementRole?policyId=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty policyId, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?venue=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty venue, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?entity=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?entity= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty entity, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?user=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty user, got %d", status)
 		}
 	})
 }

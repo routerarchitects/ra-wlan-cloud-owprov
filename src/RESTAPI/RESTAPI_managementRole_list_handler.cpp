@@ -6,27 +6,33 @@
 
 namespace OpenWifi {
 	void RESTAPI_managementRole_list_handler::DoGet() {
-		auto userParam = GetParameter("user", "");
-		if (userParam.empty()) {
-			userParam = GetParameter("userId", "");
-		}
-		if (userParam.empty()) {
-			userParam = GetParameter("user_id", "");
-		}
-
-		auto policyParam = GetParameter("policyId", "");
-		if (!policyParam.empty() && !Utils::ValidUUID(policyParam)) {
-			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		std::string userParam;
+		if (HasParameter("user", userParam) || HasParameter("userId", userParam) ||
+			HasParameter("user_id", userParam)) {
+			if (userParam.empty()) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
 		}
 
-		auto entityParam = GetParameter("entity", "");
-		if (!entityParam.empty() && !Utils::ValidUUID(entityParam)) {
-			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		std::string policyParam;
+		if (HasParameter("policyId", policyParam)) {
+			if (!Utils::ValidUUID(policyParam)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
 		}
 
-		auto venueParam = GetParameter("venue", "");
-		if (!venueParam.empty() && !Utils::ValidUUID(venueParam)) {
-			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+		std::string entityParam;
+		if (HasParameter("entity", entityParam)) {
+			if (!Utils::ValidUUID(entityParam)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
+		}
+
+		std::string venueParam;
+		if (HasParameter("venue", venueParam)) {
+			if (!Utils::ValidUUID(venueParam)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
 		}
 
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
