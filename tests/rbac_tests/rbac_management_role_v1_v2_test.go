@@ -1225,6 +1225,30 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Positive: Venue role shadowing excludes roles in denied venue for shadowed user", func(t *testing.T) {
+		tokenShadowedUser := getEnvOrDefault("TOKEN_VENUE_SHADOWED", "")
+		if tokenShadowedUser == "" {
+			t.Skip("TOKEN_VENUE_SHADOWED not provided; skipping venue role shadowing test")
+		}
+
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueA1), tokenShadowedUser, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK (empty list) for shadowed venue, got %d. Body: %s", status, string(body))
+		}
+		var resp struct {
+			Roles []interface{} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(resp.Roles) != 0 {
+			t.Errorf("Expected 0 roles for shadowed venue, got %d", len(resp.Roles))
+		}
+	})
+
 	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
 		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
 		if err != nil {

@@ -32,18 +32,48 @@ namespace OpenWifi {
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 		std::set<std::string> AllowedEntities;
 		std::set<std::string> AllowedVenues;
+		std::set<std::string> DeniedVenues;
 
 		if (!isRoot) {
+			auto policyAllowsGet = [&](const ProvObjects::ManagementRole &role) -> bool {
+				ProvObjects::ManagementPolicy Policy;
+				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+					if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+						return false;
+					}
+					AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+				}
+				return PolicyAllows(Policy, "managementRole", Poco::Net::HTTPRequest::HTTP_GET);
+			};
+
 			std::vector<ProvObjects::ManagementRole> RequesterRoles;
 			if (FindAllUserRoles(UserInfo_.userinfo.id, RequesterRoles)) {
 				for (const auto &role : RequesterRoles) {
 					if (!role.venue.empty()) {
-						AllowedVenues.insert(role.venue);
+						if (policyAllowsGet(role)) {
+							AllowedVenues.insert(role.venue);
+						} else {
+							DeniedVenues.insert(role.venue);
+						}
 					} else if (!role.entity.empty()) {
-						AllowedEntities.insert(role.entity);
+						if (policyAllowsGet(role)) {
+							AllowedEntities.insert(role.entity);
+						}
 					}
 				}
+				for (const auto &vId : DeniedVenues) {
+					AllowedVenues.erase(vId);
+				}
 			}
+
+			if (!venueParam.empty() && DeniedVenues.count(venueParam)) {
+				if (QB_.CountOnly) {
+					return ReturnCountOnly(0);
+				}
+				ProvObjects::ManagementRoleVec EmptyRoles;
+				return MakeJSONObjectArray("roles", EmptyRoles, *this);
+			}
+
 			if (AllowedEntities.empty() && AllowedVenues.empty()) {
 				if (QB_.CountOnly) {
 					return ReturnCountOnly(0);
@@ -99,6 +129,21 @@ namespace OpenWifi {
 					Where += " AND ";
 				}
 				Where += rbacClause;
+			}
+
+			if (!DeniedVenues.empty()) {
+				std::string deniedClause = "venue NOT IN (";
+				bool first = true;
+				for (const auto &id : DeniedVenues) {
+					if (!first) deniedClause += ",";
+					deniedClause += "'" + ORM::Escape(id) + "'";
+					first = false;
+				}
+				deniedClause += ")";
+				if (!Where.empty()) {
+					Where += " AND ";
+				}
+				Where += deniedClause;
 			}
 		}
 
