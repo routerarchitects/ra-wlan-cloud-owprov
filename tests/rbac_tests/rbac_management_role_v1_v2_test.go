@@ -1600,6 +1600,14 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			t.Errorf("Expected 400 Bad Request for malformed entity UUID, got %d", status)
 		}
 
+		status, _, err = client.DoRequest("GET", "/managementRole?user=invalid-user-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed user UUID, got %d", status)
+		}
+
 		// 2. Supplied but empty parameters
 		status, _, err = client.DoRequest("GET", "/managementRole?policyId=", fixtures.token, nil)
 		if err != nil {

@@ -9,7 +9,7 @@ namespace OpenWifi {
 		std::string userParam;
 		if (HasParameter("user", userParam) || HasParameter("userId", userParam) ||
 			HasParameter("user_id", userParam)) {
-			if (userParam.empty()) {
+			if (!Utils::ValidUUID(userParam)) {
 				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			}
 		}
