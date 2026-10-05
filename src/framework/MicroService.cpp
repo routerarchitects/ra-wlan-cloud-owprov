@@ -231,7 +231,6 @@ namespace OpenWifi {
             PropConfigurationFile_ = new Poco::Util::PropertyFileConfiguration(is);
         }
 		configPtr()->addWriteable(PropConfigurationFile_, PRIO_DEFAULT);
-		InitializeInstanceIdentityFromConfig();
 	}
 
 	void MicroService::Reload() {
@@ -471,7 +470,6 @@ namespace OpenWifi {
 
     void MicroService::StartEverything(Poco::Util::Application &self) {
         LoadConfigurationFile();
-        InitializeInstanceIdentityFromConfig();
         InitializeLoggingSystem();
 
         static bool InitializedBaseService=false;
@@ -542,8 +540,7 @@ namespace OpenWifi {
 
 	void MicroService::reinitialize(Poco::Util::Application &self) {
 		ServerApplication::reinitialize(self);
-		LoadConfigurationFile();
-		InitializeInstanceIdentityFromConfig();
+		Reload();
 	}
 
 	void MicroService::defineOptions(Poco::Util::OptionSet &options) {
