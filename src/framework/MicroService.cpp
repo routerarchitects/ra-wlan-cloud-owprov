@@ -297,6 +297,8 @@ namespace OpenWifi {
 		// This deliberately does NOT call LoadConfigurationFile() or configPtr()->addWriteable()
 		// to avoid mutating the global Poco config layer while other cached MicroService
 		// fields (endpoints, hash, security settings) remain unchanged.
+		// Note: PropertyFileConfiguration has a protected destructor (Poco RefCounted pattern),
+		// so it must be heap-allocated via Poco::AutoPtr, not stack-allocated.
 		try {
 			std::string ConfiguredSlot;
 
@@ -310,12 +312,12 @@ namespace OpenWifi {
 					return;
 				}
 
-				Poco::Util::PropertyFileConfiguration LocalConfig(ConfigFile.toString());
-				ConfiguredSlot = LocalConfig.getString("openwifi.system.slot.id", "");
+				Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> LocalConfig(new Poco::Util::PropertyFileConfiguration(ConfigFile.toString()));
+				ConfiguredSlot = LocalConfig->getString("openwifi.system.slot.id", "");
 			} else {
 				std::istringstream is(ConfigContent_);
-				Poco::Util::PropertyFileConfiguration LocalConfig(is);
-				ConfiguredSlot = LocalConfig.getString("openwifi.system.slot.id", "");
+				Poco::AutoPtr<Poco::Util::PropertyFileConfiguration> LocalConfig(new Poco::Util::PropertyFileConfiguration(is));
+				ConfiguredSlot = LocalConfig->getString("openwifi.system.slot.id", "");
 			}
 
 			InitializeInstanceIdentity(ConfiguredSlot);
