@@ -56,7 +56,7 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 		venueA2:     getEnvOrDefault("VENUE_A2_UUID", ""),
 		venueB1:     getEnvOrDefault("VENUE_B1_UUID", ""),
 		policyValid: getEnvOrDefault("POLICY_VALID_ID", ""),
-		userValid:   getEnvOrDefault("USER_VALID_ID", ""),
+		userValid:   getEnvOrDefault("USER_VALID_ID", getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")),
 		token:       token,
 	}
 
@@ -260,7 +260,7 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 	}
 
 	if fixtures.userValid == "" {
-		fixtures.userValid = "00000000-0000-0000-0000-000000000001"
+		fixtures.userValid = getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")
 	}
 
 	return fixtures
@@ -764,6 +764,940 @@ func TestManagementRole_V2_Negative_Scenarios(t *testing.T) {
 		}
 		if status != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for non-string venueIds element, got %d. Body: %s", status, string(body))
+		}
+	})
+}
+
+func TestManagementRolePolicyQueryFilter(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	fixtures := getTestFixtures(t, client)
+
+	var existingRoleIDs = make(map[string]bool)
+	var existingRolesResp struct {
+		Roles []struct {
+			ID string `json:"id"`
+		} `json:"roles"`
+	}
+	if status, body, err := client.DoRequest("GET", "/managementRole", fixtures.token, nil); err == nil && status == http.StatusOK {
+		_ = json.Unmarshal(body, &existingRolesResp)
+		for _, r := range existingRolesResp.Roles {
+			existingRoleIDs[r.ID] = true
+		}
+	}
+
+	safeDeleteRole := func(roleId string) {
+		if roleId != "" && !existingRoleIDs[roleId] {
+			client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", roleId), fixtures.token, nil)
+		}
+	}
+
+	createTempVenue := func(entityId string) string {
+		payload := map[string]interface{}{
+			"name":   fmt.Sprintf("test-venue-%d", time.Now().UnixNano()),
+			"entity": entityId,
+		}
+		status, body, err := client.DoRequest("POST", "/venue/0", fixtures.token, payload)
+		if err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &created); err == nil && created.ID != "" {
+				return created.ID
+			}
+		}
+		return ""
+	}
+
+	tempVenueA := createTempVenue(fixtures.entityA)
+	if tempVenueA != "" {
+		defer client.DoRequest("DELETE", fmt.Sprintf("/venue/%s", tempVenueA), fixtures.token, nil)
+	}
+
+	var createdRoleB struct {
+		ID string `json:"id"`
+	}
+
+	roleName := fmt.Sprintf("test-policy-filter-%d", time.Now().UnixNano())
+	createPayload := map[string]interface{}{
+		"name":             roleName,
+		"entity":           fixtures.entityA,
+		"venue":            tempVenueA,
+		"managementPolicy": fixtures.policyValid,
+		"users":            []string{fixtures.userValid},
+	}
+
+	status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, createPayload)
+	if err != nil {
+		t.Fatalf("POST /managementRole/0 failed: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("Failed to create test role: status %d, body: %s", status, string(body))
+	}
+
+	var createdRole struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &createdRole); err != nil {
+		t.Fatalf("Failed to unmarshal created role: %v", err)
+	}
+	defer safeDeleteRole(createdRole.ID)
+
+	// ── Hermetic Setup for Non-Root Admin A and Shadowed User ────────────────
+	tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "Bearer user-admin-operator-a-token")
+	adminAUserID := getEnvOrDefault("USER_ADMIN_OPERATOR_A_ID", "00000000-0000-0000-0000-000000000003")
+
+	tokenShadowedUser := getEnvOrDefault("TOKEN_VENUE_SHADOWED", "Bearer user-venue-shadowed-token")
+	shadowedUserID := getEnvOrDefault("USER_VENUE_SHADOWED_ID", "00000000-0000-0000-0000-000000000002")
+
+	// 1. Assign Admin A an entity-scoped role on fixtures.entityA
+	if fixtures.entityA != "" {
+		adminARolePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("fixture-admin-a-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            "",
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{adminAUserID},
+		}
+		var createdAdminARole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, adminARolePayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdAdminARole)
+			if createdAdminARole.ID != "" {
+				defer safeDeleteRole(createdAdminARole.ID)
+			}
+		}
+	}
+
+	// 2. Create restricted policy that denies managementRole for venue shadowing
+	restrictPolicyID := fmt.Sprintf("00000000-0000-0000-0000-%012d", time.Now().UnixNano()%1000000000000)
+	restrictPolicyPayload := map[string]interface{}{
+		"name":        fmt.Sprintf("restrict-policy-%d", time.Now().UnixNano()),
+		"description": "Restricted policy for venue shadowing test",
+		"entries": []map[string]interface{}{
+			{
+				"resources": []string{"inventory"},
+				"actions":   []string{"read"},
+			},
+		},
+	}
+	statusPol, bodyPol, errPol := client.DoRequest("POST", fmt.Sprintf("/managementPolicy/%s", restrictPolicyID), fixtures.token, restrictPolicyPayload)
+	if errPol == nil && (statusPol == http.StatusOK || statusPol == http.StatusCreated) {
+		var createdPol struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(bodyPol, &createdPol)
+		if createdPol.ID != "" {
+			restrictPolicyID = createdPol.ID
+		}
+		defer client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", restrictPolicyID), fixtures.token, nil)
+	}
+
+	// 3. Assign Shadowed User:
+	// a) Base entity role on fixtures.entityA allowing GET
+	if fixtures.entityA != "" {
+		shadowEntityPayload := map[string]interface{}{
+			"name":             fmt.Sprintf("shadow-entity-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            "",
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{shadowedUserID},
+		}
+		var createdShadowEntityRole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, shadowEntityPayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdShadowEntityRole)
+			if createdShadowEntityRole.ID != "" {
+				defer safeDeleteRole(createdShadowEntityRole.ID)
+			}
+		}
+	}
+
+	// b) Venue-specific role on fixtures.venueA1 with restricted policy (causing venue shadowing)
+	if fixtures.venueA1 != "" {
+		shadowVenuePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("shadow-venue-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            fixtures.venueA1,
+			"managementPolicy": restrictPolicyID,
+			"users":            []string{shadowedUserID},
+		}
+		var createdShadowVenueRole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, shadowVenuePayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdShadowVenueRole)
+			if createdShadowVenueRole.ID != "" {
+				defer safeDeleteRole(createdShadowVenueRole.ID)
+			}
+		}
+
+		// Also create a test role in fixtures.venueA1 so there is an actual role to be shadowed
+		venueA1TestPayload := map[string]interface{}{
+			"name":             fmt.Sprintf("venue-a1-test-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityA,
+			"venue":            fixtures.venueA1,
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		var createdVenueA1TestRole struct {
+			ID string `json:"id"`
+		}
+		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venueA1TestPayload); err == nil && status == http.StatusOK {
+			_ = json.Unmarshal(body, &createdVenueA1TestRole)
+			if createdVenueA1TestRole.ID != "" {
+				defer safeDeleteRole(createdVenueA1TestRole.ID)
+			}
+		}
+	}
+
+	t.Run("Positive: Filter roles by policyId returns matching role", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", fixtures.policyValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID               string `json:"id"`
+				ManagementPolicy string `json:"managementPolicy"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ManagementPolicy != fixtures.policyValid {
+				t.Errorf("Expected managementPolicy %s, got %s for role %s", fixtures.policyValid, r.ManagementPolicy, r.ID)
+			}
+			if r.ID == createdRole.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for policyId %s", createdRole.ID, fixtures.policyValid)
+		}
+	})
+
+	t.Run("Positive: Filter roles by policyId and user returns matching role", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&user=%s", fixtures.policyValid, fixtures.userValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&user failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID               string   `json:"id"`
+				ManagementPolicy string   `json:"managementPolicy"`
+				Users            []string `json:"users"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdRole.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for policyId %s and user %s", createdRole.ID, fixtures.policyValid, fixtures.userValid)
+		}
+	})
+
+	t.Run("Positive: Filter roles by non-matching policy returns empty array", func(t *testing.T) {
+		dummyPolicyID := "00000000-0000-0000-0000-999999999999"
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", dummyPolicyID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []interface{} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(resp.Roles) != 0 {
+			t.Errorf("Expected 0 roles for non-existent policy, got %d", len(resp.Roles))
+		}
+	})
+
+	tempVenueFilter := createTempVenue(fixtures.entityA)
+	if tempVenueFilter == "" {
+		tempVenueFilter = fixtures.venueA1
+	} else {
+		defer client.DoRequest("DELETE", fmt.Sprintf("/venue/%s", tempVenueFilter), fixtures.token, nil)
+	}
+
+	venueRoleName := fmt.Sprintf("test-venue-filter-%d", time.Now().UnixNano())
+	venuePayload := map[string]interface{}{
+		"name":             venueRoleName,
+		"entity":           fixtures.entityA,
+		"venue":            tempVenueFilter,
+		"managementPolicy": fixtures.policyValid,
+		"users":            []string{fixtures.userValid},
+	}
+
+	var createdVenueRole struct {
+		ID string `json:"id"`
+	}
+	if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venuePayload); err == nil && status == http.StatusOK {
+		_ = json.Unmarshal(body, &createdVenueRole)
+	}
+	if createdVenueRole.ID != "" {
+		defer safeDeleteRole(createdVenueRole.ID)
+	}
+
+	t.Run("Positive: Filter roles by policyId and venue returns matching role", func(t *testing.T) {
+		if createdVenueRole.ID == "" {
+			t.Fatal("Test venue role was not created")
+		}
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s", fixtures.policyValid, tempVenueFilter), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID               string `json:"id"`
+				ManagementPolicy string `json:"managementPolicy"`
+				Venue            string `json:"venue"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdVenueRole.ID {
+				found = true
+				if r.Venue != tempVenueFilter {
+					t.Errorf("Expected venue %s, got %s", tempVenueFilter, r.Venue)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for policyId %s and venue %s", createdVenueRole.ID, fixtures.policyValid, tempVenueFilter)
+		}
+	})
+
+	t.Run("Positive: Filter roles by venue alone returns matching role", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", tempVenueFilter), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID    string `json:"id"`
+				Venue string `json:"venue"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdVenueRole.ID {
+				found = true
+				if r.Venue != tempVenueFilter {
+					t.Errorf("Expected venue %s, got %s", tempVenueFilter, r.Venue)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s in results for standalone venue %s", createdVenueRole.ID, tempVenueFilter)
+		}
+
+		// Check countOnly=true
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", tempVenueFilter), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for countOnly, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count == 0 {
+			t.Errorf("Expected count > 0 for venue %s, got 0", tempVenueFilter)
+		}
+	})
+
+	t.Run("Positive: Entity-scoped user can query venue-filtered role under their entity", func(t *testing.T) {
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
+		if tokenAdminA == "" {
+			t.Skip("TOKEN_ADMIN_OPERATOR_A not provided; skipping entity-scoped query test")
+		}
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s", fixtures.policyValid, tempVenueFilter), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&venue failed for entity admin: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for entity admin querying venue in their entity, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		found := false
+		for _, r := range resp.Roles {
+			if r.ID == createdVenueRole.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected role %s to be visible to entity admin for venue %s under their entity", createdVenueRole.ID, tempVenueFilter)
+		}
+
+		// Also check countOnly=true for entity-scoped user
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, tempVenueFilter), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&venue&countOnly failed for entity admin: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for entity admin countOnly, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count == 0 {
+			t.Errorf("Expected count > 0 for entity admin countOnly, got 0")
+		}
+	})
+
+	t.Run("Positive: Admin of Entity A querying roles under Entity B does not see them", func(t *testing.T) {
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
+		if tokenAdminA == "" || fixtures.entityB == "" {
+			t.Skip("TOKEN_ADMIN_OPERATOR_A or entityB not provided; skipping cross-tenant isolation test")
+		}
+
+		tempVenueB := createTempVenue(fixtures.entityB)
+		if tempVenueB != "" {
+			defer client.DoRequest("DELETE", fmt.Sprintf("/venue/%s", tempVenueB), fixtures.token, nil)
+		}
+
+		// Create a role under Entity B using root token
+		bRolePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("entity-b-role-%d", time.Now().UnixNano()),
+			"entity":           fixtures.entityB,
+			"venue":            tempVenueB,
+			"managementPolicy": fixtures.policyValid,
+			"users":            []string{fixtures.userValid},
+		}
+		status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, bRolePayload)
+		if err != nil || status != http.StatusOK {
+			t.Skipf("Could not create test role under entity B: %v, status %d", err, status)
+		}
+		_ = json.Unmarshal(body, &createdRoleB)
+		if createdRoleB.ID != "" {
+			defer safeDeleteRole(createdRoleB.ID)
+		}
+
+		// Admin A queries GET /managementRole?policyId=fixtures.policyValid
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s", fixtures.policyValid), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed for Admin A: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+		var resp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		for _, r := range resp.Roles {
+			if r.ID == createdRoleB.ID {
+				t.Errorf("Cross-tenant leakage: Admin A can see role %s belonging to Entity B!", createdRoleB.ID)
+			}
+		}
+
+		// Verify Admin A directly filtering by unauthorized entity B returns 200 OK with empty roles list
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s", fixtures.policyValid, fixtures.entityB), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&entity failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK when Admin A queries unauthorized entity B, got %d. Body: %s", status, string(body))
+		}
+		var emptyResp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &emptyResp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(emptyResp.Roles) != 0 {
+			t.Fatalf("Expected empty roles list for unauthorized entity B, got %d roles", len(emptyResp.Roles))
+		}
+
+		// Also verify countOnly=true returns 200 OK with count=0 for unauthorized entity B
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s&countOnly=true", fixtures.policyValid, fixtures.entityB), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&entity&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for countOnly unauthorized entity B, got %d. Body: %s", status, string(body))
+		}
+		var countEntResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countEntResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countEntResp.Count != 0 {
+			t.Fatalf("Expected count=0 for countOnly unauthorized entity B, got %d", countEntResp.Count)
+		}
+	})
+
+	t.Run("Positive: Explicit countOnly=true coverage across policyId filter combinations", func(t *testing.T) {
+		// 1. policyId + countOnly
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&countOnly=true", fixtures.policyValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count < 1 {
+			t.Errorf("Expected count >= 1 for policyId=%s, got %d", fixtures.policyValid, countResp.Count)
+		}
+
+		// 2. policyId + entity + countOnly
+		if fixtures.entityA != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&entity=%s&countOnly=true", fixtures.policyValid, fixtures.entityA), fixtures.token, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?policyId&entity&countOnly failed: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+			}
+			var countEntResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countEntResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countEntResp.Count < 1 {
+				t.Errorf("Expected count >= 1 for policyId + entity, got %d", countEntResp.Count)
+			}
+		}
+
+		// 3. policyId + venue + countOnly
+		targetVenueForCount := tempVenueFilter
+		if targetVenueForCount == "" {
+			targetVenueForCount = fixtures.venueA1
+		}
+		if targetVenueForCount != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, targetVenueForCount), fixtures.token, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?policyId&venue&countOnly failed: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+			}
+			var countVenResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countVenResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countVenResp.Count < 1 {
+				t.Errorf("Expected count >= 1 for policyId + venue, got %d", countVenResp.Count)
+			}
+		}
+
+		// 4. non-root + policyId + countOnly
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
+		if tokenAdminA != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&countOnly=true", fixtures.policyValid), tokenAdminA, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?policyId&countOnly failed for non-root: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK for non-root countOnly, got %d. Body: %s", status, string(body))
+			}
+			var countNonRootResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countNonRootResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countNonRootResp.Count < 1 {
+				t.Errorf("Expected count >= 1 for non-root policyId, got %d", countNonRootResp.Count)
+			}
+		}
+	})
+
+	t.Run("Positive: Non-root user querying unauthorized venue returns empty list", func(t *testing.T) {
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
+		if tokenAdminA == "" || fixtures.venueB1 == "" {
+			t.Skip("TOKEN_ADMIN_OPERATOR_A or venueB1 not provided; skipping unauthorized venue test")
+		}
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueB1), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for unauthorized venue query, got %d. Body: %s", status, string(body))
+		}
+		var emptyResp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &emptyResp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(emptyResp.Roles) != 0 {
+			t.Fatalf("Expected 0 roles for unauthorized venue query, got %d", len(emptyResp.Roles))
+		}
+
+		// Verify countOnly=true also returns 200 OK with count=0
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueB1), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for countOnly unauthorized venue, got %d. Body: %s", status, string(body))
+		}
+		var countResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countResp.Count != 0 {
+			t.Fatalf("Expected count=0 for countOnly unauthorized venue, got %d", countResp.Count)
+		}
+	})
+
+	t.Run("Positive: Venue role shadowing excludes roles in denied venue for shadowed user", func(t *testing.T) {
+		tokenShadowedUser := getEnvOrDefault("TOKEN_VENUE_SHADOWED", tokenShadowedUser)
+		if tokenShadowedUser == "" {
+			t.Skip("TOKEN_VENUE_SHADOWED not provided; skipping venue role shadowing test")
+		}
+
+		// 1. Listing all roles omits roles under shadowed venue (returns 200 OK)
+		status, body, err := client.DoRequest("GET", "/managementRole", tokenShadowedUser, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for shadowed user listing roles, got %d. Body: %s", status, string(body))
+		}
+		var resp struct {
+			Roles []struct {
+				Venue string `json:"venue"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		for _, r := range resp.Roles {
+			if r.Venue == fixtures.venueA1 {
+				t.Errorf("Shadowed venue %s leaked in role listing", fixtures.venueA1)
+			}
+		}
+
+		// 2. Explicit query for shadowed venue returns 200 OK with empty roles list
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueA1), tokenShadowedUser, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for explicit query of shadowed venue, got %d. Body: %s", status, string(body))
+		}
+		var shadowedResp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &shadowedResp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(shadowedResp.Roles) != 0 {
+			t.Fatalf("Expected 0 roles for shadowed venue query, got %d", len(shadowedResp.Roles))
+		}
+
+		// 3. Verify countOnly=true returns 200 OK with count=0 for shadowed venue
+		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueA1), tokenShadowedUser, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for countOnly shadowed venue, got %d. Body: %s", status, string(body))
+		}
+		var countShadowedResp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &countShadowedResp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+		if countShadowedResp.Count != 0 {
+			t.Fatalf("Expected count=0 for countOnly shadowed venue, got %d", countShadowedResp.Count)
+		}
+	})
+
+	t.Run("Positive: select query parameter works for root and non-root users", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRole.ID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?select failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for root select query, got %d. Body: %s", status, string(body))
+		}
+		var rootResp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &rootResp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(rootResp.Roles) != 1 || rootResp.Roles[0].ID != createdRole.ID {
+			t.Errorf("Expected exactly role %s in select response, got %d roles", createdRole.ID, len(rootResp.Roles))
+		}
+
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
+		if tokenAdminA != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRole.ID), tokenAdminA, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?select failed for non-root: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK for non-root select query, got %d. Body: %s", status, string(body))
+			}
+			var nonRootResp struct {
+				Roles []struct {
+					ID string `json:"id"`
+				} `json:"roles"`
+			}
+			if err := json.Unmarshal(body, &nonRootResp); err != nil {
+				t.Fatalf("Failed to parse response: %v", err)
+			}
+			if len(nonRootResp.Roles) != 1 || nonRootResp.Roles[0].ID != createdRole.ID {
+				t.Errorf("Expected role %s in non-root select response, got %d roles", createdRole.ID, len(nonRootResp.Roles))
+			}
+		}
+	})
+
+	t.Run("Negative: select with unknown ID returns 400 Bad Request UnknownId", func(t *testing.T) {
+		unknownID := "00000000-0000-0000-0000-999999999999"
+
+		// 1. select=<unknown-id>
+		status, _, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", unknownID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?select=<unknown> failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for unknown select ID, got %d", status)
+		}
+
+		// 2. select=<valid-id>,<unknown-id>
+		status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s,%s", createdRole.ID, unknownID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?select=<valid>,<unknown> failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for mixed valid and unknown select IDs, got %d", status)
+		}
+
+		// 3. Admin A selecting unauthorized role from Entity B vs nonexistent ID:
+		// Both must return 400 Bad Request UnknownId to prevent object existence oracle
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", tokenAdminA)
+		if tokenAdminA != "" {
+			if createdRoleB.ID != "" {
+				status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRoleB.ID), tokenAdminA, nil)
+				if err != nil {
+					t.Fatalf("GET /managementRole?select=<unauthorized> failed: %v", err)
+				}
+				if status != http.StatusBadRequest {
+					t.Errorf("Expected 400 Bad Request for unauthorized role select ID (preventing existence leak), got %d", status)
+				}
+			}
+
+			status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", unknownID), tokenAdminA, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?select=<unknown> failed: %v", err)
+			}
+			if status != http.StatusBadRequest {
+				t.Errorf("Expected 400 Bad Request for non-root unknown select ID, got %d", status)
+			}
+		}
+	})
+
+	t.Run("Negative: Filter roles with invalid or empty UUID parameters returns 400 Bad Request", func(t *testing.T) {
+		// 1. Malformed UUIDs
+		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed policy UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?venue=invalid-venue-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed venue UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?entity=invalid-entity-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?entity failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed entity UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?user=invalid-user-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed user UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?userId=invalid-user-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?userId failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed userId UUID, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?user_id=invalid-user-format", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user_id failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed user_id UUID, got %d", status)
+		}
+
+		// 2. Supplied but empty parameters for policyId, venue, entity return 400 Bad Request
+		status, _, err = client.DoRequest("GET", "/managementRole?policyId=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?policyId= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty policyId, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?venue=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty venue, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?entity=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?entity= failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for supplied empty entity, got %d", status)
+		}
+
+		// 3. Fallback resolution: empty user alias falls through to next alias
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?user=&userId=%s", fixtures.userValid), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user=&userId= failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for fallback from empty user to valid userId, got %d. Body: %s", status, string(body))
+		}
+
+		// Fallback to invalid UUID alias returns 400 Bad Request
+		status, _, err = client.DoRequest("GET", "/managementRole?user=&userId=invalid-uuid", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user=&userId=invalid-uuid failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for fallback to invalid userId, got %d", status)
+		}
+
+		// 4. When all supplied user aliases are empty, legacy behavior ignores them and returns 200 OK (unfiltered list)
+		status, _, err = client.DoRequest("GET", "/managementRole?user=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user= failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for empty user alias, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?userId=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?userId= failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for empty userId alias, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?user_id=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user_id= failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for empty user_id alias, got %d", status)
+		}
+
+		status, _, err = client.DoRequest("GET", "/managementRole?user=&userId=", fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user=&userId= (all empty) failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK when all supplied user aliases are empty, got %d", status)
 		}
 	})
 }

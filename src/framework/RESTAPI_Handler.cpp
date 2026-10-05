@@ -46,7 +46,9 @@ namespace OpenWifi {
 
 		if ((Resource == "managementPolicy" || Resource == "systemConfiguration" ||
 			 Resource == "radiusEndpoint" || Resource == "openroaming" ||
-			 Resource == "iptocountry") && Method == Poco::Net::HTTPRequest::HTTP_GET) {
+			 Resource == "iptocountry" ||
+			 (Resource == "managementRole" && Bindings_.find("id") == Bindings_.end())) &&
+			Method == Poco::Net::HTTPRequest::HTTP_GET) {
 			return true;
 		}
 
