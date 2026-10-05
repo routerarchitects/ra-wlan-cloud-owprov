@@ -87,14 +87,17 @@ jobs:
     - name: Checkout Repository Code
       uses: actions/checkout@v4
 
-    - name: Build Docker Image
+    - name: Build Test Image
       run: |
         docker build --target owprov-build -t owprov-build:test .
-        docker build -t owprov:test .
 
     - name: Run C++ Unit Tests (CTest)
       run: |
         docker run --rm owprov-build:test ctest -R instance_identity_test --output-on-failure
+
+    - name: Build Runtime Docker Image
+      run: |
+        docker build -t owprov:test .
 
     - name: Verify runtime shared-library dependencies
       run: |
