@@ -259,18 +259,23 @@ jobs:
             postgres:15
 
           echo "Waiting for PostgreSQL to be ready..."
+          READY=0
           for i in {1..30}; do
-            if docker exec postgres pg_isready -U owprov > /dev/null 2>&1; then
-              echo "PostgreSQL is ready!"
+            if docker logs postgres 2>&1 | grep -q "PostgreSQL init process complete" && \
+               docker exec postgres pg_isready -U owprov > /dev/null 2>&1 && \
+               docker exec postgres psql -U owprov -d owprov -c "SELECT 1;" > /dev/null 2>&1; then
+              echo "PostgreSQL is ready and accepting queries!"
+              READY=1
               break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "ERROR: PostgreSQL did not start in time!"
-              docker logs postgres
-              exit 1
             fi
             sleep 1
           done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "ERROR: PostgreSQL did not become ready in time!"
+            docker logs postgres
+            exit 1
+          fi
 
       # ── Seed legacy schema & dirty data for brownfield migration test ────────
       - name: Seed legacy schema and dirty data for migration verification
@@ -278,7 +283,9 @@ jobs:
           set -euo pipefail
           echo "Seeding legacy (v1) schema and corrupt/orphaned data into PostgreSQL..."
 
-          docker exec -i postgres psql -U owprov -d owprov << 'EOF'
+          SEEDED=0
+          for attempt in {1..10}; do
+            if docker exec -i postgres psql -U owprov -d owprov << 'EOF'
           -- 1. Create policies table
           CREATE TABLE IF NOT EXISTS policies (
               id VARCHAR(64) PRIMARY KEY,
@@ -329,8 +336,20 @@ jobs:
           INSERT INTO roles (id, name, description, notes, created, modified, managementPolicy, users, inUse, tags)
           VALUES ('mig-role-valid-004', 'Role With Valid Policy', 'Should survive migration', '[]', 1600000000, 1600000000, 'mig-valid-policy-001', '[]', '[]', '[]');
           EOF
+            then
+              echo "Legacy schema and dirty test data successfully seeded."
+              SEEDED=1
+              break
+            fi
+            echo "PostgreSQL not ready to accept seed queries yet (attempt $attempt/10), retrying in 1s..."
+            sleep 1
+          done
 
-          echo "Legacy schema and dirty test data successfully seeded."
+          if [ "$SEEDED" -ne 1 ]; then
+            echo "ERROR: Failed to seed legacy schema into PostgreSQL after 10 attempts!"
+            docker logs postgres
+            exit 1
+          fi
 
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
