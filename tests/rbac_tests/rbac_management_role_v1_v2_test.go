@@ -1249,6 +1249,49 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Positive: select query parameter works for root and non-root users", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRole.ID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?select failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK for root select query, got %d. Body: %s", status, string(body))
+		}
+		var rootResp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &rootResp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+		if len(rootResp.Roles) != 1 || rootResp.Roles[0].ID != createdRole.ID {
+			t.Errorf("Expected exactly role %s in select response, got %d roles", createdRole.ID, len(rootResp.Roles))
+		}
+
+		tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "")
+		if tokenAdminA != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", createdRole.ID), tokenAdminA, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?select failed for non-root: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK for non-root select query, got %d. Body: %s", status, string(body))
+			}
+			var nonRootResp struct {
+				Roles []struct {
+					ID string `json:"id"`
+				} `json:"roles"`
+			}
+			if err := json.Unmarshal(body, &nonRootResp); err != nil {
+				t.Fatalf("Failed to parse response: %v", err)
+			}
+			if len(nonRootResp.Roles) != 1 || nonRootResp.Roles[0].ID != createdRole.ID {
+				t.Errorf("Expected role %s in non-root select response, got %d roles", createdRole.ID, len(nonRootResp.Roles))
+			}
+		}
+	})
+
 	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
 		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
 		if err != nil {

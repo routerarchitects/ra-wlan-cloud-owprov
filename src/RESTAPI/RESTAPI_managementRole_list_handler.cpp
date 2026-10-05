@@ -99,6 +99,20 @@ namespace OpenWifi {
 			}
 			Where += "venue='" + venueParam + "'";
 		}
+		if (!QB_.Select.empty()) {
+			std::string selectClause = "id IN (";
+			bool first = true;
+			for (const auto &id : SelectedRecords()) {
+				if (!first) selectClause += ",";
+				selectClause += "'" + ORM::Escape(id) + "'";
+				first = false;
+			}
+			selectClause += ")";
+			if (!Where.empty()) {
+				Where += " AND ";
+			}
+			Where += selectClause;
+		}
 
 		if (!isRoot) {
 			auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
@@ -164,7 +178,7 @@ namespace OpenWifi {
 			return MakeJSONObjectArray("roles", Roles, *this);
 		}
 
-		if (!policyParam.empty() || !venueParam.empty() || !entityParam.empty() || !isRoot) {
+		if (!policyParam.empty() || !venueParam.empty() || !entityParam.empty() || !QB_.Select.empty() || !isRoot) {
 			if (QB_.CountOnly) {
 				auto C = DB_.Count(Where);
 				return ReturnCountOnly(C);
