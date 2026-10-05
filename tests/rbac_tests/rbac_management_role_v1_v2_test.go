@@ -56,7 +56,7 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 		venueA2:     getEnvOrDefault("VENUE_A2_UUID", ""),
 		venueB1:     getEnvOrDefault("VENUE_B1_UUID", ""),
 		policyValid: getEnvOrDefault("POLICY_VALID_ID", ""),
-		userValid:   getEnvOrDefault("USER_VALID_ID", ""),
+		userValid:   getEnvOrDefault("USER_VALID_ID", getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")),
 		token:       token,
 	}
 
@@ -260,7 +260,7 @@ func getTestFixtures(t *testing.T, clientV1 *TestClient) testFixtures {
 	}
 
 	if fixtures.userValid == "" {
-		fixtures.userValid = "00000000-0000-0000-0000-000000000001"
+		fixtures.userValid = getEnvOrDefault("TARGET_USER_A", "e6885f03-63db-4e0d-aad4-2b8d1a79a887")
 	}
 
 	return fixtures
@@ -1192,8 +1192,12 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 
 		// 3. policyId + venue + countOnly
-		if fixtures.venueA1 != "" {
-			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, fixtures.venueA1), fixtures.token, nil)
+		targetVenueForCount := tempVenueFilter
+		if targetVenueForCount == "" {
+			targetVenueForCount = fixtures.venueA1
+		}
+		if targetVenueForCount != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?policyId=%s&venue=%s&countOnly=true", fixtures.policyValid, targetVenueForCount), fixtures.token, nil)
 			if err != nil {
 				t.Fatalf("GET /managementRole?policyId&venue&countOnly failed: %v", err)
 			}
