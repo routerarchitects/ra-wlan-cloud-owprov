@@ -1292,6 +1292,28 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("Negative: select with unknown ID returns 400 Bad Request UnknownId", func(t *testing.T) {
+		unknownID := "00000000-0000-0000-0000-999999999999"
+
+		// 1. select=<unknown-id>
+		status, _, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s", unknownID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?select=<unknown> failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for unknown select ID, got %d", status)
+		}
+
+		// 2. select=<valid-id>,<unknown-id>
+		status, _, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?select=%s,%s", createdRole.ID, unknownID), fixtures.token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?select=<valid>,<unknown> failed: %v", err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for mixed valid and unknown select IDs, got %d", status)
+		}
+	})
+
 	t.Run("Negative: Filter roles with invalid UUID returns 400 Bad Request", func(t *testing.T) {
 		status, _, err := client.DoRequest("GET", "/managementRole?policyId=invalid-uuid-format", fixtures.token, nil)
 		if err != nil {

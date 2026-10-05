@@ -83,6 +83,53 @@ namespace OpenWifi {
 			}
 		}
 
+		if (!QB_.Select.empty()) {
+			ProvObjects::ManagementRoleVec Roles;
+			for (const auto &id : SelectedRecords()) {
+				ProvObjects::ManagementRole role;
+				if (!DB_.GetRecord("id", id, role)) {
+					return BadRequest(RESTAPI::Errors::UnknownId);
+				}
+
+				if (!policyParam.empty() && role.managementPolicy != policyParam) {
+					continue;
+				}
+				if (!entityParam.empty() && role.entity != entityParam) {
+					continue;
+				}
+				if (!venueParam.empty() && role.venue != venueParam) {
+					continue;
+				}
+				if (!userParam.empty() &&
+					std::find(role.users.begin(), role.users.end(), userParam) == role.users.end()) {
+					continue;
+				}
+
+				if (!isRoot) {
+					if (!role.venue.empty() && DeniedVenues.count(role.venue)) {
+						continue;
+					}
+					bool inScope = false;
+					if (!role.venue.empty() && AllowedVenues.count(role.venue)) {
+						inScope = true;
+					} else if (!role.entity.empty() && AllowedEntities.count(role.entity)) {
+						inScope = true;
+					}
+					if (!inScope) {
+						continue;
+					}
+				}
+
+				Roles.push_back(role);
+			}
+
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(Roles.size());
+			}
+
+			return MakeJSONObjectArray("roles", Roles, *this);
+		}
+
 		std::string Where;
 		if (!policyParam.empty()) {
 			Where = "managementPolicy='" + policyParam + "'";
@@ -98,20 +145,6 @@ namespace OpenWifi {
 				Where += " AND ";
 			}
 			Where += "venue='" + venueParam + "'";
-		}
-		if (!QB_.Select.empty()) {
-			std::string selectClause = "id IN (";
-			bool first = true;
-			for (const auto &id : SelectedRecords()) {
-				if (!first) selectClause += ",";
-				selectClause += "'" + ORM::Escape(id) + "'";
-				first = false;
-			}
-			selectClause += ")";
-			if (!Where.empty()) {
-				Where += " AND ";
-			}
-			Where += selectClause;
 		}
 
 		if (!isRoot) {
@@ -178,7 +211,7 @@ namespace OpenWifi {
 			return MakeJSONObjectArray("roles", Roles, *this);
 		}
 
-		if (!policyParam.empty() || !venueParam.empty() || !entityParam.empty() || !QB_.Select.empty() || !isRoot) {
+		if (!policyParam.empty() || !venueParam.empty() || !entityParam.empty() || !isRoot) {
 			if (QB_.CountOnly) {
 				auto C = DB_.Count(Where);
 				return ReturnCountOnly(C);
