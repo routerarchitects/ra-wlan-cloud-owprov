@@ -1121,6 +1121,43 @@ namespace ORM {
 			return false;
 		}
 
+		// SELECT ... FOR UPDATE row-level locking on caller transaction (PostgreSQL only, bypasses cache).
+		template <typename T>
+		bool GetRecordForUpdate(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
+		                        RecordType &R) {
+			if (Type_ != OpenWifi::DBType::pgsql) {
+				Logger_.error("GetRecordForUpdate is only supported on PostgreSQL. "
+					"SELECT ... FOR UPDATE on '" + TableName_ + "' was requested on a non-PostgreSQL backend. "
+					"Call site must be guarded or migrated to PostgreSQL before using row-level locking.");
+				tx.MarkFailed();
+				return false;
+			}
+			try {
+				assert(ValidFieldName(FieldName));
+				// Cache_ is intentionally bypassed: a cached object cannot hold a PostgreSQL row lock.
+				Poco::Data::Statement Select(tx.Session());
+				RecordTuple RT;
+				std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " + FieldName + "=? limit 1 for update";
+				auto tValue{Value};
+				Select << ConvertParams(St), Poco::Data::Keywords::into(RT), Poco::Data::Keywords::use(tValue);
+				if (Select.execute() == 1) {
+					Convert(RT, R);
+					return true;
+				}
+				// Row not found: not a transaction error. Caller decides how to handle.
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("GetRecordForUpdate failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("GetRecordForUpdate failed: unknown exception");
+				tx.MarkFailed();
+			}
+			return false;
+		}
+
 		bool GetRecords(OpenWifi::DbTransaction &tx,
 		                uint64_t Offset,
 		                uint64_t HowMany,
