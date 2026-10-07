@@ -71,6 +71,8 @@ namespace ORM {
 	struct Index {
 		std::string Name;
 		IndexEntryVec Entries;
+		// When true, generates PostgreSQL CREATE UNIQUE INDEX (unsupported on SQLite/MySQL). Defaults to false.
+		bool Unique = false;
 	};
 	typedef std::vector<Index> IndexVec;
 
@@ -246,8 +248,36 @@ namespace ORM {
 			SelectList_ += ")";
 
 			if (!Indexes.empty()) {
-				if (Type_ == OpenWifi::DBType::sqlite || Type_ == OpenWifi::DBType::pgsql) {
+				if (Type_ == OpenWifi::DBType::pgsql) {
 					for (const auto &j : Indexes) {
+						std::string IndexLine;
+
+						// Use CREATE UNIQUE INDEX for indexes declared with Unique=true;
+						// fall back to the plain non-unique form for all existing declarations.
+						IndexLine = std::string(j.Unique ? "CREATE UNIQUE INDEX IF NOT EXISTS "
+						                                 : "CREATE INDEX IF NOT EXISTS ") +
+						            j.Name + " ON " + TableName_ + " (";
+						bool first_entry = true;
+						for (const auto &k : j.Entries) {
+							auto IndexFieldName = Poco::toLower(k.FieldName);
+							assert(ValidFieldName(IndexFieldName));
+							if (!first_entry) {
+								IndexLine += " , ";
+							}
+							first_entry = false;
+							IndexLine += IndexFieldName + (k.Type == Indextype::ASC ? " ASC" : " DESC");
+						}
+						IndexLine += " )";
+						IndexCreation_.template emplace_back(IndexLine);
+						// Mirror entry so Create() can validate columns of unique indexes.
+						PgsqlIndexDefs_.push_back(j);
+					}
+				} else if (Type_ == OpenWifi::DBType::sqlite) {
+					for (const auto &j : Indexes) {
+						if (j.Unique) {
+							HasUnsupportedUniqueIndex_ = true;
+							continue;
+						}
 						std::string IndexLine;
 
 						IndexLine = std::string("CREATE INDEX IF NOT EXISTS ") + j.Name +
@@ -270,6 +300,10 @@ namespace ORM {
 					bool firstIndex = true;
 					std::string IndexLine;
 					for (const auto &j : Indexes) {
+						if (j.Unique) {
+							HasUnsupportedUniqueIndex_ = true;
+							continue;
+						}
 						if (!firstIndex)
 							IndexLine += ", ";
 						firstIndex = false;
@@ -349,6 +383,12 @@ namespace ORM {
 		}
 
 		inline bool Create() {
+			if (HasUnsupportedUniqueIndex_) {
+				Logger_.error("Unique secondary indexes are only supported on PostgreSQL. "
+				              "Cannot create table '" + TableName_ + "' because one or more declared "
+				              "indexes require unique constraint support on an unsupported database backend.");
+				return false;
+			}
 			switch (Type_) {
 			case OpenWifi::DBType::mysql: {
 				try {
@@ -384,11 +424,65 @@ namespace ORM {
 			case OpenWifi::DBType::pgsql: {
 				try {
 					Poco::Data::Session Session = Pool_.get();
-					std::string Statement =
-						"create table if not exists " + TableName_ + " ( " + CreateFields_ + " )";
+					std::string Statement = "create table if not exists " + TableName_ + " ( " + CreateFields_ + " )";
 					Session << Statement, Poco::Data::Keywords::now;
-					for (const auto &i : IndexCreation_) {
-						Session << i, Poco::Data::Keywords::now;
+					for (std::size_t Idx = 0; Idx < IndexCreation_.size(); ++Idx) {
+						const auto &i = IndexCreation_[Idx];
+						if (Idx < PgsqlIndexDefs_.size() && PgsqlIndexDefs_[Idx].Unique) {
+							const auto &Decl = PgsqlIndexDefs_[Idx];
+							try {
+								Session << i, Poco::Data::Keywords::now;
+							} catch (const Poco::Exception &E) {
+								Logger_.error("Failure to create PostgreSQL unique index on table '" + TableName_ + "'.");
+								Logger_.log(E);
+								return false;
+							} catch (const std::exception &E) {
+								Logger_.error("Failure to create PostgreSQL unique index on table '" + TableName_ + "': " + std::string(E.what()));
+								return false;
+							}
+							try {
+								bool IsUnique = false, IsValid = false, IsNotPartial = false, IsNotExpression = false;
+								int AttCount = 0;
+								std::string ActualCols, ExpectedCols;
+								for (const auto &entry : Decl.Entries) {
+									if (!ExpectedCols.empty()) ExpectedCols += ',';
+									ExpectedCols += Poco::toLower(entry.FieldName);
+								}
+								std::string VerifyQ = ConvertParams(
+									"SELECT i.indisunique, i.indisvalid, (i.indpred IS NULL), (i.indexprs IS NULL), "
+									"CAST(i.indnatts AS int), string_agg(lower(a.attname), ',' ORDER BY pos.pos) "
+									"FROM pg_index i "
+									"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
+									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
+									"JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS pos(attnum, pos) ON true "
+									"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = pos.attnum "
+									"WHERE idx_cls.relname = ? AND tbl_cls.relname = ? "
+									"GROUP BY i.indisunique, i.indisvalid, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnatts");
+								std::string UseIndexName = Decl.Name;
+								std::string UseTableName = TableName_;
+								Session << VerifyQ,
+								    Poco::Data::Keywords::into(IsUnique),
+								    Poco::Data::Keywords::into(IsValid),
+								    Poco::Data::Keywords::into(IsNotPartial),
+								    Poco::Data::Keywords::into(IsNotExpression),
+								    Poco::Data::Keywords::into(AttCount),
+								    Poco::Data::Keywords::into(ActualCols),
+								    Poco::Data::Keywords::use(UseIndexName),
+								    Poco::Data::Keywords::use(UseTableName),
+								    Poco::Data::Keywords::now;
+								if (!IsUnique || !IsValid || !IsNotPartial || !IsNotExpression ||
+								    AttCount != static_cast<int>(Decl.Entries.size()) || ActualCols != ExpectedCols) {
+									Logger_.error("PostgreSQL unique index '" + Decl.Name + "' validation failed on table '" + TableName_ + "'.");
+									return false;
+								}
+							} catch (const Poco::Exception &E) {
+								Logger_.error("Failed to verify PostgreSQL unique index '" + Decl.Name + "' on table '" + TableName_ + "'.");
+								Logger_.log(E);
+								return false;
+							}
+						} else {
+							Session << i, Poco::Data::Keywords::now;
+						}
 					}
 				} catch (const Poco::Exception &E) {
 					Logger_.error("Failure to create POSTGRESQL DB resources.");
@@ -1391,7 +1485,11 @@ namespace ORM {
 		std::string SelectList_;
 		std::string UpdateFields_;
 		std::vector<std::string> IndexCreation_;
+		// Parallel to IndexCreation_ for PostgreSQL: retains the original ORM::Index
+		// definition for each entry so Create() can validate surviving indexes.
+		std::vector<ORM::Index> PgsqlIndexDefs_;
 		std::map<std::string, int> FieldNames_;
+		bool HasUnsupportedUniqueIndex_ = false;
 	};
 } // namespace ORM
 

@@ -148,6 +148,16 @@ jobs:
             -e PGDATABASE=owprov_test \
             owprov-build:test /owprov/cmake-build/row_level_locking_test
 
+      - name: Run Unique-Index ORM Foundation Tests
+        run: |
+          docker run --rm --network host \
+            -e PGHOST=127.0.0.1 \
+            -e PGPORT=5432 \
+            -e PGUSER=postgres \
+            -e PGPASSWORD=postgres \
+            -e PGDATABASE=owprov_test \
+            owprov-build:test /owprov/cmake-build/unique_index_test
+
       - name: Run Multi-Instance Startup Lock Tests
         run: |
           docker run --rm --network host \

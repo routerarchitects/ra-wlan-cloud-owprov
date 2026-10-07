@@ -1,0 +1,672 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ *
+ * PostgreSQL Unique-Index ORM Foundation Tests.
+ *
+ * Verifies that the ORM correctly generates and enforces normal vs unique indexes
+ * through the existing ORM::Index / ORM::IndexVec abstraction.
+ *
+ * Scoped to PostgreSQL (the target multi-instance correctness backend) with explicit
+ * rejection of unsupported backends (SQLite / MySQL) when Unique=true is requested.
+ *
+ * Does NOT apply uniqueness to any production OWPROV table or field.
+ *
+ * Comprehensive Test Suite:
+ *   1. Unsupported backend rejection check (SQLite & MySQL return false when Unique=true).
+ *   2. SQLite backward-compatibility check (normal indexes create and allow duplicates).
+ *   3. Test A (PostgreSQL) - Normal index: duplicate indexed values are accepted.
+ *   4. Test B (PostgreSQL) - Single-column unique index: duplicate value is rejected.
+ *   5. Test C (PostgreSQL) - Composite unique index: duplicates rejected on (col_a, col_b) tuple;
+ *                            non-duplicate combinations are accepted.
+ *   6. Test D (PostgreSQL) - Repeated schema creation is idempotent (CREATE [UNIQUE] INDEX IF NOT EXISTS);
+ *                            verifies unique constraint remains enforced after repeated Create().
+ *   7. Test E (PostgreSQL) - Transaction-aware duplicate write marks tx failed; Commit() returns false.
+ *   8. Test F (PostgreSQL) - DeleteRecord frees unique key for subsequent insertion.
+ *   9. Test G (PostgreSQL) - Transaction Rollback frees unique key for subsequent insertion.
+ *  10. Test H (PostgreSQL) - Concurrent race: simultaneous duplicate inserts allow exactly 1 winner.
+ *  11. Test I (PostgreSQL) - Pre-existing duplicate rows cause Create() of declared unique index to fail.
+ *  12. Test J (PostgreSQL) - Same-name non-unique index causes Unique=true Create() to return false.
+ *  13. Test K (PostgreSQL) - Same-name unique index on wrong column causes Create() to return false.
+ *  14. Test L (PostgreSQL) - Same-name partial unique index on expected column causes Create() to return false.
+ */
+
+#include <iostream>
+#include <cstdlib>
+#include <string>
+#include <chrono>
+#include <thread>
+#include <atomic>
+#include <future>
+#include <vector>
+
+#include "Poco/ConsoleChannel.h"
+#include "Poco/AutoPtr.h"
+#include "Poco/Data/SessionPool.h"
+#include "Poco/Data/Session.h"
+#include "Poco/Data/Statement.h"
+#include "Poco/Data/SQLite/Connector.h"
+#ifndef SMALL_BUILD
+#include "Poco/Data/PostgreSQL/Connector.h"
+#endif
+#include "Poco/Logger.h"
+#include "framework/DbTransaction.h"
+#include "framework/StorageClass.h"
+#include "framework/orm.h"
+
+#define TEST_ASSERT(cond, msg) \
+    do { \
+        if (!(cond)) { \
+            std::cerr << "TEST FAILURE [" << __FILE__ << ":" << __LINE__ << "]: " << msg << std::endl; \
+            std::exit(1); \
+        } \
+    } while (0)
+
+namespace OpenWifi {
+
+struct UniTestRecord {
+    std::string id;
+    std::string name;
+    std::string value;
+    void to_json(Poco::JSON::Object &) const {}
+    bool from_json(const Poco::JSON::Object::Ptr &) { return true; }
+};
+typedef Poco::Tuple<std::string, std::string, std::string> UniTestRecordTuple;
+
+struct UniCompositeRecord {
+    std::string id;
+    std::string col_a;
+    std::string col_b;
+    void to_json(Poco::JSON::Object &) const {}
+    bool from_json(const Poco::JSON::Object::Ptr &) { return true; }
+};
+typedef Poco::Tuple<std::string, std::string, std::string> UniCompositeRecordTuple;
+
+} // namespace OpenWifi
+
+template <>
+void ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord>::Convert(
+    const OpenWifi::UniTestRecordTuple &In, OpenWifi::UniTestRecord &Out) {
+    Out.id    = In.get<0>();
+    Out.name  = In.get<1>();
+    Out.value = In.get<2>();
+}
+template <>
+void ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord>::Convert(
+    const OpenWifi::UniTestRecord &In, OpenWifi::UniTestRecordTuple &Out) {
+    Out.set<0>(In.id);
+    Out.set<1>(In.name);
+    Out.set<2>(In.value);
+}
+
+template <>
+void ORM::DB<OpenWifi::UniCompositeRecordTuple, OpenWifi::UniCompositeRecord>::Convert(
+    const OpenWifi::UniCompositeRecordTuple &In, OpenWifi::UniCompositeRecord &Out) {
+    Out.id    = In.get<0>();
+    Out.col_a = In.get<1>();
+    Out.col_b = In.get<2>();
+}
+template <>
+void ORM::DB<OpenWifi::UniCompositeRecordTuple, OpenWifi::UniCompositeRecord>::Convert(
+    const OpenWifi::UniCompositeRecord &In, OpenWifi::UniCompositeRecordTuple &Out) {
+    Out.set<0>(In.id);
+    Out.set<1>(In.col_a);
+    Out.set<2>(In.col_b);
+}
+
+// DB with a normal (non-unique) index on "value"
+class NormalIndexDB : public ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord> {
+  public:
+    NormalIndexDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+                  const char *TableName = "pg_uni_normal_test")
+        : DB(T, TableName,
+             ORM::FieldVec{
+                 ORM::Field{"id",    ORM::FieldType::FT_TEXT, 0, true},
+                 ORM::Field{"name",  ORM::FieldType::FT_TEXT},
+                 ORM::Field{"value", ORM::FieldType::FT_TEXT}
+             },
+             ORM::IndexVec{
+                 // Existing two-member declaration: { Name, Entries }
+                 // Omitting the 3rd argument tests that it defaults to Unique=false (backward compatibility).
+                 // Derive index name from TableName so every test table has a distinct index name.
+                 {std::string(TableName) + "_normal_idx",
+                  ORM::IndexEntryVec{{std::string("value"), ORM::Indextype::ASC}}}
+             },
+             P, L, "unt") {}
+};
+
+// DB with a UNIQUE index on "value"
+class UniqueIndexDB : public ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord> {
+  public:
+    UniqueIndexDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+                  const char *TableName = "pg_uni_unique_test")
+        : DB(T, TableName,
+             ORM::FieldVec{
+                 ORM::Field{"id",    ORM::FieldType::FT_TEXT, 0, true},
+                 ORM::Field{"name",  ORM::FieldType::FT_TEXT},
+                 ORM::Field{"value", ORM::FieldType::FT_TEXT}
+             },
+             ORM::IndexVec{
+                 // Unique=true -- duplicate values rejected by PostgreSQL.
+                 // Derive index name from TableName so every test table has a distinct index name.
+                 {std::string(TableName) + "_unique_idx",
+                  ORM::IndexEntryVec{{std::string("value"), ORM::Indextype::ASC}},
+                  true}
+             },
+             P, L, "uut") {}
+};
+
+// DB with a UNIQUE composite index on (col_a, col_b)
+class CompositeUniqueDB : public ORM::DB<OpenWifi::UniCompositeRecordTuple, OpenWifi::UniCompositeRecord> {
+  public:
+    CompositeUniqueDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+                      const char *TableName = "pg_uni_composite_test")
+        : DB(T, TableName,
+             ORM::FieldVec{
+                 ORM::Field{"id",    ORM::FieldType::FT_TEXT, 0, true},
+                 ORM::Field{"col_a", ORM::FieldType::FT_TEXT},
+                 ORM::Field{"col_b", ORM::FieldType::FT_TEXT}
+             },
+             ORM::IndexVec{
+                 // UNIQUE on the (col_a, col_b) tuple.
+                 // Derive index name from TableName so every test table has a distinct index name.
+                 {std::string(TableName) + "_composite_idx",
+                  ORM::IndexEntryVec{
+                      {std::string("col_a"), ORM::Indextype::ASC},
+                      {std::string("col_b"), ORM::Indextype::ASC}
+                  },
+                  true}
+             },
+             P, L, "uct") {}
+};
+
+#ifndef SMALL_BUILD
+static bool DropPgTable(Poco::Data::SessionPool &pool, const std::string &tableName) {
+    try {
+        Poco::Data::Session s = pool.get();
+        Poco::Data::Statement dropStmt(s);
+        dropStmt << "DROP TABLE IF EXISTS " + tableName + " CASCADE";
+        dropStmt.execute();
+        return true;
+    } catch (const std::exception &e) {
+        std::cerr << "DropPgTable exception for " << tableName << ": " << e.what() << std::endl;
+        return false;
+    }
+}
+#endif
+
+int main() {
+    std::cout << "[Framework Unit Test] Initializing PostgreSQL Unique-Index ORM Foundation Tests..." << std::endl;
+
+    Poco::AutoPtr<Poco::ConsoleChannel> pChannel(new Poco::ConsoleChannel);
+    Poco::Logger &logger = Poco::Logger::get("UniqueIndexTest");
+    logger.setChannel(pChannel);
+
+    // -------------------------------------------------------------------------
+    // 1. Unsupported backend rejection check (SQLite & MySQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - 1. Unsupported backend rejection check (SQLite & MySQL)... " << std::flush;
+        Poco::Data::SQLite::Connector::registerConnector();
+        Poco::Data::SessionPool dummyPool("SQLite", "dummy_unsupported_test.db");
+
+        // 1a. SQLite with Unique=true must construct without throwing, but Create() must return false
+        UniqueIndexDB unsupportedSqlite(OpenWifi::DBType::sqlite, dummyPool, logger, "unsupported_sqlite_table");
+        TEST_ASSERT(!unsupportedSqlite.Create(), "Create() on SQLite with Unique=true must return false");
+
+        // 1b. MySQL with Unique=true must construct without throwing, but Create() must return false
+        UniqueIndexDB unsupportedMysql(OpenWifi::DBType::mysql, dummyPool, logger, "unsupported_mysql_table");
+        TEST_ASSERT(!unsupportedMysql.Create(), "Create() on MySQL with Unique=true must return false");
+
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. SQLite backward compatibility check (normal indexes create and allow duplicates)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - 2. SQLite backward compatibility (normal index allows duplicates)... " << std::flush;
+        Poco::Data::SessionPool sqlitePool("SQLite", "norm_sqlite_compat.db");
+        try {
+            Poco::Data::Session s = sqlitePool.get();
+            s << "DROP TABLE IF EXISTS norm_sqlite_compat", Poco::Data::Keywords::now;
+        } catch (...) {}
+
+        NormalIndexDB normalSqlite(OpenWifi::DBType::sqlite, sqlitePool, logger, "norm_sqlite_compat");
+        TEST_ASSERT(normalSqlite.Create(), "Failed to create normal index table on SQLite");
+
+        OpenWifi::UniTestRecord r1{"sq-1", "Name 1", "DUPLICATE_VAL"};
+        OpenWifi::UniTestRecord r2{"sq-2", "Name 2", "DUPLICATE_VAL"};
+        TEST_ASSERT(normalSqlite.CreateRecord(r1), "First insert on SQLite failed");
+        TEST_ASSERT(normalSqlite.CreateRecord(r2), "Second insert with duplicate value on SQLite must succeed for normal index");
+
+        try {
+            Poco::Data::Session s = sqlitePool.get();
+            s << "DROP TABLE IF EXISTS norm_sqlite_compat", Poco::Data::Keywords::now;
+        } catch (...) {}
+
+        std::cout << "PASSED" << std::endl;
+    }
+
+#ifdef SMALL_BUILD
+    std::cout << "[Framework Unit Test] SMALL_BUILD enabled: skipping PostgreSQL tests." << std::endl;
+    return 77;
+#else
+    // -------------------------------------------------------------------------
+    // PostgreSQL environment setup
+    // -------------------------------------------------------------------------
+    const char *pgHost = std::getenv("PGHOST");
+    if (!pgHost || std::string(pgHost).empty())
+        pgHost = std::getenv("TEST_POSTGRES_HOST");
+
+    if (!pgHost || std::string(pgHost).empty()) {
+        std::cout << "[Framework Unit Test] PGHOST / TEST_POSTGRES_HOST not set." << std::endl;
+        std::cout << "[Framework Unit Test] Skipping PostgreSQL tests with CTest skip code 77." << std::endl;
+        return 77;
+    }
+
+    std::string host(pgHost);
+    const char *pgPort = std::getenv("PGPORT");
+    std::string port = (pgPort && *pgPort) ? pgPort : "5432";
+    const char *pgUser = std::getenv("PGUSER");
+    std::string user = (pgUser && *pgUser) ? pgUser : "postgres";
+    const char *pgPass = std::getenv("PGPASSWORD");
+    std::string pass = (pgPass && *pgPass) ? pgPass : "postgres";
+    const char *pgDb = std::getenv("PGDATABASE");
+    std::string db = (pgDb && *pgDb) ? pgDb : "owprov_test";
+
+    std::string connStr = "host=" + host + " user=" + user + " password=" + pass +
+                          " dbname=" + db + " port=" + port + " connect_timeout=5";
+
+    Poco::Data::PostgreSQL::Connector::registerConnector();
+    Poco::Data::SessionPool pgPool("PostgreSQL", connStr, 4, 32, 60);
+
+    try {
+        Poco::Data::Session testSession = pgPool.get();
+        int val = 0;
+        testSession << "SELECT 1", Poco::Data::Keywords::into(val), Poco::Data::Keywords::now;
+        TEST_ASSERT(val == 1, "PostgreSQL ping SELECT 1 returned unexpected value");
+    } catch (const std::exception &e) {
+        std::cerr << "Failed to connect to PostgreSQL at " << host << ":" << port
+                  << " (" << e.what() << ")" << std::endl;
+        std::exit(1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test A: Normal index allows duplicate indexed values (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test A: Normal index allows duplicate indexed values (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_normal_test"), "Failed to drop table before Test A");
+        NormalIndexDB normalDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_normal_test");
+        TEST_ASSERT(normalDb.Create(), "Test A: Failed to create normal-index test table");
+
+        OpenWifi::UniTestRecord r1{"id-n-1", "Record 1", "shared_value"};
+        OpenWifi::UniTestRecord r2{"id-n-2", "Record 2", "shared_value"};
+
+        TEST_ASSERT(normalDb.CreateRecord(r1), "Test A: First insert with shared_value failed");
+        TEST_ASSERT(normalDb.CreateRecord(r2), "Test A: Second insert with shared_value failed -- normal index must NOT enforce uniqueness");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_normal_test"), "Failed to drop table after Test A");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test B: Single-column unique index rejects duplicates (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test B: Single-column unique index rejects duplicate (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_unique_test"), "Failed to drop table before Test B");
+        UniqueIndexDB uniqueDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_unique_test");
+        TEST_ASSERT(uniqueDb.Create(), "Test B: Failed to create unique-index test table");
+
+        OpenWifi::UniTestRecord r1{"id-u-1", "Record 1", "UNIQUE_VAL"};
+        OpenWifi::UniTestRecord r2{"id-u-2", "Record 2", "UNIQUE_VAL"};  // duplicate -> must fail
+        OpenWifi::UniTestRecord r3{"id-u-3", "Record 3", "DIFFERENT_VAL"};
+
+        TEST_ASSERT( uniqueDb.CreateRecord(r1), "Test B: First insert with UNIQUE_VAL failed unexpectedly");
+        TEST_ASSERT(!uniqueDb.CreateRecord(r2), "Test B: Duplicate insert must be rejected by PostgreSQL");
+        TEST_ASSERT( uniqueDb.CreateRecord(r3), "Test B: Insert with DIFFERENT_VAL failed unexpectedly");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_unique_test"), "Failed to drop table after Test B");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test C: Composite unique index (col_a, col_b) semantics (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test C: Composite unique index (col_a, col_b) semantics (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_composite_test"), "Failed to drop table before Test C");
+        CompositeUniqueDB compDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_composite_test");
+        TEST_ASSERT(compDb.Create(), "Test C: Failed to create composite-unique-index test table");
+
+        OpenWifi::UniCompositeRecord r1{"id-c-1", "A", "B"};
+        OpenWifi::UniCompositeRecord r2{"id-c-2", "A", "B"};  // exact duplicate -> must fail
+        OpenWifi::UniCompositeRecord r3{"id-c-3", "A", "C"};  // same col_a, different col_b -> allowed
+        OpenWifi::UniCompositeRecord r4{"id-c-4", "Z", "B"};  // different col_a, same col_b -> allowed
+
+        TEST_ASSERT( compDb.CreateRecord(r1), "Test C: Initial insert (A,B) failed");
+        TEST_ASSERT(!compDb.CreateRecord(r2), "Test C: Duplicate (A,B) insert must be rejected by PostgreSQL");
+        TEST_ASSERT( compDb.CreateRecord(r3), "Test C: Insert (A,C) must succeed");
+        TEST_ASSERT( compDb.CreateRecord(r4), "Test C: Insert (Z,B) must succeed");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_composite_test"), "Failed to drop table after Test C");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test D: Repeated schema creation is idempotent (CREATE [UNIQUE] INDEX IF NOT EXISTS)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test D: Repeated schema creation is idempotent (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_idempotent_test"), "Failed to drop table before Test D");
+        UniqueIndexDB uniqueDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_idempotent_test");
+        TEST_ASSERT(uniqueDb.Create(), "Test D: Initial Create() failed");
+        TEST_ASSERT(uniqueDb.Create(), "Test D: Second Create() failed -- IF NOT EXISTS must be safe");
+
+        // Verify the unique index is intact and strictly enforces uniqueness after repeated Create()
+        OpenWifi::UniTestRecord r1{"id-d-1", "First", "IDEMPOTENT_VAL"};
+        OpenWifi::UniTestRecord r2{"id-d-2", "Second", "IDEMPOTENT_VAL"};
+        TEST_ASSERT( uniqueDb.CreateRecord(r1), "Test D: First insert after idempotent Create() failed");
+        TEST_ASSERT(!uniqueDb.CreateRecord(r2), "Test D: Second insert with duplicate value must be rejected after idempotent Create()");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_idempotent_test"), "Failed to drop table after Test D");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test E: Transaction-aware duplicate write marks tx.HasFailed() (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test E: Transaction-aware unique violation marks tx failed (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_tx_test"), "Failed to drop table before Test E");
+        UniqueIndexDB pgTxDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_tx_test");
+        TEST_ASSERT(pgTxDb.Create(), "Test E: Failed to create PostgreSQL tx unique-index test table");
+
+        OpenWifi::UniTestRecord seed{"id-e-seed", "Seed", "TX_UNIQUE_VAL"};
+        TEST_ASSERT(pgTxDb.CreateRecord(seed), "Test E: Seed insert failed");
+
+        OpenWifi::DbTransaction tx(pgPool.get(), logger);
+        OpenWifi::UniTestRecord dup{"id-e-dup", "Dup", "TX_UNIQUE_VAL"};  // same value
+        bool dupResult = pgTxDb.CreateRecord(tx, dup);
+        TEST_ASSERT(!dupResult,     "Test E: Duplicate transactional insert must return false on PostgreSQL");
+        TEST_ASSERT(tx.HasFailed(), "Test E: tx.HasFailed() must be true after unique constraint violation");
+        TEST_ASSERT(!tx.Commit(),   "Test E: tx.Commit() must return false after failed transaction");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_tx_test"), "Failed to drop table after Test E");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test F: DeleteRecord frees unique key for subsequent insertion (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test F: DeleteRecord frees unique key for reuse (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_delete_test"), "Failed to drop table before Test F");
+        UniqueIndexDB delDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_delete_test");
+        TEST_ASSERT(delDb.Create(), "Test F: Failed to create delete test table");
+
+        OpenWifi::UniTestRecord r1{"id-del-1", "Del Record", "REUSE_KEY"};
+        TEST_ASSERT(delDb.CreateRecord(r1), "Test F: Initial insert failed");
+
+        // Duplicate insert is rejected
+        OpenWifi::UniTestRecord r2{"id-del-2", "Duplicate Record", "REUSE_KEY"};
+        TEST_ASSERT(!delDb.CreateRecord(r2), "Test F: Duplicate was unexpectedly allowed before delete");
+
+        // Delete original record
+        TEST_ASSERT(delDb.DeleteRecord("id", std::string("id-del-1")), "Test F: DeleteRecord failed");
+
+        // Now inserting with the same unique value must succeed
+        TEST_ASSERT(delDb.CreateRecord(r2), "Test F: Re-inserting unique key after deletion failed");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_delete_test"), "Failed to drop table after Test F");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test G: Transaction Rollback frees unique key for subsequent transaction (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test G: Transaction Rollback frees unique key (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_rollback_test"), "Failed to drop table before Test G");
+        UniqueIndexDB rbDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_rollback_test");
+        TEST_ASSERT(rbDb.Create(), "Test G: Failed to create rollback test table");
+
+        // Transaction 1 inserts unique key but then rolls back
+        {
+            OpenWifi::DbTransaction tx1(pgPool.get(), logger);
+            OpenWifi::UniTestRecord rTx{"id-rb-1", "Rollback Rec", "ROLLBACK_KEY"};
+            TEST_ASSERT(rbDb.CreateRecord(tx1, rTx), "Test G: Insert in tx1 failed");
+            TEST_ASSERT(tx1.Rollback(), "Test G: Rollback of tx1 failed");
+        }
+
+        // Transaction 2 should now be able to insert the same key and commit
+        {
+            OpenWifi::DbTransaction tx2(pgPool.get(), logger);
+            OpenWifi::UniTestRecord rTx2{"id-rb-2", "Committed Rec", "ROLLBACK_KEY"};
+            TEST_ASSERT(rbDb.CreateRecord(tx2, rTx2), "Test G: Insert in tx2 failed after tx1 rollback");
+            TEST_ASSERT(tx2.Commit(), "Test G: Commit of tx2 failed");
+        }
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_rollback_test"), "Failed to drop table after Test G");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test H: Concurrent duplicate inserts race condition (multi-threaded, PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test H: Concurrent duplicate inserts race condition (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_race_test"), "Failed to drop table before Test H");
+        UniqueIndexDB raceDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_race_test");
+        TEST_ASSERT(raceDb.Create(), "Test H: Failed to create race test table");
+
+        const int numRacers = 4;
+        std::atomic<int> successCount{0};
+        std::atomic<int> failCount{0};
+        std::atomic<bool> startGate{false};
+
+        std::vector<std::future<void>> futures;
+        for (int i = 0; i < numRacers; ++i) {
+            futures.push_back(std::async(std::launch::async, [&, i]() {
+                while (!startGate.load()) {
+                    std::this_thread::yield();
+                }
+                OpenWifi::UniTestRecord racerRec{
+                    "racer-" + std::to_string(i),
+                    "Worker " + std::to_string(i),
+                    "SHARED_CONCURRENT_KEY"
+                };
+                if (raceDb.CreateRecord(racerRec)) {
+                    successCount++;
+                } else {
+                    failCount++;
+                }
+            }));
+        }
+
+        // Open start gate
+        startGate.store(true);
+
+        for (auto &f : futures) {
+            f.get();
+        }
+
+        // Exactly 1 thread must succeed, and all other (numRacers - 1) threads must fail
+        TEST_ASSERT(successCount.load() == 1,
+                    ("Test H: Expected exactly 1 insert to succeed, got " + std::to_string(successCount.load())).c_str());
+        TEST_ASSERT(failCount.load() == numRacers - 1,
+                    ("Test H: Expected " + std::to_string(numRacers - 1) + " inserts to fail, got " + std::to_string(failCount.load())).c_str());
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_race_test"), "Failed to drop table after Test H");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test I: Pre-existing duplicates prevent Create() of unique index (PostgreSQL)
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test I: Pre-existing duplicates cause Create() to fail (PostgreSQL)... " << std::flush;
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_preexist_dup_test"), "Failed to drop table before Test I");
+
+        // Step 1: Create table with existing non-unique schema (using NormalIndexDB)
+        NormalIndexDB preExistDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_preexist_dup_test");
+        TEST_ASSERT(preExistDb.Create(), "Test I: Failed to create initial normal table");
+
+        // Step 2: Insert duplicate rows into the table
+        OpenWifi::UniTestRecord d1{"dup-1", "First Dup", "DUPLICATE_KEY"};
+        OpenWifi::UniTestRecord d2{"dup-2", "Second Dup", "DUPLICATE_KEY"};
+        TEST_ASSERT(preExistDb.CreateRecord(d1), "Test I: First insert failed");
+        TEST_ASSERT(preExistDb.CreateRecord(d2), "Test I: Second insert with duplicate value failed");
+
+        // Step 3: Now attempt to initialize schema on the same table with UniqueIndexDB (Unique=true)
+        UniqueIndexDB attemptUniqueDb(OpenWifi::DBType::pgsql, pgPool, logger, "pg_uni_preexist_dup_test");
+        bool createResult = attemptUniqueDb.Create();
+
+        // Step 4: Verify Create() returns false because PostgreSQL rejects creating unique index on duplicate data
+        TEST_ASSERT(!createResult, "Test I: Create() must return false when unique index cannot be created due to existing duplicates");
+
+        TEST_ASSERT(DropPgTable(pgPool, "pg_uni_preexist_dup_test"), "Failed to drop table after Test I");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test J: Same-name non-unique index causes Unique=true Create() to return false (PostgreSQL)
+    //
+    // Covers the case where IF NOT EXISTS silently skips creation because an index
+    // with the requested name already exists as a normal (non-unique) index.
+    // Without the pg_index verification added to ORM::DB::Create(), this would
+    // falsely succeed while leaving uniqueness unenforced.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test J: Same-name non-unique index causes Unique=true Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_samename_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test J");
+
+        // Step 1: Create the table with a normal (non-unique) index under the name that
+        //         UniqueIndexDB will later declare as unique.
+        //         UniqueIndexDB generates index name = TableName + "_unique_idx", so create
+        //         a normal index with that exact name using a raw SQL statement.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                Poco::Data::Keywords::now;
+            // Normal (non-unique) index using the same name UniqueIndexDB would use
+            s << "CREATE INDEX IF NOT EXISTS " + std::string(kTableName) + "_unique_idx"
+                 " ON " + std::string(kTableName) + " (value ASC)",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 2: Initialize UniqueIndexDB over the same table — it will attempt
+        //         CREATE UNIQUE INDEX IF NOT EXISTS <name>_unique_idx, which PostgreSQL
+        //         will skip because the name is taken. ORM must detect the surviving
+        //         index is non-unique and return false.
+        UniqueIndexDB sameNameDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = sameNameDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test J: Create() must return false when a same-name non-unique index already exists");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test J");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test K: Same-name unique index on a WRONG column causes Create() to return false.
+    //
+    // Covers the gap that Test J does not: an existing index has the same name,
+    // IS unique, but covers a different column than the one declared in IndexEntryVec.
+    // After CREATE UNIQUE INDEX IF NOT EXISTS skips creation, the ORM must verify
+    // that the surviving index covers the exact declared columns -- not just that it
+    // happens to be some unique index with the right name.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test K: Same-name unique index on wrong column causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_wrongcol_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test K");
+
+        // Step 1: Create the table and plant a UNIQUE index on 'name', using the same
+        //         index name that UniqueIndexDB would generate for 'value'.
+        //         UniqueIndexDB generates: <TableName>_unique_idx on (value ASC).
+        //         We pre-create a unique index with the same name but on 'name' instead.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                Poco::Data::Keywords::now;
+            // Unique index using the name UniqueIndexDB would claim, but on 'name' not 'value'.
+            s << "CREATE UNIQUE INDEX IF NOT EXISTS " + std::string(kTableName) + "_unique_idx"
+                 " ON " + std::string(kTableName) + " (name ASC)",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 2: Initialize UniqueIndexDB which declares Unique on 'value'.
+        //         PostgreSQL will skip creation (name taken). The ORM must detect
+        //         the column mismatch (existing covers 'name', declared covers 'value')
+        //         and return false.
+        UniqueIndexDB wrongColDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = wrongColDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test K: Create() must return false when a same-name unique index covers a different column");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test K");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test L: Same-name partial unique index on expected column causes Create() to return false.
+    //
+    // Covers the case where an existing index has the same name, is UNIQUE, and covers
+    // the declared column ('value'), but has a WHERE predicate (partial index).
+    // The ORM requires an unconditional, full-table unique index. CREATE UNIQUE INDEX
+    // IF NOT EXISTS skips creation, and the ORM must verify that the surviving index
+    // is not partial (indpred is null) and return false.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test L: Same-name partial unique index causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_partial_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test L");
+
+        // Step 1: Create the table and plant a PARTIAL UNIQUE index on 'value'
+        //         using the name UniqueIndexDB would claim: <TableName>_unique_idx.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                Poco::Data::Keywords::now;
+            // Partial unique index with a WHERE clause
+            s << "CREATE UNIQUE INDEX IF NOT EXISTS " + std::string(kTableName) + "_unique_idx"
+                 " ON " + std::string(kTableName) + " (value ASC) WHERE value IS NOT NULL",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 2: Initialize UniqueIndexDB which declares an unconditional unique index on 'value'.
+        //         PostgreSQL will skip creation (name taken). The ORM must detect
+        //         that the existing index is partial (indpred IS NOT NULL) and return false.
+        UniqueIndexDB partialDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = partialDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test L: Create() must return false when a same-name unique index is partial (has WHERE clause)");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test L");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    std::cout << "[Framework Unit Test] All PostgreSQL Unique-Index ORM Foundation Tests Passed Successfully!" << std::endl;
+    // Total: 2 backend-agnostic + 12 PostgreSQL tests (A-L).
+    return 0;
+#endif
+}
