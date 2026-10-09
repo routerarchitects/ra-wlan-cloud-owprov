@@ -555,6 +555,68 @@ int main() {
 		std::cout << "PASSED" << std::endl;
 	}
 
+	// -------------------------------------------------------------------------
+	// Test H: Invalid/null field name runtime validation
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test H: Invalid/null field name runtime validation... " << std::flush;
+
+		// H1: Nullptr field name safely rejected without executing SQL or segfaulting
+		{
+			OpenWifi::DbTransaction txNull(pool.get(), logger);
+			OpenWifi::TestRecord nullRec;
+			bool nullResult = pgDbInstance.GetRecordForUpdate(txNull, nullptr, std::string("test-val"), nullRec);
+			TEST_ASSERT(!nullResult, "GetRecordForUpdate with nullptr field unexpectedly returned true");
+			TEST_ASSERT(txNull.HasFailed(), "txNull.HasFailed() was not set after nullptr field in GetRecordForUpdate!");
+
+			// Verify session remains healthy and was not sent invalid SQL
+			int probeVal = 0;
+			bool probeSuccess = false;
+			try {
+				Poco::Data::Statement probeStmt(txNull.Session());
+				probeStmt << "SELECT 1", Poco::Data::Keywords::into(probeVal), Poco::Data::Keywords::now;
+				probeSuccess = (probeVal == 1);
+			} catch (...) {
+				probeSuccess = false;
+			}
+			TEST_ASSERT(probeSuccess, "PostgreSQL transaction was aborted after nullptr field call!");
+			TEST_ASSERT(!txNull.Commit(), "txNull.Commit() unexpectedly succeeded despite tx being marked failed!");
+		}
+
+		// H2: Non-existent field name rejected before query construction
+		{
+			OpenWifi::DbTransaction txInvalid(pool.get(), logger);
+			OpenWifi::TestRecord outRec;
+			// "non_existent_field" is not defined in TestDB schema (valid fields: id, name, value).
+			// Runtime validation must reject it before constructing or executing SQL,
+			// mark the transaction failed, and prevent a subsequent commit.
+			bool result = pgDbInstance.GetRecordForUpdate(txInvalid, "non_existent_field", std::string("test-val"), outRec);
+			TEST_ASSERT(!result, "GetRecordForUpdate with invalid field name unexpectedly returned true");
+			TEST_ASSERT(txInvalid.HasFailed(), "txInvalid.HasFailed() was not set after invalid field name in GetRecordForUpdate!");
+
+			// Prove that the invalid field was rejected BEFORE sending SQL to PostgreSQL:
+			// If invalid SQL had actually reached PostgreSQL, the transaction block would enter
+			// an aborted state ("current transaction is aborted, commands ignored until end of
+			// transaction block"). Since validation rejected it beforehand, the underlying
+			// PostgreSQL transaction remains healthy and usable before Commit() is called.
+			int probeVal = 0;
+			bool probeSuccess = false;
+			try {
+				Poco::Data::Statement probeStmt(txInvalid.Session());
+				probeStmt << "SELECT 1", Poco::Data::Keywords::into(probeVal), Poco::Data::Keywords::now;
+				probeSuccess = (probeVal == 1);
+			} catch (const std::exception &e) {
+				probeSuccess = false;
+			}
+			TEST_ASSERT(probeSuccess,
+			            "PostgreSQL transaction was aborted, indicating invalid SQL was executed instead of being rejected prior to query execution!");
+
+			TEST_ASSERT(!txInvalid.Commit(), "txInvalid.Commit() unexpectedly succeeded despite tx being marked failed!");
+		}
+
+		std::cout << "PASSED" << std::endl;
+	}
+
 	// Clean up PostgreSQL test table on normal completion after all transactions have ended
 	DropTestTable(pool);
 

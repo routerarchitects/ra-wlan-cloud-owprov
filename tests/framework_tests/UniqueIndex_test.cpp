@@ -29,6 +29,7 @@
  *  12. Test J (PostgreSQL) - Same-name non-unique index causes Unique=true Create() to return false.
  *  13. Test K (PostgreSQL) - Same-name unique index on wrong column causes Create() to return false.
  *  14. Test L (PostgreSQL) - Same-name partial unique index on expected column causes Create() to return false.
+ *  15. Test M (PostgreSQL) - Multi-schema isolation: same-name objects in another schema do not cause false pass/fail.
  */
 
 #include <iostream>
@@ -665,8 +666,106 @@ int main() {
         std::cout << "PASSED" << std::endl;
     }
 
+    // -------------------------------------------------------------------------
+    // Test M: Multi-schema isolation: same-name table and index in another schema
+    //         cannot cause active schema unique-index verification to falsely pass or fail.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test M: Multi-schema isolation (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_multischema_test";
+        const std::string altSchema = "alt_uni_test_schema";
+
+        // Cleanup before test
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test M");
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "DROP SCHEMA IF EXISTS " + altSchema + " CASCADE", Poco::Data::Keywords::now;
+            s << "CREATE SCHEMA " + altSchema, Poco::Data::Keywords::now;
+        }
+
+        // Sub-test M1: Incompatible (non-unique on wrong column) same-name table and index
+        //              pre-created in altSchema must NOT cause Create() in the active schema to fail.
+        {
+            {
+                Poco::Data::Session s = pgPool.get();
+                // Create table in altSchema with same table name
+                s << "CREATE TABLE " + altSchema + "." + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                // Create a non-unique index with the same name that UniqueIndexDB will use
+                s << "CREATE INDEX " + std::string(kTableName) + "_unique_idx"
+                     " ON " + altSchema + "." + std::string(kTableName) + " (name ASC)",
+                    Poco::Data::Keywords::now;
+            }
+
+            // Create UniqueIndexDB in active/default search path (public).
+            // Under un-scoped relname matching, this would see altSchema's non-unique index
+            // and falsely fail. With schema/OID scoping, it must succeed.
+            UniqueIndexDB uniDbM1(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+            bool createResultM1 = uniDbM1.Create();
+            TEST_ASSERT(createResultM1,
+                        "Test M1: Create() unexpectedly failed due to same-name incompatible index in another schema");
+
+            // Verify active schema table enforces uniqueness
+            OpenWifi::UniTestRecord r1{"m1-1", "Name 1", "DUP_VAL"};
+            OpenWifi::UniTestRecord r2{"m1-2", "Name 2", "DUP_VAL"};
+            TEST_ASSERT(uniDbM1.CreateRecord(r1), "Test M1: First insert failed");
+            TEST_ASSERT(!uniDbM1.CreateRecord(r2), "Test M1: Duplicate insert must be rejected in active schema");
+
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop active table after Test M1");
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "DROP TABLE IF EXISTS " + altSchema + "." + std::string(kTableName) + " CASCADE",
+                    Poco::Data::Keywords::now;
+            }
+        }
+
+        // Sub-test M2: A valid unique index in altSchema must NOT mask a defective
+        //              (non-unique) index in the active schema.
+        {
+            // Plant a defective (non-unique) index in active schema
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "CREATE TABLE " + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                s << "CREATE INDEX IF NOT EXISTS " + std::string(kTableName) + "_unique_idx"
+                     " ON " + std::string(kTableName) + " (value ASC)",
+                    Poco::Data::Keywords::now;
+            }
+
+            // Plant a valid unique index in altSchema with the same name
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "CREATE TABLE " + altSchema + "." + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                s << "CREATE UNIQUE INDEX IF NOT EXISTS " + std::string(kTableName) + "_unique_idx"
+                     " ON " + altSchema + "." + std::string(kTableName) + " (value ASC)",
+                    Poco::Data::Keywords::now;
+            }
+
+            // Attempt UniqueIndexDB::Create() on active schema table.
+            // Active schema index is non-unique, so Create() must FAIL.
+            // Scoping ensures altSchema's valid unique index does not cause a false pass.
+            UniqueIndexDB uniDbM2(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+            bool createResultM2 = uniDbM2.Create();
+            TEST_ASSERT(!createResultM2,
+                        "Test M2: Create() unexpectedly passed despite active schema index being non-unique (masked by altSchema)");
+
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop active table after Test M2");
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "DROP SCHEMA IF EXISTS " + altSchema + " CASCADE", Poco::Data::Keywords::now;
+            }
+        }
+
+        std::cout << "PASSED" << std::endl;
+    }
+
     std::cout << "[Framework Unit Test] All PostgreSQL Unique-Index ORM Foundation Tests Passed Successfully!" << std::endl;
-    // Total: 2 backend-agnostic + 12 PostgreSQL tests (A-L).
+    // Total: 2 backend-agnostic + 13 PostgreSQL tests (A-M).
     return 0;
 #endif
 }

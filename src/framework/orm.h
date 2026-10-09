@@ -456,7 +456,7 @@ namespace ORM {
 									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
 									"JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS pos(attnum, pos) ON true "
 									"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = pos.attnum "
-									"WHERE idx_cls.relname = ? AND tbl_cls.relname = ? "
+									"WHERE idx_cls.relname = ? AND tbl_cls.oid = to_regclass(?) AND idx_cls.relnamespace = tbl_cls.relnamespace "
 									"GROUP BY i.indisunique, i.indisvalid, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnatts");
 								std::string UseIndexName = Decl.Name;
 								std::string UseTableName = TableName_;
@@ -1226,8 +1226,12 @@ namespace ORM {
 				tx.MarkFailed();
 				return false;
 			}
+			if (FieldName == nullptr || !ValidFieldName(FieldName)) {
+				Logger_.error("GetRecordForUpdate called with invalid field '" + std::string(FieldName ? FieldName : "(null)") + "' on table '" + TableName_ + "'.");
+				tx.MarkFailed();
+				return false;
+			}
 			try {
-				assert(ValidFieldName(FieldName));
 				// Cache_ is intentionally bypassed: a cached object cannot hold a PostgreSQL row lock.
 				Poco::Data::Statement Select(tx.Session());
 				RecordTuple RT;
