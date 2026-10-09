@@ -33,6 +33,8 @@
  *  16. Test N (PostgreSQL) - Earlier normal index DDL failure causes Create() to return false (does not fall through to Upgrade()).
  *  17. Test O (PostgreSQL) - Mixed-case unique index name (DeviceUniqueIndex) normalizes and succeeds.
  *  18. Test P (PostgreSQL) - Overlength unique index name (> 63 chars) truncates and succeeds.
+ *  19. Test Q (PostgreSQL) - Conflicting index with INCLUDE column causes Create() to return false.
+ *  20. Test R (PostgreSQL) - Deferrable unique constraint causes Create() to return false.
  */
 
 #include <iostream>
@@ -924,8 +926,84 @@ int main() {
         std::cout << "PASSED" << std::endl;
     }
 
+    // -------------------------------------------------------------------------
+    // Test Q: Conflicting index with INCLUDE column causes Create() to return false (PostgreSQL)
+    //
+    // Verifies that an existing index with matching key name but defined as:
+    //   CREATE UNIQUE INDEX <index_name> ON <table> (col_a) INCLUDE (col_b)
+    // is rejected by Create() for an ORM declaration expecting:
+    //   UNIQUE (col_a, col_b)
+    // indnkeyatts is 1 while Decl.Entries is 2, and indnatts != indnkeyatts.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test Q: Conflicting index with INCLUDE column causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_include_conflict_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test Q");
+
+        // Step 1: Pre-create physical table with columns id, col_a, col_b.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, col_a TEXT, col_b TEXT)",
+                Poco::Data::Keywords::now;
+            // Step 2: Pre-create same-name conflicting index with INCLUDE (col_b) instead of key (col_a, col_b).
+            s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_composite_idx"
+                 " ON " + std::string(kTableName) + " (col_a) INCLUDE (col_b)",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 3: Initialize CompositeUniqueDB which expects UNIQUE on (col_a, col_b).
+        //         Create() must detect that indnkeyatts != 2 (or indnatts != indnkeyatts)
+        //         and return false.
+        CompositeUniqueDB conflictDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = conflictDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test Q: Create() must return false when existing index has INCLUDE (col_b) instead of key (col_a, col_b)");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test Q");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test R: Deferrable unique constraint causes Create() to return false (PostgreSQL)
+    //
+    // Verifies that an existing unique constraint declared as DEFERRABLE INITIALLY DEFERRED
+    // is rejected by Create() because pg_index.indimmediate is false, which does not match
+    // the immediate uniqueness enforcement expected by the ORM.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test R: Deferrable unique constraint causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_deferrable_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test R");
+
+        // Step 1: Pre-create physical table.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                Poco::Data::Keywords::now;
+            // Step 2: Add deferrable unique constraint using the index name UniqueIndexDB expects.
+            s << "ALTER TABLE " + std::string(kTableName) +
+                 " ADD CONSTRAINT " + std::string(kTableName) + "_unique_idx"
+                 " UNIQUE (value) DEFERRABLE INITIALLY DEFERRED",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 3: Initialize UniqueIndexDB which expects immediate UNIQUE on 'value'.
+        //         Create() must reject the deferrable constraint (indimmediate = false).
+        UniqueIndexDB defDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = defDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test R: Create() must return false when existing constraint is DEFERRABLE INITIALLY DEFERRED");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test R");
+        std::cout << "PASSED" << std::endl;
+    }
+
     std::cout << "[Framework Unit Test] All PostgreSQL Unique-Index ORM Foundation Tests Passed Successfully!" << std::endl;
-    // Total: 2 backend-agnostic + 16 PostgreSQL tests (A-P).
+    // Total: 2 backend-agnostic + 18 PostgreSQL tests (A-R).
     return 0;
 #endif
 }

@@ -441,16 +441,17 @@ namespace ORM {
 								return false;
 							}
 							try {
-								bool IsUnique = false, IsValid = false, IsNotPartial = false, IsNotExpression = false;
-								int AttCount = 0;
+								bool IsUnique = false, IsValid = false, IsImmediate = false, IsNotPartial = false, IsNotExpression = false;
+								int KeyAttCount = 0, TotalAttCount = 0;
 								std::string ActualCols, ExpectedCols;
 								for (const auto &entry : Decl.Entries) {
 									if (!ExpectedCols.empty()) ExpectedCols += ',';
 									ExpectedCols += Poco::toLower(entry.FieldName);
 								}
 								std::string VerifyQ = ConvertParams(
-									"SELECT i.indisunique, i.indisvalid, (i.indpred IS NULL), (i.indexprs IS NULL), "
-									"CAST(i.indnatts AS int), string_agg(lower(a.attname), ',' ORDER BY pos.pos) "
+									"SELECT i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), "
+									"CAST(i.indnkeyatts AS int), CAST(i.indnatts AS int), "
+									"COALESCE(string_agg(lower(a.attname), ',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), '') "
 									"FROM pg_index i "
 									"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
 									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
@@ -458,21 +459,24 @@ namespace ORM {
 									"JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS pos(attnum, pos) ON true "
 									"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = pos.attnum "
 									"WHERE tbl_cls.oid = to_regclass(?) AND idx_cls.oid = to_regclass(quote_ident(ns.nspname) || '.' || ?) AND idx_cls.relnamespace = tbl_cls.relnamespace "
-									"GROUP BY i.indisunique, i.indisvalid, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnatts");
+									"GROUP BY i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnkeyatts, i.indnatts");
 								std::string UseTableName = TableName_;
 								std::string UseIndexName = Decl.Name;
 								Session << VerifyQ,
 								    Poco::Data::Keywords::into(IsUnique),
 								    Poco::Data::Keywords::into(IsValid),
+								    Poco::Data::Keywords::into(IsImmediate),
 								    Poco::Data::Keywords::into(IsNotPartial),
 								    Poco::Data::Keywords::into(IsNotExpression),
-								    Poco::Data::Keywords::into(AttCount),
+								    Poco::Data::Keywords::into(KeyAttCount),
+								    Poco::Data::Keywords::into(TotalAttCount),
 								    Poco::Data::Keywords::into(ActualCols),
 								    Poco::Data::Keywords::use(UseTableName),
 								    Poco::Data::Keywords::use(UseIndexName),
 								    Poco::Data::Keywords::now;
-								if (!IsUnique || !IsValid || !IsNotPartial || !IsNotExpression ||
-								    AttCount != static_cast<int>(Decl.Entries.size()) || ActualCols != ExpectedCols) {
+								if (!IsUnique || !IsValid || !IsImmediate || !IsNotPartial || !IsNotExpression ||
+								    KeyAttCount != static_cast<int>(Decl.Entries.size()) || TotalAttCount != KeyAttCount ||
+								    ActualCols != ExpectedCols) {
 									Logger_.error("PostgreSQL unique index '" + Decl.Name + "' validation failed on table '" + TableName_ + "'.");
 									return false;
 								}
