@@ -451,7 +451,7 @@ namespace ORM {
 								std::string VerifyQ = ConvertParams(
 									"SELECT i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), "
 									"CAST(i.indnkeyatts AS int), CAST(i.indnatts AS int), "
-									"COALESCE(string_agg(lower(a.attname), ',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), '') "
+									"COALESCE(string_agg(a.attname, ',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), '') "
 									"FROM pg_index i "
 									"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
 									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "

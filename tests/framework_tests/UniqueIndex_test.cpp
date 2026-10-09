@@ -35,6 +35,7 @@
  *  18. Test P (PostgreSQL) - Overlength unique index name (> 63 chars) truncates and succeeds.
  *  19. Test Q (PostgreSQL) - Conflicting index with INCLUDE column causes Create() to return false.
  *  20. Test R (PostgreSQL) - Deferrable unique constraint causes Create() to return false.
+ *  21. Test S (PostgreSQL) - Existing unique index on quoted "Value" instead of unquoted value causes Create() to return false.
  */
 
 #include <iostream>
@@ -1002,8 +1003,45 @@ int main() {
         std::cout << "PASSED" << std::endl;
     }
 
+    // -------------------------------------------------------------------------
+    // Test S: Quoted column "Value" unique index causes Create() to return false (PostgreSQL)
+    //
+    // Verifies that when an existing table has both unquoted value and quoted "Value",
+    // and an existing unique index with the expected name covers "Value",
+    // Create() rejects the index because exact catalog attname "Value" does not match
+    // the expected normalized column name "value".
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test S: Unique index on quoted \"Value\" causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_quoted_col_conflict_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test S");
+
+        // Step 1: Pre-create physical table with both 'value' and '"Value"'.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, name TEXT, value TEXT, \"Value\" TEXT)",
+                Poco::Data::Keywords::now;
+            // Step 2: Pre-create unique index on quoted "Value" using expected index name.
+            s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_unique_idx"
+                 " ON " + std::string(kTableName) + " (\"Value\")",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 3: Initialize UniqueIndexDB which expects unique index on unquoted 'value'.
+        //         Create() must reject the existing index on "Value".
+        UniqueIndexDB quotedColDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = quotedColDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test S: Create() must return false when existing unique index covers quoted \"Value\" instead of unquoted value");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test S");
+        std::cout << "PASSED" << std::endl;
+    }
+
     std::cout << "[Framework Unit Test] All PostgreSQL Unique-Index ORM Foundation Tests Passed Successfully!" << std::endl;
-    // Total: 2 backend-agnostic + 18 PostgreSQL tests (A-R).
+    // Total: 2 backend-agnostic + 19 PostgreSQL tests (A-S).
     return 0;
 #endif
 }
