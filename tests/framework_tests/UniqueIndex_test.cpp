@@ -30,6 +30,9 @@
  *  13. Test K (PostgreSQL) - Same-name unique index on wrong column causes Create() to return false.
  *  14. Test L (PostgreSQL) - Same-name partial unique index on expected column causes Create() to return false.
  *  15. Test M (PostgreSQL) - Multi-schema isolation: same-name objects in another schema do not cause false pass/fail.
+ *  16. Test N (PostgreSQL) - Earlier normal index DDL failure causes Create() to return false (does not fall through to Upgrade()).
+ *  17. Test O (PostgreSQL) - Mixed-case unique index name (DeviceUniqueIndex) normalizes and succeeds.
+ *  18. Test P (PostgreSQL) - Overlength unique index name (> 63 chars) truncates and succeeds.
  */
 
 #include <iostream>
@@ -179,6 +182,67 @@ class CompositeUniqueDB : public ORM::DB<OpenWifi::UniCompositeRecordTuple, Open
                   true}
              },
              P, L, "uct") {}
+};
+
+class NormalThenUniqueDB : public ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord> {
+  public:
+    NormalThenUniqueDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+                       const char *TableName = "pg_uni_normal_then_unique_test")
+        : DB(T, TableName,
+             ORM::FieldVec{
+                 ORM::Field{"id",    ORM::FieldType::FT_TEXT, 0, true},
+                 ORM::Field{"name",  ORM::FieldType::FT_TEXT},
+                 ORM::Field{"value", ORM::FieldType::FT_TEXT}
+             },
+             ORM::IndexVec{
+                 // Normal index on 'name' FIRST (non-unique)
+                 {std::string(TableName) + "_norm_idx",
+                  ORM::IndexEntryVec{{std::string("name"), ORM::Indextype::ASC}},
+                  false},
+                 // Required UNIQUE index on 'value' SECOND
+                 {std::string(TableName) + "_unique_idx",
+                  ORM::IndexEntryVec{{std::string("value"), ORM::Indextype::ASC}},
+                  true}
+             },
+             P, L, "ntu") {}
+};
+
+class MixedCaseUniqueDB : public ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord> {
+  public:
+    MixedCaseUniqueDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+                      const char *TableName = "pg_uni_mixedcase_test")
+        : DB(T, TableName,
+             ORM::FieldVec{
+                 ORM::Field{"id",    ORM::FieldType::FT_TEXT, 0, true},
+                 ORM::Field{"name",  ORM::FieldType::FT_TEXT},
+                 ORM::Field{"value", ORM::FieldType::FT_TEXT}
+             },
+             ORM::IndexVec{
+                 // Mixed-case unquoted index identifier (folds to lowercase in PostgreSQL pg_class)
+                 {"DeviceUniqueIndex",
+                  ORM::IndexEntryVec{{std::string("value"), ORM::Indextype::ASC}},
+                  true}
+             },
+             P, L, "mcu") {}
+};
+
+class OverlengthUniqueDB : public ORM::DB<OpenWifi::UniTestRecordTuple, OpenWifi::UniTestRecord> {
+  public:
+    OverlengthUniqueDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+                       const char *TableName = "pg_uni_overlength_test")
+        : DB(T, TableName,
+             ORM::FieldVec{
+                 ORM::Field{"id",    ORM::FieldType::FT_TEXT, 0, true},
+                 ORM::Field{"name",  ORM::FieldType::FT_TEXT},
+                 ORM::Field{"value", ORM::FieldType::FT_TEXT}
+             },
+             ORM::IndexVec{
+                 // Overlength index identifier (> 63 characters in PostgreSQL)
+                 {"DeviceUniqueIndex_Overlength_1234567890_1234567890_1234567890_1234567890",
+                  ORM::IndexEntryVec{{std::string("value"), ORM::Indextype::ASC}},
+                  true}
+             },
+             P, L, "olu") {}
 };
 
 #ifndef SMALL_BUILD
@@ -764,8 +828,104 @@ int main() {
         std::cout << "PASSED" << std::endl;
     }
 
+    // -------------------------------------------------------------------------
+    // Test N: Earlier normal index DDL failure causes Create() to return false (PostgreSQL)
+    //
+    // Regression test: failure during earlier normal index DDL must NOT be swallowed
+    // by the outer PostgreSQL catch block and fall through to Upgrade() success.
+    // Pre-creates a physical table with an older schema (missing column 'name').
+    // NormalThenUniqueDB declares:
+    //   1. Normal index on 'name' FIRST (fails because 'name' is missing physically)
+    //   2. Required UNIQUE index on 'value' SECOND (never reached/created)
+    // Create() must return false and must not report schema creation success.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test N: Normal index DDL failure causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_ddl_fail_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test N");
+
+        // Step 1: Pre-create physical table with an older/incomplete schema
+        //         Contains 'id' and 'value', but MISSING column 'name'.
+        {
+            Poco::Data::Session s = pgPool.get();
+            s << "CREATE TABLE " + std::string(kTableName) +
+                 " (id TEXT PRIMARY KEY, value TEXT)",
+                Poco::Data::Keywords::now;
+        }
+
+        // Step 2: Initialize NormalThenUniqueDB which declares a normal index on 'name'
+        //         FIRST, followed by a unique index on 'value' SECOND.
+        //         Table creation (CREATE TABLE IF NOT EXISTS) succeeds, but normal index
+        //         creation on 'name' fails (column 'name' does not exist in physical table).
+        //         Create() must propagate this failure and return false (not fall through to Upgrade()).
+        NormalThenUniqueDB failDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        bool createResult = failDb.Create();
+        TEST_ASSERT(!createResult,
+                    "Test N: Create() must return false when earlier normal index DDL fails, and must not fall through to Upgrade() success");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test N");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test O: Mixed-case unique index name (PostgreSQL)
+    //
+    // Verifies that an unquoted mixed-case index identifier (e.g. DeviceUniqueIndex)
+    // is folded to lowercase by PostgreSQL, matches during ORM verification via
+    // PostgreSQL's identifier normalization rules, and enforces uniqueness.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test O: Mixed-case unique index name (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_mixedcase_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test O");
+
+        MixedCaseUniqueDB mixedDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        TEST_ASSERT(mixedDb.Create(), "Test O: Failed to create table with mixed-case unique index");
+
+        OpenWifi::UniTestRecord r1{"id-mc-1", "Record 1", "MC_UNIQUE_VAL"};
+        OpenWifi::UniTestRecord r2{"id-mc-2", "Record 2", "MC_UNIQUE_VAL"}; // duplicate -> must fail
+        OpenWifi::UniTestRecord r3{"id-mc-3", "Record 3", "MC_DIFFERENT_VAL"};
+
+        TEST_ASSERT( mixedDb.CreateRecord(r1), "Test O: First insert failed unexpectedly");
+        TEST_ASSERT(!mixedDb.CreateRecord(r2), "Test O: Duplicate insert must be rejected by PostgreSQL");
+        TEST_ASSERT( mixedDb.CreateRecord(r3), "Test O: Non-duplicate insert failed unexpectedly");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test O");
+        std::cout << "PASSED" << std::endl;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test P: Overlength unique index name (PostgreSQL)
+    //
+    // Verifies that an index identifier longer than PostgreSQL's identifier limit
+    // (NAMEDATALEN - 1 = 63 bytes) is truncated by PostgreSQL, matches during ORM
+    // verification via PostgreSQL's identifier normalization rules, and enforces uniqueness.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test P: Overlength unique index name (PostgreSQL)... " << std::flush;
+
+        const char *kTableName = "pg_uni_overlength_test";
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test P");
+
+        OverlengthUniqueDB overlengthDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+        TEST_ASSERT(overlengthDb.Create(), "Test P: Failed to create table with overlength unique index");
+
+        OpenWifi::UniTestRecord r1{"id-ol-1", "Record 1", "OL_UNIQUE_VAL"};
+        OpenWifi::UniTestRecord r2{"id-ol-2", "Record 2", "OL_UNIQUE_VAL"}; // duplicate -> must fail
+        OpenWifi::UniTestRecord r3{"id-ol-3", "Record 3", "OL_DIFFERENT_VAL"};
+
+        TEST_ASSERT( overlengthDb.CreateRecord(r1), "Test P: First insert failed unexpectedly");
+        TEST_ASSERT(!overlengthDb.CreateRecord(r2), "Test P: Duplicate insert must be rejected by PostgreSQL");
+        TEST_ASSERT( overlengthDb.CreateRecord(r3), "Test P: Non-duplicate insert failed unexpectedly");
+
+        TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test P");
+        std::cout << "PASSED" << std::endl;
+    }
+
     std::cout << "[Framework Unit Test] All PostgreSQL Unique-Index ORM Foundation Tests Passed Successfully!" << std::endl;
-    // Total: 2 backend-agnostic + 13 PostgreSQL tests (A-M).
+    // Total: 2 backend-agnostic + 16 PostgreSQL tests (A-P).
     return 0;
 #endif
 }

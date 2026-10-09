@@ -454,12 +454,13 @@ namespace ORM {
 									"FROM pg_index i "
 									"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
 									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
+									"JOIN pg_namespace ns ON ns.oid = tbl_cls.relnamespace "
 									"JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS pos(attnum, pos) ON true "
 									"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = pos.attnum "
-									"WHERE idx_cls.relname = ? AND tbl_cls.oid = to_regclass(?) AND idx_cls.relnamespace = tbl_cls.relnamespace "
+									"WHERE tbl_cls.oid = to_regclass(?) AND idx_cls.oid = to_regclass(quote_ident(ns.nspname) || '.' || ?) AND idx_cls.relnamespace = tbl_cls.relnamespace "
 									"GROUP BY i.indisunique, i.indisvalid, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnatts");
-								std::string UseIndexName = Decl.Name;
 								std::string UseTableName = TableName_;
+								std::string UseIndexName = Decl.Name;
 								Session << VerifyQ,
 								    Poco::Data::Keywords::into(IsUnique),
 								    Poco::Data::Keywords::into(IsValid),
@@ -467,8 +468,8 @@ namespace ORM {
 								    Poco::Data::Keywords::into(IsNotExpression),
 								    Poco::Data::Keywords::into(AttCount),
 								    Poco::Data::Keywords::into(ActualCols),
-								    Poco::Data::Keywords::use(UseIndexName),
 								    Poco::Data::Keywords::use(UseTableName),
+								    Poco::Data::Keywords::use(UseIndexName),
 								    Poco::Data::Keywords::now;
 								if (!IsUnique || !IsValid || !IsNotPartial || !IsNotExpression ||
 								    AttCount != static_cast<int>(Decl.Entries.size()) || ActualCols != ExpectedCols) {
@@ -487,6 +488,7 @@ namespace ORM {
 				} catch (const Poco::Exception &E) {
 					Logger_.error("Failure to create POSTGRESQL DB resources.");
 					Logger_.log(E);
+					return false;
 				}
 			} break;
 			}
