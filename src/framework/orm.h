@@ -71,6 +71,8 @@ namespace ORM {
 	struct Index {
 		std::string Name;
 		IndexEntryVec Entries;
+		// When true, generates PostgreSQL CREATE UNIQUE INDEX (unsupported on SQLite/MySQL). Defaults to false.
+		bool Unique = false;
 	};
 	typedef std::vector<Index> IndexVec;
 
@@ -246,8 +248,36 @@ namespace ORM {
 			SelectList_ += ")";
 
 			if (!Indexes.empty()) {
-				if (Type_ == OpenWifi::DBType::sqlite || Type_ == OpenWifi::DBType::pgsql) {
+				if (Type_ == OpenWifi::DBType::pgsql) {
 					for (const auto &j : Indexes) {
+						std::string IndexLine;
+
+						// Use CREATE UNIQUE INDEX for indexes declared with Unique=true;
+						// fall back to the plain non-unique form for all existing declarations.
+						IndexLine = std::string(j.Unique ? "CREATE UNIQUE INDEX IF NOT EXISTS "
+						                                 : "CREATE INDEX IF NOT EXISTS ") +
+						            j.Name + " ON " + TableName_ + " (";
+						bool first_entry = true;
+						for (const auto &k : j.Entries) {
+							auto IndexFieldName = Poco::toLower(k.FieldName);
+							assert(ValidFieldName(IndexFieldName));
+							if (!first_entry) {
+								IndexLine += " , ";
+							}
+							first_entry = false;
+							IndexLine += IndexFieldName + (k.Type == Indextype::ASC ? " ASC" : " DESC");
+						}
+						IndexLine += " )";
+						IndexCreation_.template emplace_back(IndexLine);
+						// Mirror entry so Create() can validate columns of unique indexes.
+						PgsqlIndexDefs_.push_back(j);
+					}
+				} else if (Type_ == OpenWifi::DBType::sqlite) {
+					for (const auto &j : Indexes) {
+						if (j.Unique) {
+							HasUnsupportedUniqueIndex_ = true;
+							continue;
+						}
 						std::string IndexLine;
 
 						IndexLine = std::string("CREATE INDEX IF NOT EXISTS ") + j.Name +
@@ -270,6 +300,10 @@ namespace ORM {
 					bool firstIndex = true;
 					std::string IndexLine;
 					for (const auto &j : Indexes) {
+						if (j.Unique) {
+							HasUnsupportedUniqueIndex_ = true;
+							continue;
+						}
 						if (!firstIndex)
 							IndexLine += ", ";
 						firstIndex = false;
@@ -349,6 +383,12 @@ namespace ORM {
 		}
 
 		inline bool Create() {
+			if (HasUnsupportedUniqueIndex_) {
+				Logger_.error("Unique secondary indexes are only supported on PostgreSQL. "
+				              "Cannot create table '" + TableName_ + "' because one or more declared "
+				              "indexes require unique constraint support on an unsupported database backend.");
+				return false;
+			}
 			switch (Type_) {
 			case OpenWifi::DBType::mysql: {
 				try {
@@ -384,15 +424,75 @@ namespace ORM {
 			case OpenWifi::DBType::pgsql: {
 				try {
 					Poco::Data::Session Session = Pool_.get();
-					std::string Statement =
-						"create table if not exists " + TableName_ + " ( " + CreateFields_ + " )";
+					std::string Statement = "create table if not exists " + TableName_ + " ( " + CreateFields_ + " )";
 					Session << Statement, Poco::Data::Keywords::now;
-					for (const auto &i : IndexCreation_) {
-						Session << i, Poco::Data::Keywords::now;
+					for (std::size_t Idx = 0; Idx < IndexCreation_.size(); ++Idx) {
+						const auto &i = IndexCreation_[Idx];
+						if (Idx < PgsqlIndexDefs_.size() && PgsqlIndexDefs_[Idx].Unique) {
+							const auto &Decl = PgsqlIndexDefs_[Idx];
+							try {
+								Session << i, Poco::Data::Keywords::now;
+							} catch (const Poco::Exception &E) {
+								Logger_.error("Failure to create PostgreSQL unique index on table '" + TableName_ + "'.");
+								Logger_.log(E);
+								return false;
+							} catch (const std::exception &E) {
+								Logger_.error("Failure to create PostgreSQL unique index on table '" + TableName_ + "': " + std::string(E.what()));
+								return false;
+							}
+							try {
+								bool IsUnique = false, IsValid = false, IsImmediate = false, IsNotPartial = false, IsNotExpression = false;
+								int KeyAttCount = 0, TotalAttCount = 0;
+								std::string ActualCols, ExpectedCols;
+								for (const auto &entry : Decl.Entries) {
+									if (!ExpectedCols.empty()) ExpectedCols += ',';
+									ExpectedCols += Poco::toLower(entry.FieldName);
+								}
+								std::string VerifyQ = ConvertParams(
+									"SELECT i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), "
+									"CAST(i.indnkeyatts AS int), CAST(i.indnatts AS int), "
+									"COALESCE(string_agg(a.attname, ',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), '') "
+									"FROM pg_index i "
+									"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
+									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
+									"JOIN pg_namespace ns ON ns.oid = tbl_cls.relnamespace "
+									"JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS pos(attnum, pos) ON true "
+									"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = pos.attnum "
+									"WHERE tbl_cls.oid = to_regclass(?) AND idx_cls.oid = to_regclass(quote_ident(ns.nspname) || '.' || ?) AND idx_cls.relnamespace = tbl_cls.relnamespace "
+									"GROUP BY i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnkeyatts, i.indnatts");
+								std::string UseTableName = TableName_;
+								std::string UseIndexName = Decl.Name;
+								Session << VerifyQ,
+								    Poco::Data::Keywords::into(IsUnique),
+								    Poco::Data::Keywords::into(IsValid),
+								    Poco::Data::Keywords::into(IsImmediate),
+								    Poco::Data::Keywords::into(IsNotPartial),
+								    Poco::Data::Keywords::into(IsNotExpression),
+								    Poco::Data::Keywords::into(KeyAttCount),
+								    Poco::Data::Keywords::into(TotalAttCount),
+								    Poco::Data::Keywords::into(ActualCols),
+								    Poco::Data::Keywords::use(UseTableName),
+								    Poco::Data::Keywords::use(UseIndexName),
+								    Poco::Data::Keywords::now;
+								if (!IsUnique || !IsValid || !IsImmediate || !IsNotPartial || !IsNotExpression ||
+								    KeyAttCount != static_cast<int>(Decl.Entries.size()) || TotalAttCount != KeyAttCount ||
+								    ActualCols != ExpectedCols) {
+									Logger_.error("PostgreSQL unique index '" + Decl.Name + "' validation failed on table '" + TableName_ + "'.");
+									return false;
+								}
+							} catch (const Poco::Exception &E) {
+								Logger_.error("Failed to verify PostgreSQL unique index '" + Decl.Name + "' on table '" + TableName_ + "'.");
+								Logger_.log(E);
+								return false;
+							}
+						} else {
+							Session << i, Poco::Data::Keywords::now;
+						}
 					}
 				} catch (const Poco::Exception &E) {
 					Logger_.error("Failure to create POSTGRESQL DB resources.");
 					Logger_.log(E);
+					return false;
 				}
 			} break;
 			}
@@ -1121,6 +1221,47 @@ namespace ORM {
 			return false;
 		}
 
+		// SELECT ... FOR UPDATE row-level locking on caller transaction (PostgreSQL only, bypasses cache).
+		template <typename T>
+		bool GetRecordForUpdate(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
+		                        RecordType &R) {
+			if (Type_ != OpenWifi::DBType::pgsql) {
+				Logger_.error("GetRecordForUpdate is only supported on PostgreSQL. "
+					"SELECT ... FOR UPDATE on '" + TableName_ + "' was requested on a non-PostgreSQL backend. "
+					"Call site must be guarded or migrated to PostgreSQL before using row-level locking.");
+				tx.MarkFailed();
+				return false;
+			}
+			if (FieldName == nullptr || !ValidFieldName(FieldName)) {
+				Logger_.error("GetRecordForUpdate called with invalid field '" + std::string(FieldName ? FieldName : "(null)") + "' on table '" + TableName_ + "'.");
+				tx.MarkFailed();
+				return false;
+			}
+			try {
+				// Cache_ is intentionally bypassed: a cached object cannot hold a PostgreSQL row lock.
+				Poco::Data::Statement Select(tx.Session());
+				RecordTuple RT;
+				std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " + FieldName + "=? limit 1 for update";
+				auto tValue{Value};
+				Select << ConvertParams(St), Poco::Data::Keywords::into(RT), Poco::Data::Keywords::use(tValue);
+				if (Select.execute() == 1) {
+					Convert(RT, R);
+					return true;
+				}
+				// Row not found: not a transaction error. Caller decides how to handle.
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+				tx.MarkFailed();
+			} catch (const std::exception &E) {
+				Logger_.error("GetRecordForUpdate failed: " + std::string(E.what()));
+				tx.MarkFailed();
+			} catch (...) {
+				Logger_.error("GetRecordForUpdate failed: unknown exception");
+				tx.MarkFailed();
+			}
+			return false;
+		}
+
 		bool GetRecords(OpenWifi::DbTransaction &tx,
 		                uint64_t Offset,
 		                uint64_t HowMany,
@@ -1354,7 +1495,11 @@ namespace ORM {
 		std::string SelectList_;
 		std::string UpdateFields_;
 		std::vector<std::string> IndexCreation_;
+		// Parallel to IndexCreation_ for PostgreSQL: retains the original ORM::Index
+		// definition for each entry so Create() can validate surviving indexes.
+		std::vector<ORM::Index> PgsqlIndexDefs_;
 		std::map<std::string, int> FieldNames_;
+		bool HasUnsupportedUniqueIndex_ = false;
 	};
 } // namespace ORM
 
