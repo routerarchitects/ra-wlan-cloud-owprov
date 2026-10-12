@@ -6,15 +6,20 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "Poco/Data/Session.h"
+#include "Poco/Data/Statement.h"
 #include "Poco/Data/Transaction.h"
 #include "Poco/Exception.h"
 #include "Poco/Logger.h"
+#include "Poco/String.h"
 
 namespace OpenWifi {
 
@@ -26,14 +31,29 @@ namespace OpenWifi {
 	// 3. If any required transaction-aware ORM operation returns false, the caller MUST call Rollback() or allow the DbTransaction object to exit scope (RAII auto-rollback).
 	// 4. Calling Commit() after a failed required operation is a caller bug.
 	// 5. AfterCommit callbacks run ONLY after a successful DB commit and after DB session resources are released. Callbacks must NOT be used to make a committed DB transaction appear failed.
+	// 6. Transaction-aware ORM helpers automatically catch lock/statement timeouts and mark the transaction failed.
+	//    Callers executing raw SQL directly through tx.Session() must catch database exceptions, handle errors,
+	//    and explicitly call tx.MarkFailed() before rolling back (or allow RAII auto-rollback).
 	class DbTransaction final {
 	  public:
 		using PostCommitFunc = std::function<void()>;
 
+		static constexpr uint64_t DEFAULT_LOCK_TIMEOUT_MS = 2000;
+		static constexpr uint64_t DEFAULT_STATEMENT_TIMEOUT_MS = 0;
+
+		static void SetDefaultTimeouts(uint64_t lockTimeoutMs, uint64_t statementTimeoutMs = 0) noexcept {
+			default_lock_timeout_ms_.store(lockTimeoutMs);
+			default_statement_timeout_ms_.store(statementTimeoutMs);
+		}
+
 		// Owns one pooled session and starts a transaction on it.
-		explicit DbTransaction(Poco::Data::Session session, Poco::Logger &logger)
-			: logger_(logger) {
-			resources_.emplace(std::move(session), logger_);
+		// On PostgreSQL, applies transaction-local lock_timeout (default 2000ms) and optional statement_timeout.
+		explicit DbTransaction(Poco::Data::Session session, Poco::Logger &logger,
+		                        uint64_t lockTimeoutMs = 0, uint64_t statementTimeoutMs = 0)
+			: logger_(logger),
+			  lockTimeoutMs_(lockTimeoutMs > 0 ? lockTimeoutMs : default_lock_timeout_ms_.load()),
+			  statementTimeoutMs_(statementTimeoutMs > 0 ? statementTimeoutMs : default_statement_timeout_ms_.load()) {
+			resources_.emplace(std::move(session), logger_, lockTimeoutMs_, statementTimeoutMs_);
 		}
 
 		// Poco::Data::Transaction rolls back automatically if still active.
@@ -143,18 +163,40 @@ namespace OpenWifi {
 			return false;
 		}
 
+		[[nodiscard]] uint64_t LockTimeoutMs() const noexcept {
+			return lockTimeoutMs_;
+		}
+
+		[[nodiscard]] uint64_t StatementTimeoutMs() const noexcept {
+			return statementTimeoutMs_;
+		}
+
 	  private:
 		struct Resources {
-			Resources(Poco::Data::Session dbSession, Poco::Logger &logger)
-				: session(std::move(dbSession)), transaction(session, &logger) {}
+			Resources(Poco::Data::Session dbSession, Poco::Logger &logger, uint64_t lockTimeoutMs, uint64_t statementTimeoutMs)
+				: session(std::move(dbSession)), transaction(session, &logger) {
+				if (Poco::toLower(session.connector()) == "postgresql") {
+					if (lockTimeoutMs > 0) {
+						session << "SET LOCAL lock_timeout = '" + std::to_string(lockTimeoutMs) + "ms'", Poco::Data::Keywords::now;
+					}
+					if (statementTimeoutMs > 0) {
+						session << "SET LOCAL statement_timeout = '" + std::to_string(statementTimeoutMs) + "ms'", Poco::Data::Keywords::now;
+					}
+				}
+			}
 
 			Poco::Data::Session session;
 			Poco::Data::Transaction transaction;
 		};
 
+		inline static std::atomic<uint64_t> default_lock_timeout_ms_{DEFAULT_LOCK_TIMEOUT_MS};
+		inline static std::atomic<uint64_t> default_statement_timeout_ms_{DEFAULT_STATEMENT_TIMEOUT_MS};
+
 		Poco::Logger &logger_;
 		std::optional<Resources> resources_;
 		std::vector<PostCommitFunc> after_commit_actions_;
+		uint64_t lockTimeoutMs_ = DEFAULT_LOCK_TIMEOUT_MS;
+		uint64_t statementTimeoutMs_ = DEFAULT_STATEMENT_TIMEOUT_MS;
 		bool failed_ = false;
 	};
 

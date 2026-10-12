@@ -77,11 +77,13 @@ namespace OpenWifi {
         inline OpenWifi::RadiusEndpointDB &RadiusEndpointDB() { return *RadiusEndpointDB_; }
 
 		// Starts a caller-owned transaction using one pooled DB session.
+		// On PostgreSQL, applies transaction-local lock_timeout (configurable via storage.type.postgresql.lock_timeout,
+		// default 2000ms) and optional statement_timeout (storage.type.postgresql.statement_timeout).
 		// Caller Contract:
 		// - Keep transactions narrow and DB-only.
 		// - If any required transaction-aware ORM operation fails, caller must Rollback() or let the transaction exit scope.
-		[[nodiscard]] inline DbTransaction BeginTransaction() {
-			return DbTransaction(Pool().get(), Logger());
+		[[nodiscard]] inline DbTransaction BeginTransaction(uint64_t lockTimeoutMs = 0, uint64_t statementTimeoutMs = 0) {
+			return DbTransaction(Pool().get(), Logger(), lockTimeoutMs, statementTimeoutMs);
 		}
 
 		bool Validate(const Poco::URI::QueryParameters &P, RESTAPI::Errors::msg &Error);

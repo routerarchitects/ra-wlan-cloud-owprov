@@ -281,6 +281,25 @@ namespace OpenWifi {
 				// Canonical key: storage.startup.lock.timeout
 				const int lockTimeoutSec = std::max(1, static_cast<int>(MicroServiceConfigGetInt("storage.startup.lock.timeout", 120)));
 				startupLock.emplace(PostgresConn_.name(), baseConnectionString, configuredConnTimeoutSec, Logger(), lockTimeoutSec);
+
+				const auto rawLockTimeout = static_cast<int64_t>(
+					MicroServiceConfigGetInt("storage.type.postgresql.lock_timeout", DbTransaction::DEFAULT_LOCK_TIMEOUT_MS));
+				uint64_t txLockTimeoutMs = DbTransaction::DEFAULT_LOCK_TIMEOUT_MS;
+				if (rawLockTimeout < 0) {
+					poco_warning(Logger(), "storage.type.postgresql.lock_timeout is negative (" + std::to_string(rawLockTimeout) + " ms); falling back to default " + std::to_string(DbTransaction::DEFAULT_LOCK_TIMEOUT_MS) + " ms.");
+				} else {
+					txLockTimeoutMs = static_cast<uint64_t>(rawLockTimeout);
+				}
+
+				const auto rawStmtTimeout = static_cast<int64_t>(
+					MicroServiceConfigGetInt("storage.type.postgresql.statement_timeout", DbTransaction::DEFAULT_STATEMENT_TIMEOUT_MS));
+				uint64_t txStmtTimeoutMs = DbTransaction::DEFAULT_STATEMENT_TIMEOUT_MS;
+				if (rawStmtTimeout < 0) {
+					poco_warning(Logger(), "storage.type.postgresql.statement_timeout is negative (" + std::to_string(rawStmtTimeout) + " ms); falling back to default " + std::to_string(DbTransaction::DEFAULT_STATEMENT_TIMEOUT_MS) + " ms.");
+				} else {
+					txStmtTimeoutMs = static_cast<uint64_t>(rawStmtTimeout);
+				}
+				DbTransaction::SetDefaultTimeouts(txLockTimeoutMs, txStmtTimeoutMs);
 			} catch (const Poco::Exception &e) {
 				poco_critical(Logger(), "Database startup failed (advisory lock or init error): " + e.displayText());
 				throw;

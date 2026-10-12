@@ -264,4 +264,25 @@ target_link_libraries(instance_identity_test PRIVATE
 
 add_test(NAME instance_identity_test COMMAND instance_identity_test)
 
+add_executable(row_level_locking_test
+        tests/framework_tests/RowLevelLocking_test.cpp
+)
+target_link_libraries(row_level_locking_test PRIVATE
+        ${Poco_LIBRARIES}
+        fmt::fmt)
+
+add_test(NAME row_level_locking_test COMMAND row_level_locking_test)
+set_tests_properties(row_level_locking_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(unique_index_test
+        tests/framework_tests/UniqueIndex_test.cpp
+)
+target_link_libraries(unique_index_test PRIVATE
+        ${Poco_LIBRARIES}
+        fmt::fmt)
+
+add_test(NAME unique_index_test COMMAND unique_index_test)
+set_tests_properties(unique_index_test PROPERTIES SKIP_RETURN_CODE 77)
+
+
 
