@@ -14,7 +14,11 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "Poco/Data/RecordSet.h"
@@ -30,6 +34,18 @@
 #include "fmt/format.h"
 
 namespace ORM {
+
+	template <typename T, typename = void>
+	struct has_is_null : std::false_type {};
+
+	template <typename T>
+	struct has_is_null<T, std::void_t<decltype(std::declval<const T &>().isNull())>> : std::true_type {};
+
+	template <typename T>
+	struct is_std_optional : std::false_type {};
+
+	template <typename T>
+	struct is_std_optional<std::optional<T>> : std::true_type {};
 
 	enum FieldType { FT_INT, FT_BIGINT, FT_TEXT, FT_VARCHAR, FT_BLOB, FT_BOOLEAN, FT_REAL };
 
@@ -228,6 +244,9 @@ namespace ORM {
 			for (const auto &i : Fields) {
 				std::string FieldName = Poco::toLower(i.Name);
 				FieldNames_[FieldName] = Place;
+				if (i.Index) {
+					PrimaryKeyLookupFields_.insert(FieldName);
+				}
 				if (!first) {
 					CreateFields_ += ", ";
 					SelectFields_ += ", ";
@@ -383,12 +402,14 @@ namespace ORM {
 		}
 
 		inline bool Create() {
+			VerifiedUniqueLookupFields_.clear();
 			if (HasUnsupportedUniqueIndex_) {
 				Logger_.error("Unique secondary indexes are only supported on PostgreSQL. "
 				              "Cannot create table '" + TableName_ + "' because one or more declared "
 				              "indexes require unique constraint support on an unsupported database backend.");
 				return false;
 			}
+			std::set<std::string> VerifiedUniqueFields;
 			switch (Type_) {
 			case OpenWifi::DBType::mysql: {
 				try {
@@ -442,24 +463,39 @@ namespace ORM {
 							}
 							try {
 								bool IsUnique = false, IsValid = false, IsImmediate = false, IsNotPartial = false, IsNotExpression = false;
+								bool IsBtree = false, NullsDistinctMatch = false, CollationsMatch = false, OpclassesMatch = false;
 								int KeyAttCount = 0, TotalAttCount = 0;
 								std::string ActualCols, ExpectedCols;
+								std::string ActualDirs, ExpectedDirs;
 								for (const auto &entry : Decl.Entries) {
 									if (!ExpectedCols.empty()) ExpectedCols += ',';
 									ExpectedCols += Poco::toLower(entry.FieldName);
+									if (!ExpectedDirs.empty()) ExpectedDirs += ',';
+									ExpectedDirs += (entry.Type == Indextype::ASC ? "ASC" : "DESC");
 								}
 								std::string VerifyQ = ConvertParams(
 									"SELECT i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), "
 									"CAST(i.indnkeyatts AS int), CAST(i.indnatts AS int), "
-									"COALESCE(string_agg(a.attname, ',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), '') "
+									"COALESCE(string_agg(a.attname, ',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), ''), "
+									"COALESCE(string_agg(CASE (i.indoption[pos.pos - 1] & 3) "
+									"WHEN 0 THEN 'ASC' WHEN 1 THEN 'DESC NULLS LAST' "
+									"WHEN 2 THEN 'ASC NULLS FIRST' WHEN 3 THEN 'DESC' END, "
+									"',' ORDER BY pos.pos) FILTER (WHERE pos.pos <= i.indnkeyatts), ''), "
+									"(am.amname = 'btree'), "
+									"(COALESCE((to_jsonb(i.*) ->> 'indnullsnotdistinct')::boolean, false) = false), "
+									"COALESCE(bool_and(i.indcollation[pos.pos - 1] = a.attcollation) FILTER (WHERE pos.pos <= i.indnkeyatts), true), "
+									"COALESCE(bool_and(opc.opcdefault AND opc.opcmethod = idx_cls.relam) FILTER (WHERE pos.pos <= i.indnkeyatts), true) "
 									"FROM pg_index i "
 									"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
 									"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
 									"JOIN pg_namespace ns ON ns.oid = tbl_cls.relnamespace "
+									"JOIN pg_am am ON am.oid = idx_cls.relam "
 									"JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS pos(attnum, pos) ON true "
 									"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = pos.attnum "
+									"LEFT JOIN pg_opclass opc ON opc.oid = i.indclass[pos.pos - 1] "
 									"WHERE tbl_cls.oid = to_regclass(?) AND idx_cls.oid = to_regclass(quote_ident(ns.nspname) || '.' || ?) AND idx_cls.relnamespace = tbl_cls.relnamespace "
-									"GROUP BY i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), i.indnkeyatts, i.indnatts");
+									"GROUP BY i.indisunique, i.indisvalid, i.indimmediate, (i.indpred IS NULL), (i.indexprs IS NULL), "
+									"i.indnkeyatts, i.indnatts, am.amname, (to_jsonb(i.*) ->> 'indnullsnotdistinct')");
 								std::string UseTableName = TableName_;
 								std::string UseIndexName = Decl.Name;
 								Session << VerifyQ,
@@ -471,14 +507,23 @@ namespace ORM {
 								    Poco::Data::Keywords::into(KeyAttCount),
 								    Poco::Data::Keywords::into(TotalAttCount),
 								    Poco::Data::Keywords::into(ActualCols),
+								    Poco::Data::Keywords::into(ActualDirs),
+								    Poco::Data::Keywords::into(IsBtree),
+								    Poco::Data::Keywords::into(NullsDistinctMatch),
+								    Poco::Data::Keywords::into(CollationsMatch),
+								    Poco::Data::Keywords::into(OpclassesMatch),
 								    Poco::Data::Keywords::use(UseTableName),
 								    Poco::Data::Keywords::use(UseIndexName),
 								    Poco::Data::Keywords::now;
 								if (!IsUnique || !IsValid || !IsImmediate || !IsNotPartial || !IsNotExpression ||
+								    !IsBtree || !NullsDistinctMatch || !CollationsMatch || !OpclassesMatch ||
 								    KeyAttCount != static_cast<int>(Decl.Entries.size()) || TotalAttCount != KeyAttCount ||
-								    ActualCols != ExpectedCols) {
+								    ActualCols != ExpectedCols || ActualDirs != ExpectedDirs) {
 									Logger_.error("PostgreSQL unique index '" + Decl.Name + "' validation failed on table '" + TableName_ + "'.");
 									return false;
+								}
+								if (Decl.Unique && Decl.Entries.size() == 1) {
+									VerifiedUniqueFields.insert(Poco::toLower(Decl.Entries[0].FieldName));
 								}
 							} catch (const Poco::Exception &E) {
 								Logger_.error("Failed to verify PostgreSQL unique index '" + Decl.Name + "' on table '" + TableName_ + "'.");
@@ -496,7 +541,11 @@ namespace ORM {
 				}
 			} break;
 			}
-			return Upgrade();
+			if (!Upgrade()) {
+				return false;
+			}
+			VerifiedUniqueLookupFields_ = std::move(VerifiedUniqueFields);
+			return true;
 		}
 
 		[[nodiscard]] std::string ConvertParams(const std::string &S) const {
@@ -1222,6 +1271,7 @@ namespace ORM {
 		}
 
 		// SELECT ... FOR UPDATE row-level locking on caller transaction (PostgreSQL only, bypasses cache).
+		// Lookups require a primary key or verified single-column unique index. Non-unique fields and NULLs are rejected.
 		template <typename T>
 		bool GetRecordForUpdate(OpenWifi::DbTransaction &tx, field_name_t FieldName, const T &Value,
 		                        RecordType &R) {
@@ -1237,29 +1287,55 @@ namespace ORM {
 				tx.MarkFailed();
 				return false;
 			}
-			try {
-				// Cache_ is intentionally bypassed: a cached object cannot hold a PostgreSQL row lock.
-				Poco::Data::Statement Select(tx.Session());
-				RecordTuple RT;
-				std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " + FieldName + "=? limit 1 for update";
-				auto tValue{Value};
-				Select << ConvertParams(St), Poco::Data::Keywords::into(RT), Poco::Data::Keywords::use(tValue);
-				if (Select.execute() == 1) {
-					Convert(RT, R);
-					return true;
-				}
-				// Row not found: not a transaction error. Caller decides how to handle.
-			} catch (const Poco::Exception &E) {
-				Logger_.log(E);
+			std::string LowerFieldName = Poco::toLower(std::string(FieldName));
+			if (!IsForUpdateLookupFieldAllowed(LowerFieldName)) {
+				Logger_.error("GetRecordForUpdate called with non-unique or unverified lookup field '" + LowerFieldName + "' on table '" + TableName_ + "'. Only primary keys and verified single-column unique indexes are allowed.");
 				tx.MarkFailed();
-			} catch (const std::exception &E) {
-				Logger_.error("GetRecordForUpdate failed: " + std::string(E.what()));
-				tx.MarkFailed();
-			} catch (...) {
-				Logger_.error("GetRecordForUpdate failed: unknown exception");
-				tx.MarkFailed();
+				return false;
 			}
-			return false;
+			// nullptr_t and nullopt_t are handled in a compile-time branch before SQL binding
+			// to prevent invalid Poco::Data::Keywords::use() template instantiation, marking
+			// the transaction failed and returning false at runtime.
+			if constexpr (std::is_same_v<std::decay_t<T>, std::nullptr_t> ||
+			              std::is_same_v<std::decay_t<T>, std::nullopt_t>) {
+				Logger_.error("GetRecordForUpdate called with NULL lookup value on field '" + LowerFieldName + "' on table '" + TableName_ + "'.");
+				tx.MarkFailed();
+				return false;
+			} else {
+				// For pointer, optional, and nullable types: reject null values at runtime.
+				if (IsNullLookupValue(Value)) {
+					Logger_.error("GetRecordForUpdate called with NULL lookup value on field '" + LowerFieldName + "' on table '" + TableName_ + "'.");
+					tx.MarkFailed();
+					return false;
+				}
+				try {
+					// Cache_ is intentionally bypassed: a cached object cannot hold a PostgreSQL row lock.
+					Poco::Data::Statement Select(tx.Session());
+					RecordTuple RT;
+					std::string St = "select " + SelectFields_ + " from " + TableName_ + " where " + LowerFieldName + "=? limit 1 for update";
+					const auto &unwrapped = [&]() -> const auto & {
+						if constexpr (is_std_optional<std::decay_t<T>>::value) return *Value;
+						else return Value;
+					}();
+					auto tValue{unwrapped};
+					Select << ConvertParams(St), Poco::Data::Keywords::into(RT), Poco::Data::Keywords::use(tValue);
+					if (Select.execute() == 1) {
+						Convert(RT, R);
+						return true;
+					}
+					// Row not found: not a transaction error. Caller decides how to handle.
+				} catch (const Poco::Exception &E) {
+					Logger_.log(E);
+					tx.MarkFailed();
+				} catch (const std::exception &E) {
+					Logger_.error("GetRecordForUpdate failed: " + std::string(E.what()));
+					tx.MarkFailed();
+				} catch (...) {
+					Logger_.error("GetRecordForUpdate failed: unknown exception");
+					tx.MarkFailed();
+				}
+				return false;
+			}
 		}
 
 		bool GetRecords(OpenWifi::DbTransaction &tx,
@@ -1490,6 +1566,32 @@ namespace ORM {
 			}
 		}
 
+		bool IsForUpdateLookupFieldAllowed(const std::string &field) const {
+			return PrimaryKeyLookupFields_.find(field) != PrimaryKeyLookupFields_.end() ||
+			       VerifiedUniqueLookupFields_.find(field) != VerifiedUniqueLookupFields_.end();
+		}
+
+		template <typename V>
+		static bool IsNullLookupValue(const V &val) {
+			if constexpr (std::is_same_v<std::decay_t<V>, std::nullptr_t> ||
+			              std::is_same_v<std::decay_t<V>, std::nullopt_t>) {
+				return true;
+			} else if constexpr (std::is_pointer_v<std::decay_t<V>>) {
+				return val == nullptr;
+			} else if constexpr (has_is_null<std::decay_t<V>>::value) {
+				return val.isNull();
+			} else if constexpr (is_std_optional<std::decay_t<V>>::value) {
+				return !val.has_value();
+			} else {
+				return false;
+			}
+		}
+
+		// Primary key fields extracted from Field declarations where Field.Index == true (unique primary key).
+		std::set<std::string> PrimaryKeyLookupFields_;
+		// Single-column unique index fields verified in PostgreSQL catalog via Create() on this instance.
+		// Only populated after Create() catalog validation and Upgrade() succeed.
+		std::set<std::string> VerifiedUniqueLookupFields_;
 		std::string CreateFields_;
 		std::string SelectFields_;
 		std::string SelectList_;

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <future>
 #include <map>
+#include <optional>
 
 #include "Poco/ConsoleChannel.h"
 #include "Poco/AutoPtr.h"
@@ -142,6 +143,69 @@ class TestDB : public ORM::DB<OpenWifi::TestRecordTuple, OpenWifi::TestRecord> {
 			 ORM::IndexVec{}, P, L, "rlt", Cache) {}
 };
 
+namespace OpenWifi {
+	struct LookupCardinalityRecord {
+		std::string id;
+		std::string name;
+		std::string value;
+		std::string tag;
+		std::string category;
+		std::string notes;
+
+		void to_json(Poco::JSON::Object &) const {}
+		bool from_json(const Poco::JSON::Object::Ptr &) { return true; }
+	};
+	typedef Poco::Tuple<std::string, std::string, std::string, std::string, std::string, std::string> LookupCardinalityTuple;
+} // namespace OpenWifi
+
+template <>
+void ORM::DB<OpenWifi::LookupCardinalityTuple, OpenWifi::LookupCardinalityRecord>::Convert(
+	const OpenWifi::LookupCardinalityTuple &In, OpenWifi::LookupCardinalityRecord &Out) {
+	Out.id = In.get<0>();
+	Out.name = In.get<1>();
+	Out.value = In.get<2>();
+	Out.tag = In.get<3>();
+	Out.category = In.get<4>();
+	Out.notes = In.get<5>();
+}
+
+template <>
+void ORM::DB<OpenWifi::LookupCardinalityTuple, OpenWifi::LookupCardinalityRecord>::Convert(
+	const OpenWifi::LookupCardinalityRecord &In, OpenWifi::LookupCardinalityTuple &Out) {
+	Out.set<0>(In.id);
+	Out.set<1>(In.name);
+	Out.set<2>(In.value);
+	Out.set<3>(In.tag);
+	Out.set<4>(In.category);
+	Out.set<5>(In.notes);
+}
+
+class LookupCardinalityDB : public ORM::DB<OpenWifi::LookupCardinalityTuple, OpenWifi::LookupCardinalityRecord> {
+  public:
+	LookupCardinalityDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L,
+	                    const char *TableName = "cardinality_test_records")
+		: DB(T, TableName,
+			 ORM::FieldVec{
+				 ORM::Field{"id", ORM::FieldType::FT_TEXT, 0, true},
+				 ORM::Field{"name", ORM::FieldType::FT_TEXT},
+				 ORM::Field{"value", ORM::FieldType::FT_TEXT},
+				 ORM::Field{"tag", ORM::FieldType::FT_TEXT},
+				 ORM::Field{"category", ORM::FieldType::FT_TEXT},
+				 ORM::Field{"notes", ORM::FieldType::FT_TEXT}
+			 },
+			 ORM::IndexVec{
+				 ORM::Index{std::string(TableName) + "_single_unique",
+				            ORM::IndexEntryVec{{"value", ORM::Indextype::ASC}},
+				            true},
+				 ORM::Index{std::string(TableName) + "_composite_unique",
+				            ORM::IndexEntryVec{{"name", ORM::Indextype::ASC}, {"tag", ORM::Indextype::ASC}},
+				            true},
+				 ORM::Index{std::string(TableName) + "_normal_idx",
+				            ORM::IndexEntryVec{{"category", ORM::Indextype::ASC}},
+				            false}
+			 }, P, L, "cdt") {}
+};
+
 #ifndef SMALL_BUILD
 // Verifies via PostgreSQL pg_blocking_pids() that targetPid (tx2) is specifically
 // blocked by expectedBlockerPid (tx1). This deterministically proves lock contention
@@ -179,6 +243,19 @@ static bool DropTestTable(Poco::Data::SessionPool &pool) {
 		return true;
 	} catch (const std::exception &e) {
 		std::cerr << "DropTestTable exception: " << e.what() << std::endl;
+		return false;
+	}
+}
+
+static bool DropCardinalityTable(Poco::Data::SessionPool &pool, const std::string &tblName = "cardinality_test_records") {
+	try {
+		Poco::Data::Session cleanSession = pool.get();
+		Poco::Data::Statement dropStmt(cleanSession);
+		dropStmt << "DROP TABLE IF EXISTS " + tblName;
+		dropStmt.execute();
+		return true;
+	} catch (const std::exception &e) {
+		std::cerr << "DropCardinalityTable exception: " << e.what() << std::endl;
 		return false;
 	}
 }
@@ -223,7 +300,7 @@ int main() {
 
 	if (!pgHost || std::string(pgHost).empty()) {
 		std::cout << "[Framework Unit Test] PGHOST / TEST_POSTGRES_HOST not set." << std::endl;
-		std::cout << "[Framework Unit Test] Skipping live PostgreSQL tests (Tests A-D, F, G) with CTest skip code 77." << std::endl;
+		std::cout << "[Framework Unit Test] Skipping live PostgreSQL tests (Tests A-D, F-J) with CTest skip code 77." << std::endl;
 		return 77;
 	}
 
@@ -283,11 +360,9 @@ int main() {
 		TEST_ASSERT(recA_tx1.value == "Initial Value", "recA initial value mismatch");
 
 		// Part A1: Verify PostgreSQL lock_timeout behavior on conflicting row lock.
-		// A session with lock_timeout set must abort on GetRecordForUpdate() while tx1 holds the lock.
+		// A session with lock_timeout set via DbTransaction constructor must abort on GetRecordForUpdate() while tx1 holds the lock.
 		{
-			OpenWifi::DbTransaction txTimeout(pool.get(), logger);
-			Poco::Data::Statement setStmt(txTimeout.Session());
-			setStmt << "SET LOCAL lock_timeout = '150ms'", Poco::Data::Keywords::now;
+			OpenWifi::DbTransaction txTimeout(pool.get(), logger, 150);
 
 			OpenWifi::TestRecord recA_timedOut;
 			bool acquired = pgDbInstance.GetRecordForUpdate(txTimeout, "id", std::string("rec-lock-001"), recA_timedOut);
@@ -612,6 +687,274 @@ int main() {
 			            "PostgreSQL transaction was aborted, indicating invalid SQL was executed instead of being rejected prior to query execution!");
 
 			TEST_ASSERT(!txInvalid.Commit(), "txInvalid.Commit() unexpectedly succeeded despite tx being marked failed!");
+		}
+
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test I: GetRecordForUpdate Lookup Cardinality & Uniqueness Validation
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test I: GetRecordForUpdate lookup cardinality & uniqueness validation... " << std::flush;
+		TEST_ASSERT(DropCardinalityTable(pool, "cardinality_test_records"),
+		            "Failed to drop cardinality_test_records before Test I");
+
+		LookupCardinalityDB cardDb(OpenWifi::DBType::pgsql, pool, logger, "cardinality_test_records");
+		TEST_ASSERT(cardDb.Create(), "Failed to create cardinality_test_records table");
+
+		// Seed initial test records
+		OpenWifi::LookupCardinalityRecord rec1{"id-001", "shared-name", "unique-val-1", "tag-alpha", "cat-A", "note-1"};
+		OpenWifi::LookupCardinalityRecord rec2{"id-002", "shared-name", "unique-val-2", "tag-beta", "cat-A", "note-2"};
+		TEST_ASSERT(cardDb.CreateRecord(rec1), "Failed to create rec1");
+		TEST_ASSERT(cardDb.CreateRecord(rec2), "Failed to create rec2");
+
+		// Case A: Primary-key lookup allowed
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::LookupCardinalityRecord out;
+			bool ok = cardDb.GetRecordForUpdate(tx, "id", std::string("id-001"), out);
+			TEST_ASSERT(ok, "Case A: Primary-key lookup failed");
+			TEST_ASSERT(out.id == "id-001" && out.value == "unique-val-1", "Case A: Fetched wrong record by PK");
+			TEST_ASSERT(!tx.HasFailed(), "Case A: tx.HasFailed() was unexpectedly set");
+			TEST_ASSERT(tx.Commit(), "Case A: Commit failed after primary-key lookup");
+		}
+
+		// Case B: Single-column verified unique-index lookup allowed
+		{
+			OpenWifi::DbTransaction tx(pool.get(), logger);
+			OpenWifi::LookupCardinalityRecord out;
+			bool ok = cardDb.GetRecordForUpdate(tx, "value", std::string("unique-val-2"), out);
+			TEST_ASSERT(ok, "Case B: Single-column verified unique-index lookup failed");
+			TEST_ASSERT(out.id == "id-002" && out.value == "unique-val-2", "Case B: Fetched wrong record by unique index");
+			TEST_ASSERT(!tx.HasFailed(), "Case B: tx.HasFailed() was unexpectedly set");
+			TEST_ASSERT(tx.Commit(), "Case B: Commit failed after verified unique-index lookup");
+		}
+
+		// Case C: Non-unique fields rejected
+		{
+			// C1: Plain unindexed non-unique field rejected
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				// "notes" is completely unindexed and non-unique
+				bool ok = cardDb.GetRecordForUpdate(tx, "notes", std::string("note-1"), out);
+				TEST_ASSERT(!ok, "Case C1: Unindexed non-unique field lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case C1: tx.HasFailed() was not set after unindexed field lookup");
+				TEST_ASSERT(!tx.Commit(), "Case C1: Commit unexpectedly succeeded after unindexed field lookup");
+			}
+
+			// C2: Single-column normal (non-unique) indexed field rejected
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				// "category" has a normal secondary index (cardinality_test_records_normal_idx, Unique=false).
+				// Even though it is indexed, it is non-unique and must be rejected.
+				bool ok = cardDb.GetRecordForUpdate(tx, "category", std::string("cat-A"), out);
+				TEST_ASSERT(!ok, "Case C2: Normal (non-unique) indexed field lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case C2: tx.HasFailed() was not set after normal indexed field lookup");
+				TEST_ASSERT(!tx.Commit(), "Case C2: Commit unexpectedly succeeded after normal indexed field lookup");
+			}
+		}
+
+		// Case D: Composite unique participant rejected
+		{
+			// "name" and "tag" participate in composite unique index cardinality_test_records_composite_unique.
+			// Neither field is individually unique; GetRecordForUpdate must reject each.
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				bool ok = cardDb.GetRecordForUpdate(tx, "tag", std::string("tag-alpha"), out);
+				TEST_ASSERT(!ok, "Case D: Composite unique participant 'tag' unexpectedly accepted");
+				TEST_ASSERT(tx.HasFailed(), "Case D: tx.HasFailed() was not set for composite participant 'tag'");
+				TEST_ASSERT(!tx.Commit(), "Case D: Commit unexpectedly succeeded for composite participant 'tag'");
+			}
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				bool ok = cardDb.GetRecordForUpdate(tx, "name", std::string("shared-name"), out);
+				TEST_ASSERT(!ok, "Case D: Composite unique participant 'name' unexpectedly accepted");
+				TEST_ASSERT(tx.HasFailed(), "Case D: tx.HasFailed() was not set for composite participant 'name'");
+				TEST_ASSERT(!tx.Commit(), "Case D: Commit unexpectedly succeeded for composite participant 'name'");
+			}
+		}
+
+		// Case E: NULL lookup rejected
+		{
+			// E1: nullptr literal (std::nullptr_t)
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				bool ok = cardDb.GetRecordForUpdate(tx, "id", nullptr, out);
+				TEST_ASSERT(!ok, "Case E1: nullptr lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case E1: tx.HasFailed() was not set for nullptr lookup");
+				TEST_ASSERT(!tx.Commit(), "Case E1: Commit unexpectedly succeeded for nullptr lookup");
+			}
+			// E2: const char * pointer with nullptr value
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				const char *nullPtr = nullptr;
+				bool ok = cardDb.GetRecordForUpdate(tx, "id", nullPtr, out);
+				TEST_ASSERT(!ok, "Case E2: const char * nullptr lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case E2: tx.HasFailed() was not set for const char * nullptr lookup");
+				TEST_ASSERT(!tx.Commit(), "Case E2: Commit unexpectedly succeeded for const char * nullptr lookup");
+			}
+			// E3: const char * pointer with nullptr value on unique field
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				const char *nullPtr = nullptr;
+				bool ok = cardDb.GetRecordForUpdate(tx, "value", nullPtr, out);
+				TEST_ASSERT(!ok, "Case E3: null unique-field lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case E3: tx.HasFailed() was not set for null unique-field lookup");
+				TEST_ASSERT(!tx.Commit(), "Case E3: Commit unexpectedly succeeded for null unique-field lookup");
+			}
+			// E4: std::nullopt literal (std::nullopt_t)
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				bool ok = cardDb.GetRecordForUpdate(tx, "id", std::nullopt, out);
+				TEST_ASSERT(!ok, "Case E4: std::nullopt lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case E4: tx.HasFailed() was not set for std::nullopt lookup");
+				TEST_ASSERT(!tx.Commit(), "Case E4: Commit unexpectedly succeeded for std::nullopt lookup");
+			}
+			// E5: empty std::optional<std::string>
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				std::optional<std::string> emptyOpt;
+				bool ok = cardDb.GetRecordForUpdate(tx, "value", emptyOpt, out);
+				TEST_ASSERT(!ok, "Case E5: empty std::optional lookup unexpectedly succeeded");
+				TEST_ASSERT(tx.HasFailed(), "Case E5: tx.HasFailed() was not set for empty std::optional lookup");
+				TEST_ASSERT(!tx.Commit(), "Case E5: Commit unexpectedly succeeded for empty std::optional lookup");
+			}
+			// E6: populated std::optional<std::string> on unique field succeeds
+			{
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				std::optional<std::string> validOpt{"unique-val-1"};
+				bool ok = cardDb.GetRecordForUpdate(tx, "value", validOpt, out);
+				TEST_ASSERT(ok, "Case E6: populated std::optional lookup failed");
+				TEST_ASSERT(out.id == "id-001" && out.value == "unique-val-1", "Case E6: Fetched wrong record with std::optional");
+				TEST_ASSERT(!tx.HasFailed(), "Case E6: tx.HasFailed() was unexpectedly set");
+				TEST_ASSERT(tx.Commit(), "Case E6: Commit failed for valid std::optional lookup");
+			}
+		}
+
+		// Case F: Unverified unique-index field rejected
+		{
+			// F1: Unique field before verification rejected (uncalled Create())
+			{
+				TEST_ASSERT(DropCardinalityTable(pool, "unverified_test_table"),
+				            "Failed to drop unverified_test_table before Case F1");
+				// Construct ORM DB with declared Unique=true index, but do NOT call Create()
+				LookupCardinalityDB unverifiedDb(OpenWifi::DBType::pgsql, pool, logger, "unverified_test_table");
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				bool ok = unverifiedDb.GetRecordForUpdate(tx, "value", std::string("unique-val-1"), out);
+				TEST_ASSERT(!ok, "Case F1: Unique field before verification unexpectedly accepted");
+				TEST_ASSERT(tx.HasFailed(), "Case F1: tx.HasFailed() was not set for unverified unique field");
+				TEST_ASSERT(!tx.Commit(), "Case F1: Commit unexpectedly succeeded for unverified unique field");
+				TEST_ASSERT(DropCardinalityTable(pool, "unverified_test_table"),
+				            "Failed to drop unverified_test_table after Case F1");
+			}
+
+			// F2: Failed PostgreSQL unique-index verification in Create()
+			{
+				const std::string failedTbl = "unverified_failed_table";
+				TEST_ASSERT(DropCardinalityTable(pool, failedTbl),
+				            "Failed to drop unverified_failed_table before Case F2");
+
+				// Pre-create table with a conflicting NON-UNIQUE index using the exact name
+				// that LookupCardinalityDB declares as unique for this table (failedTbl + "_single_unique").
+				const std::string conflictIndexName = failedTbl + "_single_unique";
+				{
+					Poco::Data::Session s = pool.get();
+					s << "CREATE TABLE " + failedTbl + " (id TEXT PRIMARY KEY, name TEXT, value TEXT, tag TEXT, category TEXT, notes TEXT)",
+					    Poco::Data::Keywords::now;
+					s << "CREATE INDEX IF NOT EXISTS " + conflictIndexName + " ON " + failedTbl + " (value ASC)",
+					    Poco::Data::Keywords::now;
+				}
+
+				LookupCardinalityDB failedDb(OpenWifi::DBType::pgsql, pool, logger, failedTbl.c_str());
+				// Create() must detect that the surviving index is non-unique and return false
+				bool created = failedDb.Create();
+				TEST_ASSERT(!created, "Case F2: Create() unexpectedly succeeded when conflicting non-unique index exists");
+
+				// Even though 'value' is declared as unique in ORM metadata, failed PostgreSQL verification
+				// must NOT leave the field enabled in VerifiedUniqueLookupFields_.
+				OpenWifi::DbTransaction tx(pool.get(), logger);
+				OpenWifi::LookupCardinalityRecord out;
+				bool ok = failedDb.GetRecordForUpdate(tx, "value", std::string("unique-val-1"), out);
+				TEST_ASSERT(!ok, "Case F2: Unique field with failed PostgreSQL verification unexpectedly allowed");
+				TEST_ASSERT(tx.HasFailed(), "Case F2: tx.HasFailed() was not set after failed verification lookup");
+				TEST_ASSERT(!tx.Commit(), "Case F2: Commit unexpectedly succeeded after failed verification lookup");
+
+				TEST_ASSERT(DropCardinalityTable(pool, failedTbl),
+				            "Failed to drop unverified_failed_table after Case F2");
+			}
+		}
+
+		TEST_ASSERT(DropCardinalityTable(pool, "cardinality_test_records"),
+		            "Failed to drop cardinality_test_records after Test I");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test J: Configurable PostgreSQL lock_timeout & statement_timeout verification
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test J: Configurable PostgreSQL lock_timeout & statement_timeout verification... " << std::flush;
+
+		// J1: Default 2000ms lock_timeout applied automatically on PostgreSQL DbTransaction
+		{
+			OpenWifi::DbTransaction txDefault(pool.get(), logger);
+			std::string lockSetting;
+			txDefault.Session() << "SELECT current_setting('lock_timeout')", Poco::Data::Keywords::into(lockSetting), Poco::Data::Keywords::now;
+			TEST_ASSERT(lockSetting == "2s" || lockSetting == "2000ms", "J1: Expected default 2s lock_timeout, got: " + lockSetting);
+			TEST_ASSERT(txDefault.LockTimeoutMs() == 2000, "J1: LockTimeoutMs mismatch");
+			TEST_ASSERT(txDefault.Commit(), "J1: Commit failed");
+		}
+
+		// J2: Configured transaction-local lock_timeout and statement_timeout applied
+		{
+			OpenWifi::DbTransaction txCustom(pool.get(), logger, 350, 1500);
+			std::string lockSetting, stmtSetting;
+			txCustom.Session() << "SELECT current_setting('lock_timeout')", Poco::Data::Keywords::into(lockSetting), Poco::Data::Keywords::now;
+			txCustom.Session() << "SELECT current_setting('statement_timeout')", Poco::Data::Keywords::into(stmtSetting), Poco::Data::Keywords::now;
+			TEST_ASSERT(lockSetting == "350ms", "J2: Expected 350ms lock_timeout, got: " + lockSetting);
+			TEST_ASSERT(stmtSetting == "1500ms" || stmtSetting == "1.5s", "J2: Expected 1500ms statement_timeout, got: " + stmtSetting);
+			TEST_ASSERT(txCustom.Commit(), "J2: Commit failed");
+		}
+
+		// J3: Concurrency lock contention fails within configured timeout
+		{
+			OpenWifi::TestRecord timeoutRec{"rec-lock-timeout", "Timeout Row", "Initial Value"};
+			TEST_ASSERT(pgDbInstance.CreateRecord(timeoutRec), "Failed to create timeoutRec");
+
+			OpenWifi::DbTransaction txA(pool.get(), logger);
+			OpenWifi::TestRecord lockedRec;
+			TEST_ASSERT(pgDbInstance.GetRecordForUpdate(txA, "id", std::string("rec-lock-timeout"), lockedRec), "J3: txA failed lock");
+
+			OpenWifi::DbTransaction txB(pool.get(), logger, 250);
+			OpenWifi::TestRecord blockedRec;
+			auto startWait = std::chrono::steady_clock::now();
+			bool acquired = pgDbInstance.GetRecordForUpdate(txB, "id", std::string("rec-lock-timeout"), blockedRec);
+			auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startWait).count();
+
+			TEST_ASSERT(!acquired && txB.HasFailed() && !txB.Commit(), "J3: txB lock acquisition or error handling failed");
+			TEST_ASSERT(elapsedMs >= 180 && elapsedMs < 1800, "J3: timeout elapsedMs out of range: " + std::to_string(elapsedMs));
+			TEST_ASSERT(txA.Commit(), "J3: txA commit failed");
+		}
+
+		// J4: Transaction-local setting isolation (subsequent transaction returns to clean session default)
+		{
+			OpenWifi::DbTransaction txClean(pool.get(), logger);
+			std::string lockSetting;
+			txClean.Session() << "SELECT current_setting('lock_timeout')", Poco::Data::Keywords::into(lockSetting), Poco::Data::Keywords::now;
+			TEST_ASSERT(lockSetting == "2s" || lockSetting == "2000ms", "J4: Stale lock_timeout: " + lockSetting);
+			TEST_ASSERT(txClean.Commit(), "J4: Commit failed");
 		}
 
 		std::cout << "PASSED" << std::endl;

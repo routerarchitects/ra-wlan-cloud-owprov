@@ -36,6 +36,7 @@
  *  19. Test Q (PostgreSQL) - Conflicting index with INCLUDE column causes Create() to return false.
  *  20. Test R (PostgreSQL) - Deferrable unique constraint causes Create() to return false.
  *  21. Test S (PostgreSQL) - Existing unique index on quoted "Value" instead of unquoted value causes Create() to return false.
+ *  22. Test T (PostgreSQL) - Existing same-name unique index on matching column with incompatible index semantics (opclass, collation, NULLS NOT DISTINCT, sort direction, NULL sort ordering) causes Create() to return false.
  */
 
 #include <iostream>
@@ -1040,8 +1041,164 @@ int main() {
         std::cout << "PASSED" << std::endl;
     }
 
+    // -------------------------------------------------------------------------
+    // Test T: Existing unique index on matching column with incompatible index
+    //         semantics causes Create() to return false (PostgreSQL)
+    //
+    // Verifies that when an existing unique index has the expected name and
+    // covers the expected column, but has incompatible index semantics
+    // (incompatible operator class, collation, or NULLS NOT DISTINCT),
+    // Create() rejects it and returns false.
+    // -------------------------------------------------------------------------
+    {
+        std::cout << "  - Test T: Incompatible index semantics on matching column causes Create() to fail (PostgreSQL)... " << std::flush;
+
+        // Subcase T1: Incompatible operator class (text_pattern_ops instead of default text_ops)
+        {
+            const char *kTableName = "pg_uni_incompat_opclass_test";
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test T1");
+
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "CREATE TABLE " + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_unique_idx"
+                     " ON " + std::string(kTableName) + " (value text_pattern_ops)",
+                    Poco::Data::Keywords::now;
+            }
+
+            UniqueIndexDB opcDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+            bool createResult = opcDb.Create();
+            TEST_ASSERT(!createResult,
+                        "Test T1: Create() must return false when existing unique index uses incompatible operator class");
+
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test T1");
+        }
+
+        // Subcase T2: Incompatible collation (explicit collation distinct from column's default collation)
+        {
+            const char *kTableName = "pg_uni_incompat_collation_test";
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test T2");
+
+            std::string diffCollation;
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "CREATE TABLE " + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                // Query pg_collation for a schema-qualified collation distinct from 'value' column's attcollation
+                // to guarantee the test reliably exercises differing collation regardless of database default.
+                s << "SELECT quote_ident(n.nspname) || '.' || quote_ident(c.collname) "
+                     "FROM pg_collation c "
+                     "JOIN pg_namespace n ON n.oid = c.collnamespace "
+                     "WHERE c.oid != (SELECT attcollation FROM pg_attribute WHERE attrelid = to_regclass('" + std::string(kTableName) + "') AND attname = 'value') "
+                     "AND c.collencoding IN (-1, (SELECT encoding FROM pg_database WHERE datname = current_database())) "
+                     "LIMIT 1",
+                    Poco::Data::Keywords::into(diffCollation),
+                    Poco::Data::Keywords::now;
+
+                TEST_ASSERT(!diffCollation.empty(), "Test T2: Could not find differing collation for test");
+
+                s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_unique_idx"
+                     " ON " + std::string(kTableName) + " (value COLLATE " + diffCollation + ")",
+                    Poco::Data::Keywords::now;
+            }
+
+            UniqueIndexDB collDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+            bool createResult = collDb.Create();
+            TEST_ASSERT(!createResult,
+                        "Test T2: Create() must return false when existing unique index uses incompatible collation (" + diffCollation + ")");
+
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test T2");
+        }
+
+        // Subcase T3: Incompatible NULL semantics (NULLS NOT DISTINCT on PostgreSQL 15+)
+        {
+            int pgVer = 0;
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "SELECT current_setting('server_version_num')::int",
+                    Poco::Data::Keywords::into(pgVer),
+                    Poco::Data::Keywords::now;
+            }
+
+            if (pgVer >= 150000) {
+                const char *kTableName = "pg_uni_incompat_nulls_test";
+                TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test T3");
+
+                {
+                    Poco::Data::Session s = pgPool.get();
+                    s << "CREATE TABLE " + std::string(kTableName) +
+                         " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                        Poco::Data::Keywords::now;
+                    s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_unique_idx"
+                         " ON " + std::string(kTableName) + " (value) NULLS NOT DISTINCT",
+                        Poco::Data::Keywords::now;
+                }
+
+                UniqueIndexDB nullsDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+                bool createResult = nullsDb.Create();
+                TEST_ASSERT(!createResult,
+                            "Test T3: Create() must return false when existing unique index uses NULLS NOT DISTINCT");
+
+                TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test T3");
+            }
+        }
+
+        // Subcase T4: Incompatible sort direction (DESC instead of expected ASC)
+        {
+            const char *kTableName = "pg_uni_incompat_dir_test";
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test T4");
+
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "CREATE TABLE " + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                // Pre-create unique index on matching column 'value' but opposite sort direction (DESC vs expected ASC)
+                s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_unique_idx"
+                     " ON " + std::string(kTableName) + " (value DESC)",
+                    Poco::Data::Keywords::now;
+            }
+
+            UniqueIndexDB dirDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+            bool createResult = dirDb.Create();
+            TEST_ASSERT(!createResult,
+                        "Test T4: Create() must return false when existing unique index uses opposite sort direction (DESC vs ASC)");
+
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test T4");
+        }
+
+        // Subcase T5: Incompatible NULL sort ordering (ASC NULLS FIRST instead of expected default ASC NULLS LAST)
+        {
+            const char *kTableName = "pg_uni_incompat_null_order_test";
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table before Test T5");
+
+            {
+                Poco::Data::Session s = pgPool.get();
+                s << "CREATE TABLE " + std::string(kTableName) +
+                     " (id TEXT PRIMARY KEY, name TEXT, value TEXT)",
+                    Poco::Data::Keywords::now;
+                // Pre-create unique index on matching column 'value' but non-default NULL sort ordering (ASC NULLS FIRST)
+                s << "CREATE UNIQUE INDEX " + std::string(kTableName) + "_unique_idx"
+                     " ON " + std::string(kTableName) + " (value ASC NULLS FIRST)",
+                    Poco::Data::Keywords::now;
+            }
+
+            UniqueIndexDB nullOrderDb(OpenWifi::DBType::pgsql, pgPool, logger, kTableName);
+            bool createResult = nullOrderDb.Create();
+            TEST_ASSERT(!createResult,
+                        "Test T5: Create() must return false when existing unique index uses non-default NULL sort ordering (ASC NULLS FIRST)");
+
+            TEST_ASSERT(DropPgTable(pgPool, kTableName), "Failed to drop table after Test T5");
+        }
+
+        std::cout << "PASSED" << std::endl;
+    }
+
     std::cout << "[Framework Unit Test] All PostgreSQL Unique-Index ORM Foundation Tests Passed Successfully!" << std::endl;
-    // Total: 2 backend-agnostic + 19 PostgreSQL tests (A-S).
+    // Total: 2 backend-agnostic + 20 PostgreSQL tests (A-T).
     return 0;
 #endif
 }
