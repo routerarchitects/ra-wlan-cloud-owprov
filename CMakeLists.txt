@@ -284,5 +284,12 @@ target_link_libraries(unique_index_test PRIVATE
 add_test(NAME unique_index_test COMMAND unique_index_test)
 set_tests_properties(unique_index_test PROPERTIES SKIP_RETURN_CODE 77)
 
+add_executable(retryable_transaction_test
+        tests/framework_tests/RetryableTransaction_test.cpp
+)
+target_link_libraries(retryable_transaction_test PRIVATE
+        ${Poco_LIBRARIES}
+        fmt::fmt)
 
-
+add_test(NAME retryable_transaction_test COMMAND retryable_transaction_test)
+set_tests_properties(retryable_transaction_test PROPERTIES SKIP_RETURN_CODE 77)
