@@ -150,6 +150,25 @@ int main() {
 		Poco::Data::DataException dbEx("error State: 40001 Detail: N/A");
 		TEST_ASSERT(OpenWifi::detail::ExtractSqlState(dbEx) == "40001", "Must extract from DataException");
 
+		// Commit-time PostgreSQL exceptions lacking " State: <code>" (e.g. SessionHandle::commit())
+		Poco::Data::DataException commitSerEx(
+		    "StatementException: COMMIT statement failed:: ERROR: could not serialize access "
+		    "due to read/write dependencies among transactions\n"
+		    "DETAIL: Reason code: Canceled on identification as a pivot, during commit.\n"
+		    "HINT: The transaction might succeed if retried.");
+		TEST_ASSERT(OpenWifi::detail::ExtractSqlState(commitSerEx) == "40001",
+		            "Must extract 40001 from commit serialization failure lacking explicit State formatting");
+
+		Poco::Data::DataException commitDeadlockEx(
+		    "StatementException: COMMIT statement failed:: ERROR: deadlock detected");
+		TEST_ASSERT(OpenWifi::detail::ExtractSqlState(commitDeadlockEx) == "40P01",
+		            "Must extract 40P01 from commit deadlock failure lacking explicit State formatting");
+
+		Poco::Data::DataException commitLockTimeoutEx(
+		    "StatementException: COMMIT statement failed:: ERROR: canceling statement due to lock timeout");
+		TEST_ASSERT(OpenWifi::detail::ExtractSqlState(commitLockTimeoutEx) == "55P03",
+		            "Must extract 55P03 from commit lock timeout failure lacking explicit State formatting");
+
 		Poco::ApplicationException nonDbEx("simulated State: 40001 Detail: N/A");
 		TEST_ASSERT(OpenWifi::detail::ExtractSqlState(nonDbEx).empty(),
 		            "Non-DataException must return empty SQLSTATE");
@@ -191,6 +210,15 @@ int main() {
 		TEST_ASSERT(tx3.HasFailed(), "Must mark failed via MarkFailed");
 		TEST_ASSERT(tx3.FailureSqlState().empty(), "Non-DB std::exception should have empty SQLSTATE");
 		TEST_ASSERT(tx3.FailureMessage() == "regular std exception", "FailureMessage must match std::exception what()");
+
+		Poco::Data::Session dummySession4("SQLite", ":memory:");
+		OpenWifi::DbTransaction tx4(dummySession4, logger);
+		Poco::Data::DataException commitEx(
+		    "StatementException: COMMIT statement failed:: ERROR: could not serialize access "
+		    "due to read/write dependencies among transactions");
+		tx4.MarkFailed(commitEx);
+		TEST_ASSERT(tx4.FailureSqlState() == "40001",
+		            "Must preserve 40001 SQLSTATE for COMMIT-time serialization conflicts via MarkFailed");
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -291,6 +319,39 @@ int main() {
 		}
 
 		TEST_ASSERT(caught, "Generic std::exception must escape RunRetryableTransaction");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// 1g. Simulated commit-failure metadata extraction & retry
+	{
+		std::cout << "  - Simulated commit-failure metadata extraction & retry..." << std::flush;
+		Poco::Data::Session dummySession("SQLite", ":memory:");
+		auto beginTx = [&]() -> OpenWifi::DbTransaction {
+			return OpenWifi::DbTransaction(dummySession, logger);
+		};
+
+		OpenWifi::RetryableTransactionOptions opts;
+		opts.maxAttempts = 3;
+		opts.initialBackoffMs = 1;
+		opts.maxBackoffMs = 5;
+		opts.jitter = false;
+
+		int attempts = 0;
+		auto res = OpenWifi::RunRetryableTransaction(logger, opts, beginTx, [&](OpenWifi::DbTransaction &tx) -> bool {
+			++attempts;
+			if (attempts == 1) {
+				Poco::Data::DataException commitSerEx(
+				    "StatementException: COMMIT statement failed:: ERROR: could not serialize access "
+				    "due to read/write dependencies among transactions");
+				tx.MarkFailed(commitSerEx);
+				return false;
+			}
+			return true;
+		});
+
+		TEST_ASSERT(res.Succeeded(), "Must succeed after retrying commit serialization failure");
+		TEST_ASSERT(res.attempts == 2, "Must retry exactly once (total 2 attempts)");
+		TEST_ASSERT(res.status == OpenWifi::RetryableTransactionStatus::Committed, "Status must be Committed");
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -656,6 +717,96 @@ int main() {
 		AssertResult(result, OpenWifi::RetryableTransactionStatus::Committed, 2);
 		TEST_ASSERT(lambdaCalls == 2, "Lambda must be called exactly 2 times");
 		AssertRecordValue("rtx-h-001", "attempt2-committed");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// -------------------------------------------------------------------------
+	// Test I: Real PostgreSQL commit-time serialization failure retry (40001)
+	// -------------------------------------------------------------------------
+	{
+		std::cout << "  - Test I: Real PostgreSQL commit-time serialization retry (40001)..." << std::flush;
+		SeedRecord("rtx-i-001", "Row I1", "10");
+		SeedRecord("rtx-i-002", "Row I2", "20");
+
+		auto beginSerializableTx = [&]() -> OpenWifi::DbTransaction {
+			Poco::Data::Session s = pool->get();
+			s << "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+			    Poco::Data::Keywords::now;
+			return OpenWifi::DbTransaction(std::move(s), logger);
+		};
+
+		std::promise<void> t1ReadDone, t2ReadDone, t1Committed;
+		std::shared_future<void> f1Read(t1ReadDone.get_future());
+		std::shared_future<void> f2Read(t2ReadDone.get_future());
+		std::shared_future<void> f1Commit(t1Committed.get_future());
+
+		std::atomic<int> workerAttempts{0};
+		bool attempt1LambdaReturned = false;
+
+		// Worker 1 runs a concurrent transaction in SERIALIZABLE isolation
+		std::thread worker1([&]() {
+			Poco::Data::Session s = pool->get();
+			s << "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+			    Poco::Data::Keywords::now;
+			Poco::Data::Transaction tx(s);
+
+			std::string val;
+			s << "SELECT value FROM rtx_test_records WHERE id = 'rtx-i-002'",
+			    Poco::Data::Keywords::into(val), Poco::Data::Keywords::now;
+			t1ReadDone.set_value();
+
+			TEST_ASSERT(f2Read.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+			            "Timeout waiting for worker 2 read in Test I");
+
+			s << "UPDATE rtx_test_records SET value = '15' WHERE id = 'rtx-i-001'", Poco::Data::Keywords::now;
+
+			tx.commit();
+			t1Committed.set_value();
+		});
+
+		// Worker 2 uses RunRetryableTransaction in SERIALIZABLE mode:
+		// Attempt 1 cross-reads I1 and updates I2, which forms an SSI pivot cycle against worker 1.
+		// Worker 2's lambda returns true; the 40001 failure occurs strictly inside tx.Commit().
+		// The retry wrapper catches the commit failure, extracts 40001, and retries cleanly.
+		auto result = OpenWifi::RunRetryableTransaction(
+		    logger, MakeOpts("TestI", 3, 10, 50, false), beginSerializableTx,
+		    [&](OpenWifi::DbTransaction &tx) -> bool {
+			    int attempt = ++workerAttempts;
+
+			    if (attempt == 1) {
+				    TEST_ASSERT(f1Read.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+				                "Timeout waiting for worker 1 read in Test I");
+
+				    std::string val;
+				    tx.Session() << "SELECT value FROM rtx_test_records WHERE id = 'rtx-i-001'",
+				        Poco::Data::Keywords::into(val), Poco::Data::Keywords::now;
+				    t2ReadDone.set_value();
+
+				    TEST_ASSERT(f1Commit.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+				                "Timeout waiting for worker 1 commit in Test I");
+
+				    tx.Session() << "UPDATE rtx_test_records SET value = '25' WHERE id = 'rtx-i-002'",
+				        Poco::Data::Keywords::now;
+
+				    // Lambda finishes and returns true: forces failure to happen inside tx.Commit()!
+				    attempt1LambdaReturned = true;
+				    return true;
+			    }
+
+			    // Attempt 2: succeeds cleanly
+			    tx.Session() << "UPDATE rtx_test_records SET value = '30' WHERE id = 'rtx-i-002'",
+			        Poco::Data::Keywords::now;
+			    return true;
+		    });
+
+		worker1.join();
+
+		TEST_ASSERT(attempt1LambdaReturned,
+		            "Attempt 1 lambda must have finished and returned true, forcing failure inside tx.Commit()");
+		AssertResult(result, OpenWifi::RetryableTransactionStatus::Committed, 2);
+		TEST_ASSERT(workerAttempts == 2, "Must retry exactly once after real commit-time serialization failure");
+		AssertRecordValue("rtx-i-001", "15");
+		AssertRecordValue("rtx-i-002", "30");
 		std::cout << "PASSED" << std::endl;
 	}
 

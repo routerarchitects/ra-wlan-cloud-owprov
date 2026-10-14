@@ -52,7 +52,32 @@ namespace OpenWifi {
 				return "";
 			}
 			auto s = ExtractSqlState(e.displayText());
-			return s.empty() ? ExtractSqlState(e.message()) : s;
+			if (s.empty()) {
+				s = ExtractSqlState(e.message());
+			}
+			if (!s.empty()) {
+				return s;
+			}
+
+			// Poco's SessionHandle::commit() throws StatementException("COMMIT statement failed:: " + lastError)
+			// without appending " State: <code>". For commit-time failures (or statement errors lacking
+			// explicit SQLSTATE formatting), detect well-known PostgreSQL transient conflict signatures.
+			auto detectSignature = [](const std::string &text) -> std::string {
+				auto lower = Poco::toLower(text);
+				if (lower.find("could not serialize access") != std::string::npos) {
+					return "40001";
+				}
+				if (lower.find("deadlock detected") != std::string::npos) {
+					return "40P01";
+				}
+				if (lower.find("lock timeout") != std::string::npos) {
+					return "55P03";
+				}
+				return "";
+			};
+
+			auto sig = detectSignature(e.displayText());
+			return sig.empty() ? detectSignature(e.message()) : sig;
 		}
 	} // namespace detail
 
