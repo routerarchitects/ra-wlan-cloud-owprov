@@ -1259,10 +1259,10 @@ namespace ORM {
 				}
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
-				tx.MarkFailed();
+				tx.MarkFailed(E);
 			} catch (const std::exception &E) {
 				Logger_.error("GetRecord failed: " + std::string(E.what()));
-				tx.MarkFailed();
+				tx.MarkFailed("", E.what());
 			} catch (...) {
 				Logger_.error("GetRecord failed: unknown exception");
 				tx.MarkFailed();
@@ -1326,10 +1326,10 @@ namespace ORM {
 					// Row not found: not a transaction error. Caller decides how to handle.
 				} catch (const Poco::Exception &E) {
 					Logger_.log(E);
-					tx.MarkFailed();
+					tx.MarkFailed(E);
 				} catch (const std::exception &E) {
 					Logger_.error("GetRecordForUpdate failed: " + std::string(E.what()));
-					tx.MarkFailed();
+					tx.MarkFailed("", E.what());
 				} catch (...) {
 					Logger_.error("GetRecordForUpdate failed: unknown exception");
 					tx.MarkFailed();
@@ -1360,10 +1360,10 @@ namespace ORM {
 				}
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
-				tx.MarkFailed();
+				tx.MarkFailed(E);
 			} catch (const std::exception &E) {
 				Logger_.error("GetRecords failed: " + std::string(E.what()));
-				tx.MarkFailed();
+				tx.MarkFailed("", E.what());
 			} catch (...) {
 				Logger_.error("GetRecords failed: unknown exception");
 				tx.MarkFailed();
@@ -1388,10 +1388,10 @@ namespace ORM {
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
-				tx.MarkFailed();
+				tx.MarkFailed(E);
 			} catch (const std::exception &E) {
 				Logger_.error("CreateRecord failed: " + std::string(E.what()));
-				tx.MarkFailed();
+				tx.MarkFailed("", E.what());
 			} catch (...) {
 				Logger_.error("CreateRecord failed: unknown exception");
 				tx.MarkFailed();
@@ -1427,10 +1427,10 @@ namespace ORM {
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
-				tx.MarkFailed();
+				tx.MarkFailed(E);
 			} catch (const std::exception &E) {
 				Logger_.error("UpdateRecord failed: " + std::string(E.what()));
-				tx.MarkFailed();
+				tx.MarkFailed("", E.what());
 			} catch (...) {
 				Logger_.error("UpdateRecord failed: unknown exception");
 				tx.MarkFailed();
@@ -1461,10 +1461,10 @@ namespace ORM {
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
-				tx.MarkFailed();
+				tx.MarkFailed(E);
 			} catch (const std::exception &E) {
 				Logger_.error("DeleteRecord failed: " + std::string(E.what()));
-				tx.MarkFailed();
+				tx.MarkFailed("", E.what());
 			} catch (...) {
 				Logger_.error("DeleteRecord failed: unknown exception");
 				tx.MarkFailed();
@@ -1495,10 +1495,10 @@ namespace ORM {
 				return true;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
-				tx.MarkFailed();
+				tx.MarkFailed(E);
 			} catch (const std::exception &E) {
 				Logger_.error("DeleteRecordsUnsafe failed: " + std::string(E.what()));
-				tx.MarkFailed();
+				tx.MarkFailed("", E.what());
 			} catch (...) {
 				Logger_.error("DeleteRecordsUnsafe failed: unknown exception");
 				tx.MarkFailed();
