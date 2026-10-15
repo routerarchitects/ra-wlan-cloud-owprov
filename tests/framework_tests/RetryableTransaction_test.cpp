@@ -309,16 +309,27 @@ int main() {
 		OpenWifi::RetryableTransactionOptions opts;
 		opts.maxAttempts = 3;
 
-		bool caught = false;
+		bool caughtStd = false;
 		try {
 			(void)OpenWifi::RunRetryableTransaction(logger, opts, beginTx, [](OpenWifi::DbTransaction &) -> bool {
 				throw std::runtime_error("app logic error");
 			});
 		} catch (const std::runtime_error &e) {
-			caught = (std::string(e.what()) == "app logic error");
+			caughtStd = (std::string(e.what()) == "app logic error");
 		}
 
-		TEST_ASSERT(caught, "Generic std::exception must escape RunRetryableTransaction");
+		TEST_ASSERT(caughtStd, "Generic std::exception must escape RunRetryableTransaction");
+
+		bool caughtPoco = false;
+		try {
+			(void)OpenWifi::RunRetryableTransaction(logger, opts, beginTx, [](OpenWifi::DbTransaction &) -> bool {
+				throw Poco::InvalidArgumentException("non-db poco application error");
+			});
+		} catch (const Poco::InvalidArgumentException &) {
+			caughtPoco = true;
+		}
+
+		TEST_ASSERT(caughtPoco, "Non-database Poco::Exception must escape RunRetryableTransaction");
 		std::cout << "PASSED" << std::endl;
 	}
 
@@ -352,6 +363,91 @@ int main() {
 		TEST_ASSERT(res.Succeeded(), "Must succeed after retrying commit serialization failure");
 		TEST_ASSERT(res.attempts == 2, "Must retry exactly once (total 2 attempts)");
 		TEST_ASSERT(res.status == OpenWifi::RetryableTransactionStatus::Committed, "Status must be Committed");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// 1h. DataException without SQLSTATE (NotConnectedException) returns OperationFailed without retry
+	{
+		std::cout << "  - DataException without SQLSTATE (NotConnectedException) returns OperationFailed..." << std::flush;
+		Poco::Data::Session dummySession("SQLite", ":memory:");
+		auto beginTx = [&]() -> OpenWifi::DbTransaction {
+			return OpenWifi::DbTransaction(dummySession, logger);
+		};
+
+		OpenWifi::RetryableTransactionOptions opts;
+		opts.maxAttempts = 3;
+		opts.initialBackoffMs = 1;
+		opts.maxBackoffMs = 5;
+
+		int attempts = 0;
+		auto res = OpenWifi::RunRetryableTransaction(logger, opts, beginTx, [&](OpenWifi::DbTransaction &) -> bool {
+			++attempts;
+			throw Poco::Data::NotConnectedException("Connection to database lost");
+		});
+
+		TEST_ASSERT(!res.Succeeded(), "Must not succeed on NotConnectedException");
+		TEST_ASSERT(res.status == OpenWifi::RetryableTransactionStatus::OperationFailed,
+		            "Must return OperationFailed for DataException lacking SQLSTATE");
+		TEST_ASSERT(res.attempts == 1, "Must not retry database exceptions lacking SQLSTATE (expected 1 attempt)");
+		TEST_ASSERT(res.lastFailureSqlState.empty(), "SQLSTATE must be empty");
+		TEST_ASSERT(res.lastFailureMessage.find("Connection to database lost") != std::string::npos,
+		            "Failure message must preserve exception displayText");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// 1i. Thrown DataException with retryable SQLSTATE is retried
+	{
+		std::cout << "  - Thrown DataException with retryable SQLSTATE is retried..." << std::flush;
+		Poco::Data::Session dummySession("SQLite", ":memory:");
+		auto beginTx = [&]() -> OpenWifi::DbTransaction {
+			return OpenWifi::DbTransaction(dummySession, logger);
+		};
+
+		OpenWifi::RetryableTransactionOptions opts;
+		opts.maxAttempts = 3;
+		opts.initialBackoffMs = 1;
+		opts.maxBackoffMs = 5;
+		opts.jitter = false;
+
+		int attempts = 0;
+		auto res = OpenWifi::RunRetryableTransaction(logger, opts, beginTx, [&](OpenWifi::DbTransaction &) -> bool {
+			++attempts;
+			if (attempts == 1) {
+				throw Poco::Data::DataException("statement error State: 40001 Detail: serialization failure");
+			}
+			return true;
+		});
+
+		TEST_ASSERT(res.Succeeded(), "Must succeed after retrying thrown DataException with 40001");
+		TEST_ASSERT(res.attempts == 2, "Must retry exactly once (total 2 attempts)");
+		TEST_ASSERT(res.status == OpenWifi::RetryableTransactionStatus::Committed, "Status must be Committed");
+		std::cout << "PASSED" << std::endl;
+	}
+
+	// 1j. Thrown DataException with unique violation (23505) is not retried
+	{
+		std::cout << "  - Thrown DataException with unique violation (23505) is not retried..." << std::flush;
+		Poco::Data::Session dummySession("SQLite", ":memory:");
+		auto beginTx = [&]() -> OpenWifi::DbTransaction {
+			return OpenWifi::DbTransaction(dummySession, logger);
+		};
+
+		OpenWifi::RetryableTransactionOptions opts;
+		opts.maxAttempts = 3;
+		opts.initialBackoffMs = 1;
+		opts.maxBackoffMs = 5;
+
+		int attempts = 0;
+		auto res = OpenWifi::RunRetryableTransaction(logger, opts, beginTx, [&](OpenWifi::DbTransaction &) -> bool {
+			++attempts;
+			throw Poco::Data::DataException("duplicate key State: 23505 Detail: Key (id)=(1) already exists.");
+		});
+
+		TEST_ASSERT(!res.Succeeded(), "Must not succeed on unique violation");
+		TEST_ASSERT(res.status == OpenWifi::RetryableTransactionStatus::UniqueViolation,
+		            "Must return UniqueViolation for 23505");
+		TEST_ASSERT(res.attempts == 1, "Must not retry unique violation (expected 1 attempt)");
+		TEST_ASSERT(res.lastFailureSqlState == "23505", "SQLSTATE must be 23505");
 		std::cout << "PASSED" << std::endl;
 	}
 

@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 
+#include "Poco/Data/DataException.h"
 #include "Poco/Exception.h"
 #include "Poco/Logger.h"
 #include "framework/DbTransaction.h"
@@ -103,12 +104,11 @@ namespace OpenWifi {
 				bool ok = false;
 				try {
 					ok = lambda(tx);
-				} catch (const Poco::Exception &e) {
+				} catch (const Poco::Data::DataException &e) {
 					tx.MarkFailed(e);
-					if (tx.FailureSqlState().empty()) {
-						(void)tx.Rollback();
-						throw;
-					}
+				} catch (const Poco::Exception &e) {
+					(void)tx.Rollback();
+					throw;
 				} catch (...) {
 					(void)tx.Rollback();
 					throw;
