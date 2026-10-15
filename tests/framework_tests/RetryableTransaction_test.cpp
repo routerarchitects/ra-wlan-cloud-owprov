@@ -735,9 +735,11 @@ int main() {
 			return OpenWifi::DbTransaction(std::move(s), logger);
 		};
 
-		std::promise<void> t1ReadDone, t2ReadDone, t1Committed;
+		std::promise<void> t1ReadDone, t2ReadDone, t1UpdateDone, t2UpdateDone, t1Committed;
 		std::shared_future<void> f1Read(t1ReadDone.get_future());
 		std::shared_future<void> f2Read(t2ReadDone.get_future());
+		std::shared_future<void> f1Update(t1UpdateDone.get_future());
+		std::shared_future<void> f2Update(t2UpdateDone.get_future());
 		std::shared_future<void> f1Commit(t1Committed.get_future());
 
 		std::atomic<int> workerAttempts{0};
@@ -759,13 +761,18 @@ int main() {
 			            "Timeout waiting for worker 2 read in Test I");
 
 			s << "UPDATE rtx_test_records SET value = '15' WHERE id = 'rtx-i-001'", Poco::Data::Keywords::now;
+			t1UpdateDone.set_value();
+
+			TEST_ASSERT(f2Update.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+			            "Timeout waiting for worker 2 update in Test I");
 
 			tx.commit();
 			t1Committed.set_value();
 		});
 
 		// Worker 2 uses RunRetryableTransaction in SERIALIZABLE mode:
-		// Attempt 1 cross-reads I1 and updates I2, which forms an SSI pivot cycle against worker 1.
+		// Attempt 1 cross-reads I1 and updates I2 while Worker 1 is still uncommitted.
+		// Both disjoint updates succeed without statement error. Worker 1 then commits first.
 		// Worker 2's lambda returns true; the 40001 failure occurs strictly inside tx.Commit().
 		// The retry wrapper catches the commit failure, extracts 40001, and retries cleanly.
 		auto result = OpenWifi::RunRetryableTransaction(
@@ -782,13 +789,18 @@ int main() {
 				        Poco::Data::Keywords::into(val), Poco::Data::Keywords::now;
 				    t2ReadDone.set_value();
 
+				    TEST_ASSERT(f1Update.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+				                "Timeout waiting for worker 1 update in Test I");
+
+				    // Both updates execute before either transaction commits:
+				    tx.Session() << "UPDATE rtx_test_records SET value = '25' WHERE id = 'rtx-i-002'",
+				        Poco::Data::Keywords::now;
+				    t2UpdateDone.set_value();
+
 				    TEST_ASSERT(f1Commit.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
 				                "Timeout waiting for worker 1 commit in Test I");
 
-				    tx.Session() << "UPDATE rtx_test_records SET value = '25' WHERE id = 'rtx-i-002'",
-				        Poco::Data::Keywords::now;
-
-				    // Lambda finishes and returns true: forces failure to happen inside tx.Commit()!
+				    // Lambda finishes and returns true: forces failure to happen strictly inside tx.Commit()!
 				    attempt1LambdaReturned = true;
 				    return true;
 			    }
