@@ -72,9 +72,10 @@ namespace OpenWifi {
 	// Caller Contract:
 	//   1. Perform only DB work on tx (no network, Kafka, or non-idempotent side effects).
 	//   2. Use tx.AfterCommit(...) for actions that must run exactly once after a successful commit.
-	//   3. Stop immediately after any required DB operation fails; do not call tx.Commit() after failure.
-	//   4. Do not hold locks or resources across invocations; each attempt gets a fresh DbTransaction.
-	//   5. Non-DB exceptions are rolled back and rethrown; only PostgreSQL/Data SQLSTATE failures are retried.
+	//   3. RunRetryableTransaction() exclusively owns Commit() and Rollback(). The transaction lambda MUST NOT call either method directly.
+	//   4. Stop immediately after any required DB operation fails; return false.
+	//   5. Do not hold locks or resources across invocations; each attempt gets a fresh DbTransaction.
+	//   6. Non-DB exceptions are rolled back and rethrown; only PostgreSQL/Data SQLSTATE failures are retried.
 	template <typename BeginTxFn, typename LambdaFn>
 	[[nodiscard]] inline RetryableTransactionResult RunRetryableTransaction(
 		Poco::Logger &logger,
