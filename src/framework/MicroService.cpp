@@ -550,17 +550,16 @@ namespace OpenWifi {
         Types::TopicNotifyFunction F = [this](const std::string &Key, const std::string &Payload) {
             this->BusMessageReceived(Key, Payload);
         };
-        KafkaManager()->RegisterTopicWatcher(KafkaTopics::SERVICE_EVENTS, F);
+        ServiceEventsWatcherId_ = KafkaManager()->RegisterTopicWatcher(
+            KafkaTopics::SERVICE_EVENTS, F, KafkaConsumerType::Broadcast);
     }
 
     void MicroService::StopEverything([[maybe_unused]] Poco::Util::Application &self) {
-        LoadConfigurationFile();
-        InitializeLoggingSystem();
-
-        Types::TopicNotifyFunction F = [this](const std::string &Key, const std::string &Payload) {
-            this->BusMessageReceived(Key, Payload);
-        };
-        KafkaManager()->RegisterTopicWatcher(KafkaTopics::SERVICE_EVENTS, F);
+        if (ServiceEventsWatcherId_ != 0) {
+            KafkaManager()->UnregisterTopicWatcher(
+                KafkaTopics::SERVICE_EVENTS, ServiceEventsWatcherId_, KafkaConsumerType::Broadcast);
+            ServiceEventsWatcherId_ = 0;
+        }
     }
 
     void MicroService::initialize([[maybe_unused]] Poco::Util::Application &self) {

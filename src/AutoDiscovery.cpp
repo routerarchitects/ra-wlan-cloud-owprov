@@ -17,7 +17,8 @@ namespace OpenWifi {
 		Types::TopicNotifyFunction F = [this](const std::string &Key, const std::string &Payload) {
 			this->ConnectionReceived(Key, Payload);
 		};
-		ConnectionWatcherId_ = KafkaManager()->RegisterTopicWatcher(KafkaTopics::CONNECTION, F);
+		ConnectionWatcherId_ = KafkaManager()->RegisterTopicWatcher(
+			KafkaTopics::CONNECTION, F, KafkaConsumerType::Group);
 		Worker_.start(*this);
 		return 0;
 	};
@@ -25,7 +26,8 @@ namespace OpenWifi {
 	void AutoDiscovery::Stop() {
 		poco_information(Logger(), "Stopping...");
 		Running_ = false;
-		KafkaManager()->UnregisterTopicWatcher(KafkaTopics::CONNECTION, ConnectionWatcherId_);
+		KafkaManager()->UnregisterTopicWatcher(
+			KafkaTopics::CONNECTION, ConnectionWatcherId_, KafkaConsumerType::Group);
 		Queue_.wakeUpAll();
 		Worker_.join();
 		poco_information(Logger(), "Stopped...");

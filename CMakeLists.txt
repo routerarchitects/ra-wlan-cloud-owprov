@@ -293,3 +293,15 @@ target_link_libraries(retryable_transaction_test PRIVATE
 
 add_test(NAME retryable_transaction_test COMMAND retryable_transaction_test)
 set_tests_properties(retryable_transaction_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(kafka_consumer_roles_test
+        tests/framework_tests/KafkaConsumerRoles_test.cpp
+        src/framework/KafkaManager.cpp
+)
+target_link_libraries(kafka_consumer_roles_test PRIVATE
+        ${Poco_LIBRARIES}
+        CppKafka::cppkafka
+        fmt::fmt)
+
+add_test(NAME kafka_consumer_roles_test COMMAND kafka_consumer_roles_test)
+

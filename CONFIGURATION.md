@@ -172,9 +172,17 @@ openwifi.kafka.queue.buffering.max.ms = 50
 ```
 
 ### openwifi.kafka.group.id
-The group ID is a single word that should identify the type of service tuning. In the case `provisioning`
+The base group ID identifying the service role (e.g. `prov` or `provisioning`).
+In multi-instance deployments:
+- **GroupConsumer** (work queue topics such as `connection`) uses this shared `group.id` so messages are distributed across replicas.
+- **BroadcastConsumer** (broadcast topics such as `service_events`) uses an incarnation-unique group ID derived from this base: `<openwifi.kafka.group.id>-<runtime-instance-id>-broadcast` (with `auto.offset.reset = latest`). This ensures each replica receives all broadcast events without partition division during rolling restarts.
+
 ### openwifi.kafka.client.id
-The client ID is a single service within that group ID. Each participant must have a unique client ID.
+The base client identifier. Each running instance automatically derives unique Kafka client IDs incorporating the runtime instance identity:
+- **GroupConsumer**: `<openwifi.kafka.client.id>-<runtime-instance-id>-work-consumer`
+- **BroadcastConsumer**: `<openwifi.kafka.client.id>-<runtime-instance-id>-broadcast-consumer`
+- **Producer**: `<openwifi.kafka.client.id>-<runtime-instance-id>-producer`
+
 ### openwifi.kafka.enable
 Kafka should always be enabled.
 ### openwifi.kafka.brokerlist
