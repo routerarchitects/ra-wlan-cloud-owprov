@@ -569,7 +569,7 @@ namespace OpenWifi {
 	}
 
 	void MicroService::uninitialize() {
-		// add your own uninitialization code here
+		StopEverything(*this);
 		ServerApplication::uninitialize();
 	}
 

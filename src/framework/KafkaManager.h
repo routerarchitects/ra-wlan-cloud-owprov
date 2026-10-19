@@ -90,7 +90,6 @@ namespace OpenWifi {
 		mutable std::atomic_bool Running_ = false;
 		uint64_t 				FunctionId_ = 1;
 		std::unique_ptr<cppkafka::Consumer> 			Consumer_;
-		std::unique_ptr<cppkafka::ConsumerDispatcher> 	Dispatcher_;
 		std::set<std::string>	Topics_;
 
 		void run() override;

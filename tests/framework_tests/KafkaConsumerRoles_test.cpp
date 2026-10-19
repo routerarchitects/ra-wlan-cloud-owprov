@@ -339,6 +339,33 @@ static void test_service_events_watcher_lifecycle_unregistration() {
 	std::cout << "  PASS: test_service_events_watcher_lifecycle_unregistration" << std::endl;
 }
 
+// Test 13: Producer startup, message enqueueing, and shutdown without deadlock
+static void test_producer_startup_shutdown_race() {
+	KafkaProducer Producer;
+	Producer.Start();
+	Producer.Produce("test_topic", "key1", "payload1");
+	Producer.Stop();
+	Producer.Stop(); // idempotent
+	std::cout << "  PASS: test_producer_startup_shutdown_race" << std::endl;
+}
+
+// Test 14: Consumer shutdown with registered topics
+static void test_consumer_shutdown_with_registered_topics() {
+	Types::TopicNotifyFunction cb = [](const std::string &, const std::string &) {};
+	uint64_t reg_id = KafkaManager()->RegisterTopicWatcher(
+		KafkaTopics::SERVICE_EVENTS, cb, KafkaConsumerType::Broadcast);
+
+	auto &Consumer = KafkaManager()->BroadcastConsumer();
+	Consumer.Start();
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	Consumer.Stop();
+	TEST_ASSERT(!Consumer.IsRunning(), "Consumer must not be running after Stop()");
+
+	KafkaManager()->UnregisterTopicWatcher(
+		KafkaTopics::SERVICE_EVENTS, reg_id, KafkaConsumerType::Broadcast);
+	std::cout << "  PASS: test_consumer_shutdown_with_registered_topics" << std::endl;
+}
+
 int main() {
 	std::cout << "Running Kafka Consumer Roles & Dual-Consumer Architecture Tests..." << std::endl;
 
@@ -354,6 +381,8 @@ int main() {
 	test_empty_base_strings();
 	test_consumer_startup_shutdown_race();
 	test_service_events_watcher_lifecycle_unregistration();
+	test_producer_startup_shutdown_race();
+	test_consumer_shutdown_with_registered_topics();
 
 	std::cout << "ALL KAFKA CONSUMER ROLES TESTS PASSED!" << std::endl;
 	return 0;

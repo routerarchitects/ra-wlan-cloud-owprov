@@ -167,8 +167,11 @@ namespace OpenWifi {
 
 		try {
 			cppkafka::Producer Producer(Config);
-			Poco::AutoPtr<Poco::Notification> Note(Queue_.waitDequeueNotification());
-			while (Note && Running_) {
+			while (Running_) {
+				Poco::AutoPtr<Poco::Notification> Note(Queue_.waitDequeueNotification(100));
+				if (!Note) {
+					continue;
+				}
 				try {
 					if (auto Msg = dynamic_cast<KafkaMessage *>(Note.get())) {
 						auto NewMsg = cppkafka::MessageBuilder(Msg->Topic());
@@ -192,7 +195,6 @@ namespace OpenWifi {
 				} catch (...) {
 					poco_error(Logger_, "Exception in producer loop");
 				}
-				Note = Queue_.waitDequeueNotification();
 			}
 			Producer.flush();
 		} catch (const std::exception &E) {
@@ -217,7 +219,6 @@ namespace OpenWifi {
 			if (!Running_ && !Worker_.isRunning()) return;
 			Running_ = false;
 			TopicCV_.notify_all();
-			if (Dispatcher_) Dispatcher_->stop();
 		}
 		if (Worker_.isRunning()) Worker_.join();
 	}
@@ -236,7 +237,6 @@ namespace OpenWifi {
 			KafkaConsumer &Self;
 			~Cleanup() {
 				std::lock_guard Lock(Self.ConsumerMutex_);
-				Self.Dispatcher_.reset();
 				Self.Consumer_.reset();
 				Self.Running_ = false;
 				Self.TopicCV_.notify_all();
@@ -279,18 +279,27 @@ namespace OpenWifi {
 				}
 			});
 
-			auto LocalDispatcher = std::make_unique<cppkafka::ConsumerDispatcher>(*LocalConsumer);
-
 			{
 				std::lock_guard Lock(ConsumerMutex_);
 				if (!Running_) return;
 				Consumer_ = std::move(LocalConsumer);
-				Dispatcher_ = std::move(LocalDispatcher);
 				Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
 			}
 
-			Dispatcher_->run(
-				[&](cppkafka::Message msg) {
+			while (Running_) {
+				cppkafka::Message msg = Consumer_->poll(std::chrono::milliseconds(100));
+				if (!msg) {
+					continue;
+				}
+				if (msg.get_error()) {
+					if (msg.is_eof()) {
+						poco_debug(Logger_, fmt::format("Partition {} EOF", msg.get_partition()));
+					} else {
+						poco_warning(Logger_, fmt::format("Error: {}", msg.get_error().to_string()));
+					}
+					continue;
+				}
+				{
 					std::lock_guard G(ConsumerMutex_);
 					auto It = Notifiers_.find(msg.get_topic());
 					if (It != Notifiers_.end()) {
@@ -300,13 +309,9 @@ namespace OpenWifi {
 							catch (...) { poco_error(Logger_, "Unknown callback exception"); }
 						}
 					}
-					if (Consumer_) Consumer_->commit(msg);
-				},
-				[&Logger_](cppkafka::Error error) { poco_warning(Logger_, fmt::format("Error: {}", error.to_string())); },
-				[&Logger_](cppkafka::ConsumerDispatcher::EndOfFile, const cppkafka::TopicPartition &p) {
-					poco_debug(Logger_, fmt::format("Partition {} EOF", p.get_partition()));
 				}
-			);
+				if (Consumer_) Consumer_->commit(msg);
+			}
 
 			std::lock_guard Lock(ConsumerMutex_);
 			if (Consumer_) { try { Consumer_->unsubscribe(); } catch (...) {} }
@@ -324,7 +329,29 @@ namespace OpenWifi {
 		auto [_, inserted] = Topics_.insert(Topic);
 		TopicCV_.notify_all();
 		if (inserted && Consumer_ && Running_) {
-			try { Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end())); } catch (...) {}
+			try {
+				Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
+			} catch (const std::exception &E) {
+				Topics_.erase(Topic);
+				Notifiers_[Topic].pop_back();
+				if (Notifiers_[Topic].empty()) {
+					Notifiers_.erase(Topic);
+				}
+				std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+				poco_error(KafkaManager()->Logger(),
+					fmt::format("Failed to subscribe to topic '{}' on {}: {}", Topic, Role, E.what()));
+				throw;
+			} catch (...) {
+				Topics_.erase(Topic);
+				Notifiers_[Topic].pop_back();
+				if (Notifiers_[Topic].empty()) {
+					Notifiers_.erase(Topic);
+				}
+				std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+				poco_error(KafkaManager()->Logger(),
+					fmt::format("Failed to subscribe to topic '{}' on {}: unknown exception", Topic, Role));
+				throw;
+			}
 		}
 		return FunctionId_++;
 	}
@@ -336,18 +363,33 @@ namespace OpenWifi {
 			auto &L = It->second;
 			for (auto it = L.begin(); it != L.end(); ++it) {
 				if (it->second == static_cast<int>(Id)) {
+					auto RemovedWatcher = *it;
 					L.erase(it);
+					if (L.empty()) {
+						Notifiers_.erase(It);
+						Topics_.erase(Topic);
+						if (Consumer_ && Running_) {
+							try {
+								if (Topics_.empty()) Consumer_->unsubscribe();
+								else Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
+							} catch (const std::exception &E) {
+								Topics_.insert(Topic);
+								Notifiers_[Topic].push_back(RemovedWatcher);
+								std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+								poco_error(KafkaManager()->Logger(),
+									fmt::format("Failed to update subscription after unregistering topic '{}' on {}: {}", Topic, Role, E.what()));
+								throw;
+							} catch (...) {
+								Topics_.insert(Topic);
+								Notifiers_[Topic].push_back(RemovedWatcher);
+								std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+								poco_error(KafkaManager()->Logger(),
+									fmt::format("Failed to update subscription after unregistering topic '{}' on {}: unknown exception", Topic, Role));
+								throw;
+							}
+						}
+					}
 					break;
-				}
-			}
-			if (L.empty()) {
-				Notifiers_.erase(It);
-				Topics_.erase(Topic);
-				if (Consumer_ && Running_) {
-					try {
-						if (Topics_.empty()) Consumer_->unsubscribe();
-						else Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
-					} catch (...) {}
 				}
 			}
 		}
