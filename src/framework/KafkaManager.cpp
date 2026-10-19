@@ -176,10 +176,15 @@ namespace OpenWifi {
 						NewMsg.partition(0);
 						NewMsg.payload(Msg->Payload());
 						Producer.produce(NewMsg);
-						if (Queue_.size() < 100) Producer.flush();
-						else Producer.poll(std::chrono::milliseconds(0));
+						if (Queue_.size() < 100) {
+							Producer.flush();
+						} else {
+							Producer.poll(std::chrono::milliseconds(0));
+						}
 					}
-					if (Queue_.size() == 0) Producer.flush(std::chrono::milliseconds(1000));
+					if (Queue_.size() == 0) {
+						Producer.flush();
+					}
 				} catch (const cppkafka::HandleException &E) {
 					poco_warning(Logger_, fmt::format("Kafka exception (producer): {}", E.what()));
 				} catch (const Poco::Exception &E) {
@@ -189,7 +194,7 @@ namespace OpenWifi {
 				}
 				Note = Queue_.waitDequeueNotification();
 			}
-			Producer.flush(std::chrono::milliseconds(1000));
+			Producer.flush();
 		} catch (const std::exception &E) {
 			poco_warning(Logger_, fmt::format("Kafka producer error: {}", E.what()));
 		} catch (...) {
@@ -295,8 +300,7 @@ namespace OpenWifi {
 							catch (...) { poco_error(Logger_, "Unknown callback exception"); }
 						}
 					}
-					try { if (Consumer_) Consumer_->commit(msg); }
-					catch (const cppkafka::HandleException &E) { poco_warning(Logger_, fmt::format("Commit failed: {}", E.what())); }
+					if (Consumer_) Consumer_->commit(msg);
 				},
 				[&Logger_](cppkafka::Error error) { poco_warning(Logger_, fmt::format("Error: {}", error.to_string())); },
 				[&Logger_](cppkafka::ConsumerDispatcher::EndOfFile, const cppkafka::TopicPartition &p) {
