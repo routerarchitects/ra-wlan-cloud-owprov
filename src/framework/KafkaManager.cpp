@@ -78,6 +78,14 @@ namespace OpenWifi {
 		return Topics_;
 	}
 
+	std::vector<std::string> KafkaConsumer::Subscriptions() const {
+		std::lock_guard G(ConsumerMutex_);
+		if (Consumer_) {
+			return Consumer_->get_subscription();
+		}
+		return {};
+	}
+
 	std::string KafkaConsumer::GenerateGroupId(KafkaConsumerType Type,
 	                                           const std::string &BaseGroupId,
 	                                           const std::string &RuntimeInstanceId) {
@@ -143,7 +151,7 @@ namespace OpenWifi {
 	}
 
 	inline void KafkaProducer::run() {
-		Poco::Logger &Logger_ = Poco::Logger::create("KAFKA-PRODUCER", KafkaManager()->Logger().getChannel());
+		Poco::Logger &Logger_ = Poco::Logger::has("KAFKA-PRODUCER") ? Poco::Logger::get("KAFKA-PRODUCER") : Poco::Logger::create("KAFKA-PRODUCER", KafkaManager()->Logger().getChannel());
 		poco_information(Logger_, fmt::format("Starting producer with client.id '{}'...", GetClientId()));
 		Utils::SetThreadName("Kafka:Prod");
 
@@ -226,9 +234,8 @@ namespace OpenWifi {
 	inline void KafkaConsumer::run() {
 		std::string RoleName = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
 		Utils::SetThreadName((ConsumerType_ == KafkaConsumerType::Broadcast) ? "Kafka:Bcast" : "Kafka:GrpCons");
-		Poco::Logger &Logger_ = Poco::Logger::create(
-			(ConsumerType_ == KafkaConsumerType::Broadcast) ? "KAFKA-BROADCAST-CONSUMER" : "KAFKA-GROUP-CONSUMER",
-			KafkaManager()->Logger().getChannel());
+		std::string LoggerName = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "KAFKA-BROADCAST-CONSUMER" : "KAFKA-GROUP-CONSUMER";
+		Poco::Logger &Logger_ = Poco::Logger::has(LoggerName) ? Poco::Logger::get(LoggerName) : Poco::Logger::create(LoggerName, KafkaManager()->Logger().getChannel());
 
 		poco_information(Logger_, fmt::format("Starting {} (group.id='{}', client.id='{}', auto.offset.reset='{}')...",
 			RoleName, GetGroupId(), GetClientId(), GetAutoOffsetReset()));
@@ -250,23 +257,27 @@ namespace OpenWifi {
 					return !Running_ || !Topics_.empty();
 				});
 			}
-			if (!Running_ || Topics_.empty()) return;
+			if (!Running_ || Topics_.empty()) {
+				poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
+				return;
+			}
 		}
 
-		cppkafka::Configuration Config({
-			{"client.id", GetClientId()},
-			{"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
-			{"group.id", GetGroupId()},
-			{"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
-			{"auto.offset.reset", GetAutoOffsetReset()},
-			{"enable.partition.eof", false}
-		});
-		AddKafkaSecurity(Config);
-		Config.set_log_callback(KafkaLoggerFun);
-		Config.set_error_callback(KafkaErrorFun);
-		Config.set_default_topic_configuration({{"auto.offset.reset", GetAutoOffsetReset()}});
-
+		bool CleanShutdown = false;
 		try {
+			cppkafka::Configuration Config({
+				{"client.id", GetClientId()},
+				{"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
+				{"group.id", GetGroupId()},
+				{"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
+				{"auto.offset.reset", GetAutoOffsetReset()},
+				{"enable.partition.eof", false}
+			});
+			AddKafkaSecurity(Config);
+			Config.set_log_callback(KafkaLoggerFun);
+			Config.set_error_callback(KafkaErrorFun);
+			Config.set_default_topic_configuration({{"auto.offset.reset", GetAutoOffsetReset()}});
+
 			auto LocalConsumer = std::make_unique<cppkafka::Consumer>(Config);
 			LocalConsumer->set_assignment_callback([&](cppkafka::TopicPartitionList &parts) {
 				if (!parts.empty()) {
@@ -315,12 +326,24 @@ namespace OpenWifi {
 
 			std::lock_guard Lock(ConsumerMutex_);
 			if (Consumer_) { try { Consumer_->unsubscribe(); } catch (...) {} }
+			CleanShutdown = true;
 		} catch (const std::exception &E) {
-			poco_warning(Logger_, fmt::format("Consumer error: {}", E.what()));
+			if (!Running_) {
+				CleanShutdown = true;
+			} else {
+				poco_error(Logger_, fmt::format("Unexpected terminal failure in {} (group.id='{}'): {}", RoleName, GetGroupId(), E.what()));
+			}
 		} catch (...) {
-			poco_error(Logger_, "Unknown consumer exception");
+			if (!Running_) {
+				CleanShutdown = true;
+			} else {
+				poco_error(Logger_, fmt::format("Unexpected terminal failure in {} (group.id='{}'): unknown exception", RoleName, GetGroupId()));
+			}
 		}
-		poco_information(Logger_, "Stopped...");
+
+		if (CleanShutdown) {
+			poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
+		}
 	}
 
 	std::uint64_t KafkaConsumer::RegisterTopicWatcher(const std::string &Topic, Types::TopicNotifyFunction &F) {

@@ -80,6 +80,7 @@ namespace OpenWifi {
 
 		[[nodiscard]] bool IsRunning() const { return Running_; }
 		[[nodiscard]] std::set<std::string> Topics() const;
+		[[nodiscard]] std::vector<std::string> Subscriptions() const;
 
 	  private:
 		KafkaConsumerType 		ConsumerType_ = KafkaConsumerType::Group;

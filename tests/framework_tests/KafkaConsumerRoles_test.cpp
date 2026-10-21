@@ -3,11 +3,16 @@
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
 //
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "Poco/ConsoleChannel.h"
+#include "Poco/UUIDGenerator.h"
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
 
@@ -31,6 +36,10 @@ namespace OpenWifi {
 	std::string MicroServiceConfigGetString(const std::string &Key, const std::string &DefaultValue) {
 		if (Key == "openwifi.kafka.group.id") return g_MockGroupId;
 		if (Key == "openwifi.kafka.client.id") return g_MockClientId;
+		if (Key == "openwifi.kafka.brokerlist") {
+			const char *env = std::getenv("KAFKA_BROKERLIST");
+			return env ? std::string(env) : DefaultValue;
+		}
 		return DefaultValue;
 	}
 
@@ -366,7 +375,165 @@ static void test_consumer_shutdown_with_registered_topics() {
 	std::cout << "  PASS: test_consumer_shutdown_with_registered_topics" << std::endl;
 }
 
+// Helper for Test 15: Run the 8-step concurrent dynamic subscription scenario for a consumer role
+static void run_dynamic_subscription_test_for_role(KafkaConsumerType type,
+                                                   const std::string &topic1,
+                                                   const std::string &topic2) {
+	std::string role = (type == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+	std::string prefix = (type == KafkaConsumerType::Broadcast) ? "bcast_" : "grp_";
+	std::string token = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+
+	g_MockGroupId = "test_" + prefix + token;
+	g_MockInstanceId = "owprov-test-" + token;
+
+	KafkaProducer producer;
+	producer.Start();
+
+	auto &consumer = (type == KafkaConsumerType::Broadcast) ? KafkaManager()->BroadcastConsumer()
+	                                                        : KafkaManager()->GroupConsumer();
+
+	struct WatcherSink {
+		std::mutex mtx;
+		std::set<std::string> received;
+		Types::TopicNotifyFunction callback() {
+			return [this](const std::string &, const std::string &msg) {
+				std::lock_guard g(mtx);
+				received.insert(msg);
+			};
+		}
+		bool has(const std::string &target) {
+			std::lock_guard g(mtx);
+			return received.find(target) != received.end();
+		}
+	};
+
+	WatcherSink w1a, w1b, w2;
+
+	auto produce_until_received = [](KafkaProducer &prod, const std::string &topic,
+	                                 const std::string &key, const std::string &payload,
+	                                 WatcherSink &sink,
+	                                 std::chrono::seconds timeout = std::chrono::seconds(15)) -> bool {
+		auto start = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() - start < timeout) {
+			if (sink.has(payload)) return true;
+			prod.Produce(topic.c_str(), key, payload);
+			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+		}
+		return sink.has(payload);
+	};
+
+	auto vec_contains = [](const std::vector<std::string> &v, const std::string &item) -> bool {
+		return std::find(v.begin(), v.end(), item) != v.end();
+	};
+
+	// 1. Initial registration
+	auto cb1a = w1a.callback();
+	uint64_t id1a = KafkaManager()->RegisterTopicWatcher(topic1, cb1a, type);
+	TEST_ASSERT(id1a > 0, "Registration for topic1 must succeed on " + role);
+
+	// 2. Start consumer polling in background worker thread
+	consumer.Start();
+	TEST_ASSERT(consumer.IsRunning(), role + " must be running");
+
+	// 3. Produce payload1 to topic1 and verify watcher 1a receives exact payload1
+	std::string payload1 = prefix + "payload1_" + token;
+	bool ok = produce_until_received(producer, topic1, "k1", payload1, w1a);
+	TEST_ASSERT(ok && w1a.has(payload1), role + " watcher 1a must receive exact payload1");
+
+	// 4. Concurrently add multiple watchers for the same topic (topic1) while polling
+	auto cb1b = w1b.callback();
+	uint64_t id1b = KafkaManager()->RegisterTopicWatcher(topic1, cb1b, type);
+	TEST_ASSERT(id1b > 0, "Registration of second watcher for topic1 must succeed on " + role);
+
+	std::string payload2 = prefix + "payload2_" + token;
+	ok = produce_until_received(producer, topic1, "k2", payload2, w1b);
+	TEST_ASSERT(ok && w1b.has(payload2), role + " watcher 1b must receive exact payload2");
+	TEST_ASSERT(w1a.has(payload2), role + " watcher 1a must also receive exact payload2");
+
+	// 5. Concurrently add a new topic (topic2) while polling
+	auto cb2 = w2.callback();
+	uint64_t id2 = KafkaManager()->RegisterTopicWatcher(topic2, cb2, type);
+	TEST_ASSERT(id2 > 0, "Registration for topic2 must succeed on " + role);
+
+	std::string payload3 = prefix + "payload3_" + token;
+	ok = produce_until_received(producer, topic2, "k3", payload3, w2);
+	TEST_ASSERT(ok && w2.has(payload3), role + " watcher 2 must receive exact payload3 on dynamically added topic2");
+
+	// 6. Concurrently remove watcher 1a (intermediate watcher removal, topic1 still active)
+	KafkaManager()->UnregisterTopicWatcher(topic1, id1a, type);
+	auto topics = consumer.Topics();
+	TEST_ASSERT(topics.find(topic1) != topics.end(), "topic1 must remain subscribed on " + role + " while watcher 1b is active");
+
+	std::string payload4 = prefix + "payload4_" + token;
+	ok = produce_until_received(producer, topic1, "k4", payload4, w1b);
+	TEST_ASSERT(ok && w1b.has(payload4), "Remaining watcher 1b on " + role + " must receive exact payload4");
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	TEST_ASSERT(!w1a.has(payload4), "Unregistered watcher 1a on " + role + " must NOT receive payload4");
+
+	// 7. Concurrently remove final watcher for topic1 (topic1 removed from subscription)
+	KafkaManager()->UnregisterTopicWatcher(topic1, id1b, type);
+	topics = consumer.Topics();
+	TEST_ASSERT(topics.find(topic1) == topics.end(), "topic1 must be removed from " + role + " Topics_");
+	TEST_ASSERT(topics.find(topic2) != topics.end(), "topic2 must still be in " + role + " Topics_");
+	TEST_ASSERT(consumer.IsRunning(), role + " must still be running after unregistering topic1");
+
+	// Observable Kafka unsubscribe check via Subscriptions() (calls rd_kafka_subscription)
+	auto subs = consumer.Subscriptions();
+	TEST_ASSERT(!vec_contains(subs, topic1), "topic1 must be unsubscribed from underlying " + role);
+	TEST_ASSERT(vec_contains(subs, topic2), "topic2 must remain subscribed in underlying " + role);
+
+	// Publish unique message to topic1 after unregistering its final watcher
+	std::string payload_post_unsub1 = prefix + "post_unsub1_" + token;
+	producer.Produce(topic1.c_str(), "k_unsub1", payload_post_unsub1);
+
+	// Produce payload5 to topic2 and verify watcher 2 receives it
+	std::string payload5 = prefix + "payload5_" + token;
+	ok = produce_until_received(producer, topic2, "k5", payload5, w2);
+	TEST_ASSERT(ok && w2.has(payload5), role + " watcher 2 must receive exact payload5 after topic1 was removed");
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	TEST_ASSERT(!w1b.has(payload_post_unsub1),
+		"Removed watcher 1b on " + role + " must NOT receive message produced to topic1 after unsubscription");
+	TEST_ASSERT(!w1a.has(payload_post_unsub1),
+		"Removed watcher 1a on " + role + " must NOT receive message produced to topic1 after unsubscription");
+
+	// 8. Concurrently remove final watcher for topic2 (unsubscribes all)
+	KafkaManager()->UnregisterTopicWatcher(topic2, id2, type);
+	topics = consumer.Topics();
+	TEST_ASSERT(topics.empty(), "Topics must be empty on " + role + " after all watchers unregistered");
+	TEST_ASSERT(consumer.IsRunning(), role + " must still be running after final watcher unregistration");
+	subs = consumer.Subscriptions();
+	TEST_ASSERT(subs.empty(), "Underlying " + role + " subscription must be empty after all watchers unregistered");
+
+	consumer.Stop();
+	producer.Stop();
+	TEST_ASSERT(!consumer.IsRunning(), role + " must not be running after Stop()");
+}
+
+// Test 15: Broker-backed test covering dynamic registration/unregistration while polling
+static void test_concurrent_dynamic_subscription_updates_while_polling() {
+	const char *broker = std::getenv("KAFKA_BROKERLIST");
+	if (!broker || std::string(broker).empty()) {
+		std::cout << "  SKIPPED: test_concurrent_dynamic_subscription_updates_while_polling (KAFKA_BROKERLIST not set)" << std::endl;
+		return;
+	}
+
+	std::cout << "  Running broker-backed dynamic subscription test against: " << broker << std::endl;
+
+	// Part A: GroupConsumer concurrent dynamic subscriptions while polling
+	run_dynamic_subscription_test_for_role(KafkaConsumerType::Group, "test_dyn_topic_a", "test_dyn_topic_b");
+
+	// Part B: BroadcastConsumer concurrent dynamic subscriptions while polling
+	run_dynamic_subscription_test_for_role(KafkaConsumerType::Broadcast, "test_bcast_topic_a", "test_bcast_topic_b");
+
+	std::cout << "  PASS: test_concurrent_dynamic_subscription_updates_while_polling" << std::endl;
+}
+
 int main() {
+	Poco::AutoPtr<Poco::ConsoleChannel> pChannel(new Poco::ConsoleChannel);
+	Poco::Logger::root().setChannel(pChannel);
+	Poco::Logger::root().setLevel(Poco::Message::PRIO_INFORMATION);
+
 	std::cout << "Running Kafka Consumer Roles & Dual-Consumer Architecture Tests..." << std::endl;
 
 	test_consumer_types();
@@ -383,6 +550,7 @@ int main() {
 	test_service_events_watcher_lifecycle_unregistration();
 	test_producer_startup_shutdown_race();
 	test_consumer_shutdown_with_registered_topics();
+	test_concurrent_dynamic_subscription_updates_while_polling();
 
 	std::cout << "ALL KAFKA CONSUMER ROLES TESTS PASSED!" << std::endl;
 	return 0;
