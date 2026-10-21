@@ -19,12 +19,12 @@ type ConfigurationListResponse struct {
 }
 
 type VariableListResponse struct {
-	Variables []struct {
+	VariableBlocks []struct {
 		ID     string `json:"id"`
 		Name   string `json:"name"`
 		Entity string `json:"entity"`
 		Venue  string `json:"venue"`
-	} `json:"variables"`
+	} `json:"variableBlocks"`
 	Count int `json:"count"`
 }
 
@@ -201,57 +201,63 @@ func TestConfigurationsList_NoPermissions(t *testing.T) {
  *
  * DESCRIPTION:
  *   Validates that when a scoped user requests ?entity=<Entity B> or ?venue=<Venue B>,
- *   the API rejects cross-tenant parameter tampering by returning an empty list.
+ *   the API rejects cross-tenant parameter tampering by returning 403 Forbidden.
  *
  * SCENARIO:
  *   Admin of Entity A requests GET /api/v1/configurations?entity=EntityB.
  *
  * EXPECTED OUTPUT:
- *   HTTP 200 OK with {"configurations": []}.
+ *   HTTP 403 Forbidden.
  */
 func TestConfigurationsList_CrossTenantQueryParam_Negative(t *testing.T) {
 	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
 	tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "Bearer user-admin-operator-a-token")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
 	entityB := getEnvOrDefault("OPERATOR_B_ENTITY_UUID", "8ab2b291-d04d-5c4c-b4bd-c4gcca1gb108")
+	venueA := getEnvOrDefault("VENUE_A_UUID", "venue-a-uuid")
 	venueB := getEnvOrDefault("VENUE_B_UUID", "venue-b-uuid")
 
-	t.Run("Negative: Tampered entity query param returns empty", func(t *testing.T) {
+	t.Run("Negative: Tampered entity query param returns 403 Forbidden", func(t *testing.T) {
 		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?entity=%s", entityB), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
 
-		if status != http.StatusOK {
-			t.Errorf("Expected 200 OK, got %d. Body: %s", status, string(body))
-		}
-
-		var resp ConfigurationListResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if len(resp.Configurations) != 0 {
-			t.Errorf("Security defect! Expected 0 configurations for unauthorized entity query param, got %d", len(resp.Configurations))
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden, got %d. Body: %s", status, string(body))
 		}
 	})
 
-	t.Run("Negative: Tampered venue query param returns empty", func(t *testing.T) {
+	t.Run("Negative: Tampered venue query param returns 403 Forbidden", func(t *testing.T) {
 		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?venue=%s", venueB), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
 
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Valid entity with unauthorized venue query param returns 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?entity=%s&venue=%s", entityA, venueB), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for unauthorized venue in combined query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Positive: Combined query with authorized entity and authorized venue returns 200 OK", func(t *testing.T) {
+		status, _, err := client.DoRequest("GET", fmt.Sprintf("/configurations?entity=%s&venue=%s", entityA, venueA), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+
 		if status != http.StatusOK {
-			t.Errorf("Expected 200 OK, got %d. Body: %s", status, string(body))
-		}
-
-		var resp ConfigurationListResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if len(resp.Configurations) != 0 {
-			t.Errorf("Security defect! Expected 0 configurations for unauthorized venue query param, got %d", len(resp.Configurations))
+			t.Errorf("Expected 200 OK for authorized combined query, got %d", status)
 		}
 	})
 }
@@ -443,7 +449,7 @@ func TestVariablesList_EntityScopedAdmin(t *testing.T) {
 	}
 
 	// Negative Check: Verify no Operator B variables leak
-	for _, variable := range resp.Variables {
+	for _, variable := range resp.VariableBlocks {
 		if variable.Entity == entityB {
 			t.Errorf("Cross-tenant leakage! Found variable %s belonging to Entity B (%s)", variable.ID, entityB)
 		}
@@ -480,7 +486,7 @@ func TestVariablesList_VenueScopedRole_ExcludesParentEntity(t *testing.T) {
 		t.Fatalf("Failed to parse response: %v", err)
 	}
 
-	for _, variable := range resp.Variables {
+	for _, variable := range resp.VariableBlocks {
 		if variable.Entity == entityA && variable.Venue == "" {
 			t.Errorf("Scope violation! Venue user received parent entity variable %s", variable.ID)
 		}
@@ -518,8 +524,8 @@ func TestVariablesList_NoPermissions(t *testing.T) {
 		t.Fatalf("Failed to parse response: %v", err)
 	}
 
-	if len(resp.Variables) != 0 {
-		t.Errorf("Expected 0 variables for user without permission, got %d", len(resp.Variables))
+	if len(resp.VariableBlocks) != 0 {
+		t.Errorf("Expected 0 variables for user without permission, got %d", len(resp.VariableBlocks))
 	}
 }
 
@@ -533,46 +539,52 @@ func TestVariablesList_NoPermissions(t *testing.T) {
 func TestVariablesList_CrossTenantQueryParam_Negative(t *testing.T) {
 	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
 	tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "Bearer user-admin-operator-a-token")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
 	entityB := getEnvOrDefault("OPERATOR_B_ENTITY_UUID", "8ab2b291-d04d-5c4c-b4bd-c4gcca1gb108")
+	venueA := getEnvOrDefault("VENUE_A_UUID", "venue-a-uuid")
 	venueB := getEnvOrDefault("VENUE_B_UUID", "venue-b-uuid")
 
-	t.Run("Negative: Tampered entity query param returns empty", func(t *testing.T) {
+	t.Run("Negative: Tampered entity query param returns 403 Forbidden", func(t *testing.T) {
 		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?entity=%s", entityB), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
 
-		if status != http.StatusOK {
-			t.Errorf("Expected 200 OK, got %d. Body: %s", status, string(body))
-		}
-
-		var resp VariableListResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if len(resp.Variables) != 0 {
-			t.Errorf("Security defect! Expected 0 variables for unauthorized entity query param, got %d", len(resp.Variables))
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden, got %d. Body: %s", status, string(body))
 		}
 	})
 
-	t.Run("Negative: Tampered venue query param returns empty", func(t *testing.T) {
+	t.Run("Negative: Tampered venue query param returns 403 Forbidden", func(t *testing.T) {
 		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?venue=%s", venueB), tokenAdminA, nil)
 		if err != nil {
 			t.Fatalf("Request failed: %v", err)
 		}
 
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Valid entity with unauthorized venue query param returns 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?entity=%s&venue=%s", entityA, venueB), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for unauthorized venue in combined query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Positive: Combined query with authorized entity and authorized venue returns 200 OK", func(t *testing.T) {
+		status, _, err := client.DoRequest("GET", fmt.Sprintf("/variables?entity=%s&venue=%s", entityA, venueA), tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+
 		if status != http.StatusOK {
-			t.Errorf("Expected 200 OK, got %d. Body: %s", status, string(body))
-		}
-
-		var resp VariableListResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			t.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if len(resp.Variables) != 0 {
-			t.Errorf("Security defect! Expected 0 variables for unauthorized venue query param, got %d", len(resp.Variables))
+			t.Errorf("Expected 200 OK for authorized combined query, got %d", status)
 		}
 	})
 }
@@ -671,7 +683,7 @@ func TestVariablesList_SelectScoped(t *testing.T) {
 			t.Fatalf("Failed to parse response: %v", err)
 		}
 
-		for _, v := range resp.Variables {
+		for _, v := range resp.VariableBlocks {
 			if v.Entity != entityA {
 				t.Errorf("Security defect! Returned variable block %s with entity %s does not match requested entity %s",
 					v.ID, v.Entity, entityA)

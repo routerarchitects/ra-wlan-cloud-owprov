@@ -23,9 +23,10 @@ With this PR:
   - **Entity Scopes**: If a role is entity-only, the entity and all associated venues and descendants are collected.
   - **Venue Deny Shadowing**: Explicit venue denies shadow entity inheritance for the explicitly denied venue only (descendant venues under the entity remain accessible unless explicitly denied). Venue deny shadowing is enforced in memory, in SQL `WHERE` clauses, and on the `Select` evaluation path.
   - **Strict Entity-vs-Venue Partitioning**: `entClause` strictly matches entity-level records `(venue IS NULL OR venue='')`, preventing venue-assigned records from matching purely on parent entity permissions. Venue-assigned records must always have their venue in `AllowedVenues`.
-- **Query Parameter Validation**:
-  - If `?entity=<uuid>` or `?venue=<uuid>` is requested, the handler validates that the parameter is inside `AllowedEntities` or `AllowedVenues`.
-  - If a caller tampers with the query parameter to request an entity or venue outside their scope, the handler immediately returns an empty list (`{"configurations": []}`) or `{"count": 0}`.
+- **Combined Query Parameter Validation & 403 Rejection**:
+  - Validates `?entity=` and `?venue=` independently and supports combined filtering (`?entity=...&venue=...`).
+  - If a caller requests an unauthorized entity or venue outside their scope (or in a denied venue), the handler immediately rejects with `403 Forbidden` (`RESTAPI::Errors::ACCESS_DENIED`).
+  - When both parameters are valid and authorized, they are combined with `AND` in SQL `ParamWhere`.
 - **Strict Select Path Enforcement (P1 Fix)**:
   - When `?select=` is specified, every selected record is strictly validated against `EntityParam`, `VenueParam`, `DeniedVenues`, and authorized entity/venue scopes.
   - Oromotes `Select` evaluation before `CountOnly` so that `?select=...&countOnly=true` accurately returns the count of matching selected records.

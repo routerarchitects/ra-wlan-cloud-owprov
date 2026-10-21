@@ -131,32 +131,35 @@ namespace OpenWifi {
 			}
 		}
 
-		// 4. Handle query parameters if provided (?entity=... or ?venue=...)
+		// 4. Handle query parameters if provided (?entity=... and/or ?venue=...)
 		auto EntityParam = GetParameter("entity", "");
 		auto VenueParam = GetParameter("venue", "");
-		std::string ParamWhere;
+		std::vector<std::string> ParamFilters;
 
 		if (!EntityParam.empty()) {
-			// If requested entity is outside permitted scopes, return empty
+			// If requested entity is outside permitted scopes, return 403 Forbidden
 			if (!AllowedEntities.count(EntityParam)) {
-				VariablesDB::RecordVec Entries;
-				if (QB_.CountOnly)
-					return ReturnCountOnly(0);
-				return MakeJSONObjectArray("variableBlocks", Entries, *this);
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 			}
-			ParamWhere = " entity='" + ORM::Escape(EntityParam) + "'";
-		} else if (!VenueParam.empty()) {
-			// If requested venue is outside permitted scopes, return empty
-			if (!AllowedVenues.count(VenueParam)) {
-				VariablesDB::RecordVec Entries;
-				if (QB_.CountOnly)
-					return ReturnCountOnly(0);
-				return MakeJSONObjectArray("variableBlocks", Entries, *this);
+			ParamFilters.push_back("entity='" + ORM::Escape(EntityParam) + "'");
+		}
+
+		if (!VenueParam.empty()) {
+			// If requested venue is outside permitted scopes or denied, return 403 Forbidden
+			if (!AllowedVenues.count(VenueParam) || DeniedVenues.count(VenueParam)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 			}
-			ParamWhere = " venue='" + ORM::Escape(VenueParam) + "'";
+			ParamFilters.push_back("venue='" + ORM::Escape(VenueParam) + "'");
 		}
 
 		// 5. Combine parameter filter with overall permitted scope
+		std::string ParamWhere;
+		if (ParamFilters.size() == 2) {
+			ParamWhere = "(" + ParamFilters[0] + " AND " + ParamFilters[1] + ")";
+		} else if (ParamFilters.size() == 1) {
+			ParamWhere = ParamFilters[0];
+		}
+
 		std::string FinalWhere;
 		if (!ParamWhere.empty() && !ScopeWhere.empty()) {
 			FinalWhere = "(" + ParamWhere + ") AND " + ScopeWhere;
