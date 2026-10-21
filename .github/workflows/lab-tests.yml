@@ -98,6 +98,62 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ── Build the C++ test image using the existing build cache ──────────────
+      - name: Build OWPROV Kafka Test Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: owprov-build
+          push: false
+          load: true
+          tags: owprov-build:test
+          cache-from: type=gha
+
+      # ── Create topics used by the concurrent subscription test ───────────────
+      - name: Create Kafka Consumer Test Topics
+        run: |
+          set -euo pipefail
+          for topic in \
+            test_dyn_topic_a \
+            test_dyn_topic_b \
+            test_bcast_topic_a \
+            test_bcast_topic_b; do
+            docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server localhost:9092 \
+              --create \
+              --topic "$topic" \
+              --partitions 1 \
+              --replication-factor 1 \
+              --if-not-exists
+          done
+
+      # ── Run both consumer roles against the actual Kafka broker ──────────────
+      - name: Run Kafka Consumer Roles Integration Test
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --network host \
+            -e KAFKA_BROKERLIST=localhost:9092 \
+            owprov-build:test \
+            /owprov/cmake-build/kafka_consumer_roles_test \
+            | tee kafka-consumer-roles.log
+
+          # Fail CI if broker-backed test did not complete
+          grep -Fq \
+            "PASS: test_concurrent_dynamic_subscription_updates_while_polling" \
+            kafka-consumer-roles.log
+
+          # Fail CI if the broker-backed scenario was skipped
+          if grep -Fq \
+            "SKIPPED: test_concurrent_dynamic_subscription_updates_while_polling" \
+            kafka-consumer-roles.log; then
+            echo "ERROR: Broker-backed Kafka test was skipped!"
+            exit 1
+          fi
+
+          echo "Kafka broker-backed integration test verified."
+
 
       # ── Build owprov Docker image (with layer cache) ──────────────────────────
       - name: Prepare owprov runtime data
