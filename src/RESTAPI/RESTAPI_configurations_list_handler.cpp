@@ -67,13 +67,22 @@ namespace OpenWifi {
 							}
 						}
 
-						// Also collect any venue from VenueDB where entity == role.entity
-						VenueDB::RecordVec EntityVenues;
-						if (StorageService()->VenueDB().GetRecords(0, 50000, EntityVenues, " entity='" + ORM::Escape(role.entity) + "'")) {
-							for (const auto &v : EntityVenues) {
+						// Also collect any venue from VenueDB where entity == role.entity (paginated to fetch all records)
+						uint64_t venueOffset = 0;
+						const uint64_t venueBatchSize = 500;
+						while (true) {
+							VenueDB::RecordVec pageVenues;
+							if (!StorageService()->VenueDB().GetRecords(venueOffset, venueBatchSize, pageVenues, " entity='" + ORM::Escape(role.entity) + "'")) {
+								break;
+							}
+							for (const auto &v : pageVenues) {
 								AllowedVenues.insert(v.info.id);
 								GetDescendantVenues(v.info.id, AllowedVenues);
 							}
+							if (pageVenues.size() < venueBatchSize) {
+								break;
+							}
+							venueOffset += venueBatchSize;
 						}
 					}
 				}

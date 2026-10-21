@@ -20,7 +20,7 @@ With this PR:
 - **Permission & Role Resolution**: Non-root callers are resolved via `FindAllUserRoles()`. Assigned management policies are checked for `configuration:GET` capability (leveraging `AuthCache` with fallback to `PolicyDB`).
 - **Hierarchy Scoping & Shadowing**:
   - **Venue Scopes**: If a role specifies a venue (with read permission), that venue and its descendants are collected. If a venue role denies read permission, only that explicitly denied venue is marked denied.
-  - **Entity Scopes**: If a role is entity-only, the entity and all associated venues and descendants are collected.
+  - **Entity Scopes**: If a role is entity-only, the entity and all associated venues and descendants are collected. Venue discovery under the entity is fully paginated without any fixed upper limit to guarantee complete hierarchy traversal.
   - **Venue Deny Shadowing**: Explicit venue denies shadow entity inheritance for the explicitly denied venue only (descendant venues under the entity remain accessible unless explicitly denied). Venue deny shadowing is enforced in memory, in SQL `WHERE` clauses, and on the `Select` evaluation path.
   - **Strict Entity-vs-Venue Partitioning**: `entClause` strictly matches entity-level records `(venue IS NULL OR venue='')`, preventing venue-assigned records from matching purely on parent entity permissions. Venue-assigned records must always have their venue in `AllowedVenues`.
 - **Combined Query Parameter Validation & 403 Rejection**:
