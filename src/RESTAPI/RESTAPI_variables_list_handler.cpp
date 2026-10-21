@@ -69,7 +69,7 @@ namespace OpenWifi {
 
 						// Also collect any venue from VenueDB where entity == role.entity
 						VenueDB::RecordVec EntityVenues;
-						if (StorageService()->VenueDB().GetRecords(0, 1000, EntityVenues, " entity='" + ORM::Escape(role.entity) + "'")) {
+						if (StorageService()->VenueDB().GetRecords(0, 50000, EntityVenues, " entity='" + ORM::Escape(role.entity) + "'")) {
 							for (const auto &v : EntityVenues) {
 								AllowedVenues.insert(v.info.id);
 								GetDescendantVenues(v.info.id, AllowedVenues);
