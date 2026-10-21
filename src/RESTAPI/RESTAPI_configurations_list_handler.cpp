@@ -62,10 +62,8 @@ namespace OpenWifi {
 						ProvObjects::Entity EntRec;
 						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
 							for (const auto &vId : EntRec.venues) {
-								if (!DeniedVenues.count(vId)) {
-									AllowedVenues.insert(vId);
-									GetDescendantVenues(vId, AllowedVenues);
-								}
+								AllowedVenues.insert(vId);
+								GetDescendantVenues(vId, AllowedVenues);
 							}
 						}
 
@@ -73,10 +71,8 @@ namespace OpenWifi {
 						VenueDB::RecordVec EntityVenues;
 						if (StorageService()->VenueDB().GetRecords(0, 1000, EntityVenues, " entity='" + ORM::Escape(role.entity) + "'")) {
 							for (const auto &v : EntityVenues) {
-								if (!DeniedVenues.count(v.info.id)) {
-									AllowedVenues.insert(v.info.id);
-									GetDescendantVenues(v.info.id, AllowedVenues);
-								}
+								AllowedVenues.insert(v.info.id);
+								GetDescendantVenues(v.info.id, AllowedVenues);
 							}
 						}
 					}
@@ -113,7 +109,11 @@ namespace OpenWifi {
 			return res;
 		};
 
-		std::string entClause = makeInClause("entity", AllowedEntities);
+		std::string rawEntClause = makeInClause("entity", AllowedEntities);
+		std::string entClause;
+		if (!rawEntClause.empty()) {
+			entClause = "((venue IS NULL OR venue='') AND " + rawEntClause + ")";
+		}
 		std::string venClause = makeInClause("venue", AllowedVenues);
 		std::string ScopeWhere;
 		if (!entClause.empty() && !venClause.empty()) {
@@ -184,9 +184,11 @@ namespace OpenWifi {
 					if (!Conf.venue.empty() && DeniedVenues.count(Conf.venue)) {
 						continue;
 					}
-					// 4. Must belong to permitted entity or venue scopes
-					bool entityAllowed = !Conf.entity.empty() && AllowedEntities.count(Conf.entity);
+					// 4. Must belong to permitted entity or venue scopes:
+					// Venue-scoped configs require venue in AllowedVenues.
+					// Entity-scoped configs (empty venue) require entity in AllowedEntities.
 					bool venueAllowed = !Conf.venue.empty() && AllowedVenues.count(Conf.venue);
+					bool entityAllowed = Conf.venue.empty() && !Conf.entity.empty() && AllowedEntities.count(Conf.entity);
 					if (entityAllowed || venueAllowed) {
 						SelectedEntries.push_back(Conf);
 					}

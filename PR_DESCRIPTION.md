@@ -19,9 +19,10 @@ With this PR:
 - **Root & Internal Bypass**: Callers with `userRole == SecurityObjects::ROOT` or internal service calls (`Internal_ == true`) bypass scoping and retrieve global configurations without overhead.
 - **Permission & Role Resolution**: Non-root callers are resolved via `FindAllUserRoles()`. Assigned management policies are checked for `configuration:GET` capability (leveraging `AuthCache` with fallback to `PolicyDB`).
 - **Hierarchy Scoping & Shadowing**:
-  - **Venue Scopes**: If a role has a venue assigned, only that venue (and its descendant venues resolved via `GetDescendantVenues()`) is collected. The parent entity is never included.
-  - **Entity Scopes**: If a role is entity-only (venue is empty), the entity and all of its associated venues (from `Entity.venues` and `VenueDB`) are collected.
-  - **Venue Deny Shadowing**: Explicit venue denies take precedence and erase inherited entity allowances in memory, in SQL `WHERE` clauses (`(venue IS NULL OR venue='' OR NOT venue IN (...))`), and in `Select` record evaluation.
+  - **Venue Scopes**: If a role specifies a venue (with read permission), that venue and its descendants are collected. If a venue role denies read permission, only that explicitly denied venue is marked denied.
+  - **Entity Scopes**: If a role is entity-only, the entity and all associated venues and descendants are collected.
+  - **Venue Deny Shadowing**: Explicit venue denies shadow entity inheritance for the explicitly denied venue only (descendant venues under the entity remain accessible unless explicitly denied). Venue deny shadowing is enforced in memory, in SQL `WHERE` clauses, and on the `Select` evaluation path.
+  - **Strict Entity-vs-Venue Partitioning**: `entClause` strictly matches entity-level records `(venue IS NULL OR venue='')`, preventing venue-assigned records from matching purely on parent entity permissions. Venue-assigned records must always have their venue in `AllowedVenues`.
 - **Query Parameter Validation**:
   - If `?entity=<uuid>` or `?venue=<uuid>` is requested, the handler validates that the parameter is inside `AllowedEntities` or `AllowedVenues`.
   - If a caller tampers with the query parameter to request an entity or venue outside their scope, the handler immediately returns an empty list (`{"configurations": []}`) or `{"count": 0}`.
