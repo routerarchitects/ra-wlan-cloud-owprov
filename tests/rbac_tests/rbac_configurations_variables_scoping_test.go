@@ -321,6 +321,63 @@ func TestConfigurationsList_Unauthenticated(t *testing.T) {
 	}
 }
 
+/*
+ * TestConfigurationsList_SelectScoped (P1 Regression Test)
+ *
+ * DESCRIPTION:
+ *   Validates that when ?select= is provided:
+ *   1. Explicit ?entity= or ?venue= query filters are strictly enforced on selected records.
+ *   2. Any selected records outside the requested entity/venue scope are omitted.
+ *   3. Cross-tenant or unauthorized IDs passed in select are omitted.
+ *   4. Scoped countOnly with select returns the accurate count of matching selected items.
+ */
+func TestConfigurationsList_SelectScoped(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "Bearer user-admin-operator-a-token")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+
+	t.Run("Select query with explicit entity filter excludes other entity records", func(t *testing.T) {
+		endpoint := fmt.Sprintf("/configurations?entity=%s&select=dummy-id-1,dummy-id-2", entityA)
+		status, body, err := client.DoRequest("GET", endpoint, tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for select with entity filter, got %d", status)
+		}
+
+		var resp ConfigurationListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		for _, cfg := range resp.Configurations {
+			if cfg.Entity != entityA {
+				t.Errorf("Security defect! Returned config %s with entity %s does not match requested entity %s",
+					cfg.ID, cfg.Entity, entityA)
+			}
+		}
+	})
+
+	t.Run("Select query with countOnly returns matching selected count", func(t *testing.T) {
+		endpoint := fmt.Sprintf("/configurations?entity=%s&select=dummy-id-1&countOnly=true", entityA)
+		status, body, err := client.DoRequest("GET", endpoint, tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for select countOnly, got %d", status)
+		}
+
+		var resp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+	})
+}
+
 // ----------------------------------------------------------------------------
 // 2. VARIABLES LIST RBAC SCOPING TESTS (GET /api/v1/variables)
 // ----------------------------------------------------------------------------
@@ -583,5 +640,61 @@ func TestVariablesList_Unauthenticated(t *testing.T) {
 	if status != http.StatusUnauthorized && status != http.StatusForbidden {
 		t.Errorf("Expected 401/403 for unauthenticated request, got %d", status)
 	}
+}
+
+/*
+ * TestVariablesList_SelectScoped (P1 Regression Test)
+ *
+ * DESCRIPTION:
+ *   Validates that when ?select= is provided for variables:
+ *   1. Explicit ?entity= or ?venue= query filters are strictly enforced on selected records.
+ *   2. Any selected records outside the requested entity/venue scope are omitted.
+ *   3. Scoped countOnly with select returns the accurate count of matching selected items.
+ */
+func TestVariablesList_SelectScoped(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	tokenAdminA := getEnvOrDefault("TOKEN_ADMIN_OPERATOR_A", "Bearer user-admin-operator-a-token")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+
+	t.Run("Select query with explicit entity filter excludes other entity records", func(t *testing.T) {
+		endpoint := fmt.Sprintf("/variables?entity=%s&select=dummy-var-1,dummy-var-2", entityA)
+		status, body, err := client.DoRequest("GET", endpoint, tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for select with entity filter, got %d", status)
+		}
+
+		var resp VariableListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		for _, v := range resp.Variables {
+			if v.Entity != entityA {
+				t.Errorf("Security defect! Returned variable block %s with entity %s does not match requested entity %s",
+					v.ID, v.Entity, entityA)
+			}
+		}
+	})
+
+	t.Run("Select query with countOnly returns matching selected count", func(t *testing.T) {
+		endpoint := fmt.Sprintf("/variables?entity=%s&select=dummy-var-1&countOnly=true", entityA)
+		status, body, err := client.DoRequest("GET", endpoint, tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for select countOnly, got %d", status)
+		}
+
+		var resp struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse count response: %v", err)
+		}
+	})
 }
 

@@ -124,6 +124,13 @@ namespace OpenWifi {
 			ScopeWhere = venClause;
 		}
 
+		if (!DeniedVenues.empty()) {
+			std::string deniedVenClause = makeInClause("venue", DeniedVenues);
+			if (!deniedVenClause.empty()) {
+				ScopeWhere = "(" + ScopeWhere + ") AND (venue IS NULL OR venue='' OR NOT " + deniedVenClause + ")";
+			}
+		}
+
 		// 4. Handle query parameters if provided (?entity=... or ?venue=...)
 		auto EntityParam = GetParameter("entity", "");
 		auto VenueParam = GetParameter("venue", "");
@@ -159,23 +166,41 @@ namespace OpenWifi {
 			FinalWhere = ScopeWhere;
 		}
 
-		// 6. Handle countOnly / select queries / paginated list
-		if (QB_.CountOnly) {
-			auto C = DB_.Count(FinalWhere);
-			return ReturnCountOnly(C);
-		}
-
+		// 6. Handle select queries / countOnly / paginated list
 		if (!QB_.Select.empty()) {
 			ConfigurationDB::RecordVec SelectedEntries;
 			for (const auto &id : QB_.Select) {
 				ProvObjects::DeviceConfiguration Conf;
 				if (DB_.GetRecord("id", id, Conf)) {
-					if (AllowedEntities.count(Conf.entity) || AllowedVenues.count(Conf.venue)) {
+					// 1. If explicit ?entity= was specified, record must match it
+					if (!EntityParam.empty() && Conf.entity != EntityParam) {
+						continue;
+					}
+					// 2. If explicit ?venue= was specified, record must match it
+					if (!VenueParam.empty() && Conf.venue != VenueParam) {
+						continue;
+					}
+					// 3. Explicit venue denials take precedence and shadow entity permissions
+					if (!Conf.venue.empty() && DeniedVenues.count(Conf.venue)) {
+						continue;
+					}
+					// 4. Must belong to permitted entity or venue scopes
+					bool entityAllowed = !Conf.entity.empty() && AllowedEntities.count(Conf.entity);
+					bool venueAllowed = !Conf.venue.empty() && AllowedVenues.count(Conf.venue);
+					if (entityAllowed || venueAllowed) {
 						SelectedEntries.push_back(Conf);
 					}
 				}
 			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(SelectedEntries.size());
+			}
 			return MakeJSONObjectArray("configurations", SelectedEntries, *this);
+		}
+
+		if (QB_.CountOnly) {
+			auto C = DB_.Count(FinalWhere);
+			return ReturnCountOnly(C);
 		}
 
 		ConfigurationDB::RecordVec Entries;

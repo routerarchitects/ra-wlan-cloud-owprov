@@ -1,149 +1,98 @@
-# Upgrade OWProv Docker Environment to Debian 13
+# feat(rbac): enforce entity and venue scoping on configuration and variable listing
 
 ## Summary
-This PR upgrades the OWProv Docker build and runtime environment from **Debian 11.5-slim** to **Debian 13-slim**.
+This PR enforces multi-tenant Role-Based Access Control (RBAC) scoping on `GET /api/v1/configurations` and `GET /api/v1/variables`. 
 
-The change updates Debian package dependencies for Debian 13 compatibility, adds necessary standard library headers for GCC 14 compatibility, reduces development packages in the runtime image, improves APT reliability and cleanup, pre-creates required Kafka topics for librdkafka 2.x in CI, and adds an active microservice registration retry loop in CI so that the OWProv build, service startup, brownfield database migrations, and integration test suites pass reliably without altering production Kafka runtime settings.
+Prior to this change, list endpoints returned global inventory without evaluating the caller's scoped entity and venue hierarchy or their assigned management policy permissions. Non-root users could potentially view configurations and variable blocks belonging to other entities or venues.
 
-## Changes
+With this PR:
+1. Non-root callers must possess `configuration:GET` / `variables:GET` permissions in their assigned management policies.
+2. Results are strictly filtered to the caller's authorized entity and venue hierarchy.
+3. Explicit query parameter tampering (`?entity=...` or `?venue=...`) attempting to query foreign tenants returns an empty result set (`200 OK` with `{"configurations": []}`) rather than leaking cross-tenant data.
+4. An automated integration test suite in Go (`tests/rbac_tests/rbac_configurations_variables_scoping_test.go`) verifies all positive permissions and negative boundary isolation scenarios.
 
-### Debian 13-slim Base Image
-Updated the Docker base image from:
-```dockerfile
-ARG DEBIAN_VERSION=11.5-slim
-```
-to:
-```dockerfile
-ARG DEBIAN_VERSION=13-slim
-```
-Using `13-slim` tracks the active Debian 13 upstream release and ensures base image security patches and updates are automatically applied. The same base image is used across both build and runtime stages.
+---
 
-### Build Dependency Updates
-Updated Debian package names for compatibility with Debian 13 and removed obsolete workarounds.
+## Detailed Changes
 
-- Replaced:
-  ```text
-  libmariadbclient-dev-compat
-  ```
-  with:
-  ```text
-  libmariadb-dev-compat
-  ```
-- Removed the deprecated `bullseye-security` repository `sed` removal workaround.
-- The build image continues to install the required development dependencies for:
-  - PostgreSQL (`libpq-dev`)
-  - MariaDB (`libmariadb-dev`, `libmariadb-dev-compat`)
-  - librdkafka (`librdkafka-dev`)
-  - Boost (`libboost-all-dev`)
-  - OpenSSL (`libssl-dev`)
-  - zlib (`zlib1g-dev`)
-  - nlohmann-json (`nlohmann-json3-dev`)
-  - curl (`libcurl4-openssl-dev`)
-  - fmt (`libfmt-dev`)
-  - POCO
-  - cppkafka
-  - Valijson
+### 1. `src/RESTAPI/RESTAPI_configurations_list_handler.cpp`
+- **Root & Internal Bypass**: Callers with `userRole == SecurityObjects::ROOT` or internal service calls (`Internal_ == true`) bypass scoping and retrieve global configurations without overhead.
+- **Permission & Role Resolution**: Non-root callers are resolved via `FindAllUserRoles()`. Assigned management policies are checked for `configuration:GET` capability (leveraging `AuthCache` with fallback to `PolicyDB`).
+- **Hierarchy Scoping & Shadowing**:
+  - **Venue Scopes**: If a role has a venue assigned, only that venue (and its descendant venues resolved via `GetDescendantVenues()`) is collected. The parent entity is never included.
+  - **Entity Scopes**: If a role is entity-only (venue is empty), the entity and all of its associated venues (from `Entity.venues` and `VenueDB`) are collected.
+  - **Venue Deny Shadowing**: Explicit venue denies take precedence and erase inherited entity allowances in memory, in SQL `WHERE` clauses (`(venue IS NULL OR venue='' OR NOT venue IN (...))`), and in `Select` record evaluation.
+- **Query Parameter Validation**:
+  - If `?entity=<uuid>` or `?venue=<uuid>` is requested, the handler validates that the parameter is inside `AllowedEntities` or `AllowedVenues`.
+  - If a caller tampers with the query parameter to request an entity or venue outside their scope, the handler immediately returns an empty list (`{"configurations": []}`) or `{"count": 0}`.
+- **Strict Select Path Enforcement (P1 Fix)**:
+  - When `?select=` is specified, every selected record is strictly validated against `EntityParam`, `VenueParam`, `DeniedVenues`, and authorized entity/venue scopes.
+  - Oromotes `Select` evaluation before `CountOnly` so that `?select=...&countOnly=true` accurately returns the count of matching selected records.
+- **Query Execution**: Injects SQL `IN (...)` conditions on `entity` and `venue` into `DB_.GetRecords()` and `DB_.Count()`.
 
-### Runtime Dependency Updates
-Reduced development packages in the final runtime image where only shared runtime libraries are required.
+### 2. `src/RESTAPI/RESTAPI_variables_list_handler.cpp`
+- Implements the exact same multi-tenant RBAC scoping algorithm for `GET /api/v1/variables` as described above, checking for `variables:GET` permissions.
+- Injects scope clauses and venue deny shadowing on `entity` and `venue` columns in `VariablesDB`.
+- Validates `?entity=` and `?venue=` filters against permitted scopes, returning empty arrays on out-of-scope requests.
+- Applies strict parameter filtering, venue deny shadowing, and accurate count handling to `QB_.Select` queries.
 
-Updated:
-```text
-libmariadb-dev-compat
-libfmt7
-```
-to:
-```text
-libmariadb3
-libfmt10
-```
-This minimizes the final runtime image attack surface and keeps it focused strictly on libraries required by the OWProv daemon.
+### 3. Automated Test Suite (`tests/rbac_tests/`)
+- Added `tests/rbac_tests/rbac_configurations_variables_scoping_test.go` with 16 comprehensive test cases:
+  - **Positive Tests**:
+    - `TestConfigurationsList_RootBypass`: ROOT retrieves global configurations without filters.
+    - `TestConfigurationsList_EntityScopedAdmin`: Scoped admin retrieves configurations within their assigned entity and child venues.
+    - `TestConfigurationsList_VenueScopedRole_ExcludesParentEntity`: Venue-scoped operator retrieves venue configurations and is isolated from parent entity configurations.
+    - `TestConfigurationsList_CountOnly`: Returns accurate count filtered strictly to permitted scopes.
+    - `TestConfigurationsList_SelectScoped`: Validates `select` with explicit `entity` scoping and `countOnly`.
+    - Mirror test cases for `variables` (`TestVariablesList_RootBypass`, `TestVariablesList_EntityScopedAdmin`, `TestVariablesList_VenueScopedRole_ExcludesParentEntity`, `TestVariablesList_CountOnly`, `TestVariablesList_SelectScoped`).
+  - **Negative Boundary & Security Tests**:
+    - `TestConfigurationsList_CrossTenantQueryParam_Negative`: Tenant A tampering with `?entity=Tenant_B_UUID` receives an empty list (`200 OK` with 0 records).
+    - `TestConfigurationsList_NoPermissions`: Token lacking `configuration:GET` receives an empty list or 403 Forbidden.
+    - `TestConfigurationsList_Unauthenticated`: Request without token or with malformed token is rejected (401 / 403).
+    - Mirror negative test cases for `variables` (`TestVariablesList_CrossTenantQueryParam_Negative`, `TestVariablesList_NoPermissions`, `TestVariablesList_Unauthenticated`).
+- Updated `tests/rbac_tests/RUN_TESTS.md` with Section 9 detailing prerequisites, environment variables, and execution steps.
 
-### APT Reliability and Cleanup
-APT commands now use retry handling:
-```text
--o Acquire::Retries=5
-```
-and clean up package metadata after installation:
+---
+
+## Reviewer Guidance & Security Checklist
+
+### 1. Security & Information Leakage Prevention
+| Aspect | Expected Behavior | Verification in Code |
+| :--- | :--- | :--- |
+| **Out-of-Scope Query Parameters** | When an attacker/caller supplies `?entity=<OTHER>` or `?venue=<OTHER>`, the system must **NOT** return a 404 (which reveals entity existence) or the target entity's records. | Verified: Lines 133–142 in `RESTAPI_configurations_list_handler.cpp` and lines 135–144 in `RESTAPI_variables_list_handler.cpp` return `{"configurations": []}` / `{"variableBlocks": []}` immediately. |
+| **Missing Read Permissions** | If the caller's assigned policy does not allow `configuration:GET` / `variables:GET`, zero records must be returned. | Verified: Lines 88–93 / 90–95 return empty array or count `0` if `AllowedEntities` and `AllowedVenues` are empty. |
+| **SQL Injection Protection** | Dynamic entity and venue IDs passed in the SQL `IN (...)` or `WHERE` clauses must be escaped. | Verified: Handled via `ORM::Escape(id)` for all parameter and set bindings. |
+
+### 2. Scope Hierarchy Invariants
+Reviewers should check that the standard OpenWiFi scoping invariants are maintained:
+1. **Root Bypass**: `isRoot || Internal_` executes `ListHandler<...>` directly without adding scope clauses.
+2. **Venue Role Precedence**: When a role defines a `venue`, only that venue and descendants are included. The role's `entity` field is intentionally ignored for scoping so venue managers cannot see sibling venues or entity-level configs.
+3. **Deny Shadowing**: If any role denies access to a venue, that venue is explicitly erased from `AllowedVenues`, even if the user has an entity role covering it.
+
+### 3. Reviewer Verification Steps
+
+To compile and verify the test suite locally:
+
 ```bash
-rm -rf /var/lib/apt/lists/*
+# 1. Verify Go test compilation
+cd tests/rbac_tests
+go test -c -o /dev/null .
+echo $? # Expected: 0
+
+# 2. Run the integration test suite against a running lab/staging OWPROV instance:
+export OWPROV_URL="https://127.0.0.1:16005/api/v1"
+export TOKEN_ROOT="Bearer <root-token>"
+export TOKEN_ADMIN_OPERATOR_A="Bearer <admin-a-token>"
+export TOKEN_NO_ACCESS="Bearer <no-access-token>"
+export OPERATOR_A_ENTITY_UUID="<entity-a-uuid>"
+export OPERATOR_B_ENTITY_UUID="<entity-b-uuid>"
+export VENUE_B_UUID="<venue-b-uuid>"
+
+go test -v -run "TestConfigurationsList|TestVariablesList" ./...
 ```
-This improves network resilience during package installation while eliminating unnecessary APT cache layers in the resulting image.
 
-### Shared Library Discovery
-Added:
-```dockerfile
-RUN ldconfig
-```
-after copying locally built POCO and cppkafka libraries into `/usr/local/lib`. This ensures the linker cache is refreshed prior to building OWProv.
+---
 
-### Compiler Compatibility (GCC 14 / Debian 13)
-GCC 14 in Debian 13 no longer transitively includes `<cstdint>` and `<optional>`. Added explicit standard includes:
-- `#include <cstdint>` in:
-  - `src/framework/OpenWifiTypes.h`
-  - `src/libs/croncpp.h`
-  (for `uint32_t`, `uint64_t`, and `int64_t`)
-- `#include <optional>` in:
-  - `src/framework/MicroService.h`
-  - `src/framework/MicroServiceFuncs.h`
-  - `src/framework/MicroServiceFuncs.cpp`
-  (for `std::optional`)
-
-## CI & Kafka Compatibility (Debian 13 / librdkafka 2.x)
-
-As part of the Debian 13 upgrade, `librdkafka` is upgraded from 1.6.x to 2.x. To maintain strict parity with production configuration and avoid altering production Kafka settings (`src/framework/KafkaManager.cpp` remains 100% untouched):
-
-1. **Pre-creation of standard Kafka topics in CI**:
-   - In librdkafka 2.x, `allow.auto.create.topics` defaults to `false`. When `owprov` boots and subscribes to its standard microservice event topics, librdkafka rejects subscriptions with `Broker: Unknown topic or partition` if those topics do not exist.
-   - Pre-creating the 9 standard service topics (`command`, `connection`, `device_event_queue`, `device_telemetry`, `healthcheck`, `provisioning_change`, `service_events`, `state`, `wifiscan`) in CI mirrors production infrastructure and satisfies librdkafka 2.x requirements without modifying application defaults.
-
-2. **Continuous microservice registration in CI**:
-   - In production, OpenWiFi microservices continuously broadcast periodic heartbeat/join events via `EventBusManager`.
-   - In CI, lightweight mock services (`mock_owsec`, `mock_fms`) do not run background heartbeat threads. Following the container restart in Step 16 (which tests daemon restart idempotency), a Kafka consumer rebalance occurs (5–15 seconds).
-   - Under standard `auto.offset.reset = "latest"`, a single one-shot message published during rebalance is missed, causing `owprov` to never register `owsec` and return HTTP 403 on subsequent authenticated test requests.
-   - Step 17 now polls and republishes `join` events in a 30-second loop until `owprov` logs confirm active registration of **both** `owsec` and `owfms`. This reliably accommodates consumer rebalancing under standard `auto.offset.reset = "latest"` without race conditions or false negatives.
-
-3. **Runtime Shared-Library Validation**:
-   - Added explicit shared-library dependency verification to ensure no dynamic symbols are missing:
-   ```bash
-   docker run --rm --entrypoint /bin/bash owprov:test \
-     -c 'ldd /openwifi/owprov && ! ldd /openwifi/owprov | grep -q "not found"'
-   ```
-
-## Production Integrity & Non-Regressions
-- `src/framework/KafkaManager.cpp` remains **100% identical to `origin/main`** (0 diff).
-- Production consumer behavior is fully preserved (`auto.offset.reset = "latest"`, `allow.auto.create.topics` unchanged).
-- No workarounds or test-specific configuration flags were injected into production source code.
-
-## Validation
-Validated against Debian 13-slim:
-- Build OWProv C++ Docker image: passed
-- Runtime shared-library (`ldd`) validation: passed
-- Start mock services (`mock_owsec` on port 16001, `mock_fms` on port 16004): passed
-- PostgreSQL container startup: passed
-- Brownfield schema migration (v1 → v2) and corrupt role auto-purge: passed
-- Daemon restart idempotency: passed
-- Dual microservice registration (`owsec` + `owfms`): passed
-- Combined Lab Test Suite (`main.go` - Root + Admin): passed
-- RBAC Immutability, Policy Protection, and v1/v2 role tests: passed
-
-## Scope
-This PR is limited to the Debian 13 migration, compiler compatibility, and CI integration test reliability.
-
-It does not change:
-- OWProv REST API endpoints or behavior
-- Database schema migration logic or entity structures
-- Management role or policy RBAC enforcement
-- Production Kafka consumer or producer configuration
-
-## Expected Result
-After this PR is merged:
-- OWProv build containers use Debian 13-slim.
-- OWProv runtime containers use Debian 13-slim.
-- Debian 13-compatible MariaDB and fmt packages are used.
-- Runtime images avoid unnecessary development packages.
-- GCC 14 compilation warnings and missing header errors are resolved.
-- CI builds and validates OWProv using Debian 13-slim.
-- Runtime shared-library validation executes as part of CI.
-- All lab and RBAC integration tests continue to pass reliably.
-
+## Impact & Backward Compatibility
+- **Backward Compatibility**: Fully backward compatible. Root users and existing automated backend workflows (`Internal_ == true`) experience zero change in behavior or performance.
+- **Performance**: Policy checks utilize the existing in-memory `AuthCache`. SQL queries use indexed `entity` and `venue` columns.

@@ -124,6 +124,13 @@ namespace OpenWifi {
 			ScopeWhere = venClause;
 		}
 
+		if (!DeniedVenues.empty()) {
+			std::string deniedVenClause = makeInClause("venue", DeniedVenues);
+			if (!deniedVenClause.empty()) {
+				ScopeWhere = "(" + ScopeWhere + ") AND (venue IS NULL OR venue='' OR NOT " + deniedVenClause + ")";
+			}
+		}
+
 		// 4. Handle query parameters if provided (?entity=... or ?venue=...)
 		auto EntityParam = GetParameter("entity", "");
 		auto VenueParam = GetParameter("venue", "");
@@ -159,23 +166,41 @@ namespace OpenWifi {
 			FinalWhere = ScopeWhere;
 		}
 
-		// 6. Handle countOnly / select queries / paginated list
-		if (QB_.CountOnly) {
-			auto C = DB_.Count(FinalWhere);
-			return ReturnCountOnly(C);
-		}
-
+		// 6. Handle select queries / countOnly / paginated list
 		if (!QB_.Select.empty()) {
 			VariablesDB::RecordVec SelectedEntries;
 			for (const auto &id : QB_.Select) {
 				ProvObjects::VariableBlock Var;
 				if (DB_.GetRecord("id", id, Var)) {
-					if (AllowedEntities.count(Var.entity) || AllowedVenues.count(Var.venue)) {
+					// 1. If explicit ?entity= was specified, record must match it
+					if (!EntityParam.empty() && Var.entity != EntityParam) {
+						continue;
+					}
+					// 2. If explicit ?venue= was specified, record must match it
+					if (!VenueParam.empty() && Var.venue != VenueParam) {
+						continue;
+					}
+					// 3. Explicit venue denials take precedence and shadow entity permissions
+					if (!Var.venue.empty() && DeniedVenues.count(Var.venue)) {
+						continue;
+					}
+					// 4. Must belong to permitted entity or venue scopes
+					bool entityAllowed = !Var.entity.empty() && AllowedEntities.count(Var.entity);
+					bool venueAllowed = !Var.venue.empty() && AllowedVenues.count(Var.venue);
+					if (entityAllowed || venueAllowed) {
 						SelectedEntries.push_back(Var);
 					}
 				}
 			}
+			if (QB_.CountOnly) {
+				return ReturnCountOnly(SelectedEntries.size());
+			}
 			return MakeJSONObjectArray("variableBlocks", SelectedEntries, *this);
+		}
+
+		if (QB_.CountOnly) {
+			auto C = DB_.Count(FinalWhere);
+			return ReturnCountOnly(C);
 		}
 
 		VariablesDB::RecordVec Entries;
