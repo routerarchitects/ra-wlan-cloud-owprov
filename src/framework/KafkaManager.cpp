@@ -71,220 +71,350 @@ namespace OpenWifi {
 		KafkaEnabled_ = MicroServiceConfigGetBool("openwifi.kafka.enable", false);
 	}
 
-	inline void KafkaProducer::run() {
-		Poco::Logger &Logger_ =
-			Poco::Logger::create("KAFKA-PRODUCER", KafkaManager()->Logger().getChannel());
-		poco_information(Logger_, "Starting...");
+	KafkaConsumer::KafkaConsumer(KafkaConsumerType Type) : ConsumerType_(Type) {}
 
-		Utils::SetThreadName("Kafka:Prod");
-		cppkafka::Configuration Config(
-			{{"client.id", MicroServiceConfigGetString("openwifi.kafka.client.id", "")},
-			 {"metadata.broker.list",MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")} // ,
-			 // {"send.buffer.bytes", KafkaManager()->KafkaManagerMaximumPayloadSize() }
-			}
- 		);
-
-		AddKafkaSecurity(Config);
-
-		Config.set_log_callback(KafkaLoggerFun);
-		Config.set_error_callback(KafkaErrorFun);
-
-		KafkaManager()->SystemInfoWrapper_ =
-			R"lit({ "system" : { "id" : )lit" + std::to_string(MicroServiceID()) +
-			R"lit( , "host" : ")lit" + MicroServicePrivateEndPoint() +
-			R"lit(" } , "payload" : )lit";
-
-		cppkafka::Producer Producer(Config);
-		Running_ = true;
-
-		Poco::AutoPtr<Poco::Notification> Note(Queue_.waitDequeueNotification());
-		while (Note && Running_) {
-			try {
-				auto Msg = dynamic_cast<KafkaMessage *>(Note.get());
-				if (Msg != nullptr) {
-					auto NewMessage = cppkafka::MessageBuilder(Msg->Topic());
-					NewMessage.key(Msg->Key());
-					NewMessage.partition(0);
-					NewMessage.payload(Msg->Payload());
-					Producer.produce(NewMessage);
-					if (Queue_.size() < 100) {
-						// use flush when internal queue is lightly loaded, i.e. flush after each
-						// message
-						Producer.flush();
-					}
-					else {
-						// use poll when internal queue is loaded to allow messages to be sent in
-						// batches
-						Producer.poll((std::chrono::milliseconds) 0);
-					}
-				}
-		                if (Queue_.size() == 0) {
-					// message queue is empty, flush all previously sent messages
-					Producer.flush();
-				}
-			} catch (const cppkafka::HandleException &E) {
-				poco_warning(Logger_,
-							 fmt::format("Caught a Kafka exception (producer): {}", E.what()));
-			} catch (const Poco::Exception &E) {
-				Logger_.log(E);
-			} catch (...) {
-				poco_error(Logger_, "std::exception");
-			}
-			Note = Queue_.waitDequeueNotification();
-		}
-		Producer.flush();
-		poco_information(Logger_, "Stopped...");
+	std::set<std::string> KafkaConsumer::Topics() const {
+		std::lock_guard G(ConsumerMutex_);
+		return Topics_;
 	}
 
-	inline void KafkaConsumer::run() {
-		Utils::SetThreadName("Kafka:Cons");
+	std::vector<std::string> KafkaConsumer::Subscriptions() const {
+		std::lock_guard G(ConsumerMutex_);
+		if (Consumer_) {
+			return Consumer_->get_subscription();
+		}
+		return {};
+	}
 
-		Poco::Logger &Logger_ =
-			Poco::Logger::create("KAFKA-CONSUMER", KafkaManager()->Logger().getChannel());
+	std::string KafkaConsumer::GenerateGroupId(KafkaConsumerType Type,
+	                                           const std::string &BaseGroupId,
+	                                           const std::string &RuntimeInstanceId) {
+		std::string Base = BaseGroupId.empty() ? "prov" : BaseGroupId;
+		return (Type == KafkaConsumerType::Broadcast) ? fmt::format("{}-{}-broadcast", Base, RuntimeInstanceId) : Base;
+	}
 
-		poco_information(Logger_, "Starting...");
+	std::string KafkaConsumer::GenerateClientId(KafkaConsumerType Type,
+	                                            const std::string &BaseClientId,
+	                                            const std::string &RuntimeInstanceId) {
+		std::string Sfx = (Type == KafkaConsumerType::Broadcast) ? "broadcast-consumer" : "work-consumer";
+		return BaseClientId.empty() ? fmt::format("{}-{}", RuntimeInstanceId, Sfx)
+		                            : fmt::format("{}-{}-{}", BaseClientId, RuntimeInstanceId, Sfx);
+	}
 
-		cppkafka::Configuration Config(
-			{{"client.id", MicroServiceConfigGetString("openwifi.kafka.client.id", "")},
-			 {"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
-			 {"group.id", MicroServiceConfigGetString("openwifi.kafka.group.id", "")},
-			 {"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
-			 {"auto.offset.reset", "latest"},
-			 {"enable.partition.eof", false}});
+	std::string KafkaConsumer::GenerateAutoOffsetReset(KafkaConsumerType Type) {
+		return (Type == KafkaConsumerType::Broadcast) ? "latest" : "smallest";
+	}
 
-		AddKafkaSecurity(Config);
+	std::string KafkaConsumer::GetGroupId() const {
+		return GenerateGroupId(ConsumerType_, MicroServiceConfigGetString("openwifi.kafka.group.id", "prov"), MicroServiceRuntimeInstanceId());
+	}
 
-		Config.set_log_callback(KafkaLoggerFun);
-		Config.set_error_callback(KafkaErrorFun);
+	std::string KafkaConsumer::GetClientId() const {
+		return GenerateClientId(ConsumerType_, MicroServiceConfigGetString("openwifi.kafka.client.id", "prov"), MicroServiceRuntimeInstanceId());
+	}
 
-		cppkafka::TopicConfiguration topic_config = {{"auto.offset.reset", "smallest"}};
+	std::string KafkaConsumer::GetAutoOffsetReset() const {
+		return GenerateAutoOffsetReset(ConsumerType_);
+	}
 
-		// Now configure it to be the default topic config
-		Config.set_default_topic_configuration(topic_config);
+	std::string KafkaProducer::GenerateClientId(const std::string &BaseClientId,
+	                                            const std::string &RuntimeInstanceId) {
+		return BaseClientId.empty() ? fmt::format("{}-producer", RuntimeInstanceId)
+		                            : fmt::format("{}-{}-producer", BaseClientId, RuntimeInstanceId);
+	}
 
-		cppkafka::Consumer Consumer(Config);
-		Consumer.set_assignment_callback([&](cppkafka::TopicPartitionList &partitions) {
-			if (!partitions.empty()) {
-				poco_information(Logger_, fmt::format("Partition assigned: {}...",
-													  partitions.front().get_partition()));
-			}
-		});
-		Consumer.set_revocation_callback([&](const cppkafka::TopicPartitionList &partitions) {
-			if (!partitions.empty()) {
-				poco_information(Logger_, fmt::format("Partition revocation: {}...",
-													  partitions.front().get_partition()));
-			}
-		});
-
-		// bool AutoCommit = MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false);
-		// auto BatchSize = MicroServiceConfigGetInt("openwifi.kafka.consumer.batchsize", 100);
-
-		Types::StringVec Topics;
-		std::for_each(Topics_.begin(),Topics_.end(),
-					  [&](const std::string & T) { Topics.emplace_back(T); });
-		Consumer.subscribe(Topics);
-
-		Running_ = true;
-		std::vector<cppkafka::Message> MsgVec;
-
-		Dispatcher_ = std::make_unique<cppkafka::ConsumerDispatcher>(Consumer);
-
-		Dispatcher_->run(
-			// Callback executed whenever a new message is consumed
-			[&](cppkafka::Message msg) {
-				// Print the key (if any)
-				std::lock_guard G(ConsumerMutex_);
-				auto It = Notifiers_.find(msg.get_topic());
-				if (It != Notifiers_.end()) {
-					const auto &FL = It->second;
-					for (const auto &[CallbackFunc, _] : FL) {
-						try {
-							CallbackFunc(msg.get_key(), msg.get_payload());
-						} catch(const Poco::Exception &E) {
-
-						} catch(...) {
-
-						}
-					}
-				}
-				Consumer.commit(msg);
-			},
-			// Whenever there's an error (other than the EOF soft error)
-			[&Logger_](cppkafka::Error error) {
-				poco_warning(Logger_,fmt::format("Error: {}", error.to_string()));
-			},
-			// Whenever EOF is reached on a partition, print this
-			[&Logger_](cppkafka::ConsumerDispatcher::EndOfFile, const cppkafka::TopicPartition& topic_partition) {
-				poco_debug(Logger_,fmt::format("Partition {} EOF", topic_partition.get_partition()));
-			}
-		);
-
-		Consumer.unsubscribe();
-		poco_information(Logger_, "Stopped...");
+	std::string KafkaProducer::GetClientId() const {
+		return GenerateClientId(MicroServiceConfigGetString("openwifi.kafka.client.id", "prov"), MicroServiceRuntimeInstanceId());
 	}
 
 	void KafkaProducer::Start() {
-		if (!Running_) {
+		std::lock_guard G(Mutex_);
+		if (!Running_ && !Worker_.isRunning()) {
 			Running_ = true;
 			Worker_.start(*this);
 		}
 	}
 
 	void KafkaProducer::Stop() {
-		if (Running_) {
+		{
+			std::lock_guard G(Mutex_);
+			if (!Running_ && !Worker_.isRunning()) return;
 			Running_ = false;
 			Queue_.wakeUpAll();
-			Worker_.join();
 		}
+		if (Worker_.isRunning()) Worker_.join();
 	}
 
-	void KafkaProducer::Produce(const char *Topic, const std::string &Key,
-								const std::string &Payload) {
+	void KafkaProducer::Produce(const char *Topic, const std::string &Key, const std::string &Payload) {
 		std::lock_guard G(Mutex_);
 		Queue_.enqueueNotification(new KafkaMessage(Topic, Key, Payload));
 	}
 
+	inline void KafkaProducer::run() {
+		Poco::Logger &Logger_ = Poco::Logger::has("KAFKA-PRODUCER") ? Poco::Logger::get("KAFKA-PRODUCER") : Poco::Logger::create("KAFKA-PRODUCER", KafkaManager()->Logger().getChannel());
+		poco_information(Logger_, fmt::format("Starting producer with client.id '{}'...", GetClientId()));
+		Utils::SetThreadName("Kafka:Prod");
+
+		struct Cleanup {
+			std::atomic_bool &Running;
+			std::mutex &Mtx;
+			~Cleanup() { std::lock_guard G(Mtx); Running = false; }
+		} Guard{Running_, Mutex_};
+
+		cppkafka::Configuration Config({
+			{"client.id", GetClientId()},
+			{"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")}
+		});
+		AddKafkaSecurity(Config);
+		Config.set_log_callback(KafkaLoggerFun);
+		Config.set_error_callback(KafkaErrorFun);
+
+		KafkaManager()->SystemInfoWrapper_ = fmt::format(
+			R"lit({{ "system" : {{ "id" : {}, "host" : "{}" }}, "payload" : )lit",
+			MicroServiceID(), MicroServicePrivateEndPoint());
+
+		try {
+			cppkafka::Producer Producer(Config);
+			while (Running_) {
+				Poco::AutoPtr<Poco::Notification> Note(Queue_.waitDequeueNotification(100));
+				if (!Note) {
+					continue;
+				}
+				try {
+					if (auto Msg = dynamic_cast<KafkaMessage *>(Note.get())) {
+						auto NewMsg = cppkafka::MessageBuilder(Msg->Topic());
+						NewMsg.key(Msg->Key());
+						NewMsg.partition(0);
+						NewMsg.payload(Msg->Payload());
+						Producer.produce(NewMsg);
+						if (Queue_.size() < 100) {
+							Producer.flush();
+						} else {
+							Producer.poll(std::chrono::milliseconds(0));
+						}
+					}
+					if (Queue_.size() == 0) {
+						Producer.flush();
+					}
+				} catch (const cppkafka::HandleException &E) {
+					poco_warning(Logger_, fmt::format("Kafka exception (producer): {}", E.what()));
+				} catch (const Poco::Exception &E) {
+					Logger_.log(E);
+				} catch (...) {
+					poco_error(Logger_, "Exception in producer loop");
+				}
+			}
+			Producer.flush();
+		} catch (const std::exception &E) {
+			poco_warning(Logger_, fmt::format("Kafka producer error: {}", E.what()));
+		} catch (...) {
+			poco_error(Logger_, "Unknown exception in Kafka producer");
+		}
+		poco_information(Logger_, "Stopped...");
+	}
+
 	void KafkaConsumer::Start() {
-		if (!Running_) {
+		std::lock_guard Lock(ConsumerMutex_);
+		if (!Running_ && !Worker_.isRunning()) {
+			Running_ = true;
 			Worker_.start(*this);
 		}
 	}
 
 	void KafkaConsumer::Stop() {
-		if (Running_) {
+		{
+			std::lock_guard Lock(ConsumerMutex_);
+			if (!Running_ && !Worker_.isRunning()) return;
 			Running_ = false;
-			if(Dispatcher_) {
-				Dispatcher_->stop();
+			TopicCV_.notify_all();
+		}
+		if (Worker_.isRunning()) Worker_.join();
+	}
+
+	inline void KafkaConsumer::run() {
+		std::string RoleName = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+		Utils::SetThreadName((ConsumerType_ == KafkaConsumerType::Broadcast) ? "Kafka:Bcast" : "Kafka:GrpCons");
+		std::string LoggerName = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "KAFKA-BROADCAST-CONSUMER" : "KAFKA-GROUP-CONSUMER";
+		Poco::Logger &Logger_ = Poco::Logger::has(LoggerName) ? Poco::Logger::get(LoggerName) : Poco::Logger::create(LoggerName, KafkaManager()->Logger().getChannel());
+
+		poco_information(Logger_, fmt::format("Starting {} (group.id='{}', client.id='{}', auto.offset.reset='{}')...",
+			RoleName, GetGroupId(), GetClientId(), GetAutoOffsetReset()));
+
+		struct Cleanup {
+			KafkaConsumer &Self;
+			~Cleanup() {
+				std::lock_guard Lock(Self.ConsumerMutex_);
+				Self.Consumer_.reset();
+				Self.Running_ = false;
+				Self.TopicCV_.notify_all();
 			}
-			Worker_.join();
+		} Guard{*this};
+
+		{
+			std::unique_lock Lock(ConsumerMutex_);
+			while (Running_ && Topics_.empty()) {
+				TopicCV_.wait_for(Lock, std::chrono::milliseconds(500), [this]() {
+					return !Running_ || !Topics_.empty();
+				});
+			}
+			if (!Running_ || Topics_.empty()) {
+				poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
+				return;
+			}
+		}
+
+		bool CleanShutdown = false;
+		try {
+			cppkafka::Configuration Config({
+				{"client.id", GetClientId()},
+				{"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
+				{"group.id", GetGroupId()},
+				{"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
+				{"auto.offset.reset", GetAutoOffsetReset()},
+				{"enable.partition.eof", false}
+			});
+			AddKafkaSecurity(Config);
+			Config.set_log_callback(KafkaLoggerFun);
+			Config.set_error_callback(KafkaErrorFun);
+			Config.set_default_topic_configuration({{"auto.offset.reset", GetAutoOffsetReset()}});
+
+			auto LocalConsumer = std::make_unique<cppkafka::Consumer>(Config);
+			LocalConsumer->set_assignment_callback([&](cppkafka::TopicPartitionList &parts) {
+				if (!parts.empty()) {
+					poco_information(Logger_, fmt::format("Partition assigned: {}...", parts.front().get_partition()));
+				}
+			});
+			LocalConsumer->set_revocation_callback([&](const cppkafka::TopicPartitionList &parts) {
+				if (!parts.empty()) {
+					poco_information(Logger_, fmt::format("Partition revocation: {}...", parts.front().get_partition()));
+				}
+			});
+
+			{
+				std::lock_guard Lock(ConsumerMutex_);
+				if (!Running_) return;
+				Consumer_ = std::move(LocalConsumer);
+				Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
+			}
+
+			while (Running_) {
+				cppkafka::Message msg = Consumer_->poll(std::chrono::milliseconds(100));
+				if (!msg) {
+					continue;
+				}
+				if (msg.get_error()) {
+					if (msg.is_eof()) {
+						poco_debug(Logger_, fmt::format("Partition {} EOF", msg.get_partition()));
+					} else {
+						poco_warning(Logger_, fmt::format("Error: {}", msg.get_error().to_string()));
+					}
+					continue;
+				}
+				{
+					std::lock_guard G(ConsumerMutex_);
+					auto It = Notifiers_.find(msg.get_topic());
+					if (It != Notifiers_.end()) {
+						for (const auto &[CallbackFunc, _] : It->second) {
+							try { CallbackFunc(msg.get_key(), msg.get_payload()); }
+							catch (const std::exception &E) { poco_warning(Logger_, fmt::format("Callback exception: {}", E.what())); }
+							catch (...) { poco_error(Logger_, "Unknown callback exception"); }
+						}
+					}
+				}
+				if (Consumer_) Consumer_->commit(msg);
+			}
+
+			std::lock_guard Lock(ConsumerMutex_);
+			if (Consumer_) { try { Consumer_->unsubscribe(); } catch (...) {} }
+			CleanShutdown = true;
+		} catch (const std::exception &E) {
+			if (!Running_) {
+				CleanShutdown = true;
+			} else {
+				poco_error(Logger_, fmt::format("Unexpected terminal failure in {} (group.id='{}'): {}", RoleName, GetGroupId(), E.what()));
+			}
+		} catch (...) {
+			if (!Running_) {
+				CleanShutdown = true;
+			} else {
+				poco_error(Logger_, fmt::format("Unexpected terminal failure in {} (group.id='{}'): unknown exception", RoleName, GetGroupId()));
+			}
+		}
+
+		if (CleanShutdown) {
+			poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
 		}
 	}
 
-	std::uint64_t KafkaConsumer::RegisterTopicWatcher(const std::string &Topic,
-											   Types::TopicNotifyFunction &F) {
+	std::uint64_t KafkaConsumer::RegisterTopicWatcher(const std::string &Topic, Types::TopicNotifyFunction &F) {
 		std::lock_guard G(ConsumerMutex_);
-		auto It = Notifiers_.find(Topic);
-		if (It == Notifiers_.end()) {
-			Types::TopicNotifyFunctionList L;
-			L.emplace(L.end(), std::make_pair(F, FunctionId_));
-			Notifiers_[Topic] = std::move(L);
-		} else {
-			It->second.emplace(It->second.end(), std::make_pair(F, FunctionId_));
+		Notifiers_[Topic].emplace_back(F, FunctionId_);
+		auto [_, inserted] = Topics_.insert(Topic);
+		TopicCV_.notify_all();
+		if (inserted && Consumer_ && Running_) {
+			try {
+				Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
+			} catch (const std::exception &E) {
+				Topics_.erase(Topic);
+				Notifiers_[Topic].pop_back();
+				if (Notifiers_[Topic].empty()) {
+					Notifiers_.erase(Topic);
+				}
+				std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+				poco_error(KafkaManager()->Logger(),
+					fmt::format("Failed to subscribe to topic '{}' on {}: {}", Topic, Role, E.what()));
+				throw;
+			} catch (...) {
+				Topics_.erase(Topic);
+				Notifiers_[Topic].pop_back();
+				if (Notifiers_[Topic].empty()) {
+					Notifiers_.erase(Topic);
+				}
+				std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+				poco_error(KafkaManager()->Logger(),
+					fmt::format("Failed to subscribe to topic '{}' on {}: unknown exception", Topic, Role));
+				throw;
+			}
 		}
-		Topics_.insert(Topic);
 		return FunctionId_++;
 	}
 
-	void KafkaConsumer::UnregisterTopicWatcher(const std::string &Topic, int Id) {
+	void KafkaConsumer::UnregisterTopicWatcher(const std::string &Topic, uint64_t Id) {
 		std::lock_guard G(ConsumerMutex_);
 		auto It = Notifiers_.find(Topic);
 		if (It != Notifiers_.end()) {
-			Types::TopicNotifyFunctionList &L = It->second;
-			for (auto it = L.begin(); it != L.end(); it++)
-				if (it->second == Id) {
+			auto &L = It->second;
+			for (auto it = L.begin(); it != L.end(); ++it) {
+				if (it->second == static_cast<int>(Id)) {
+					auto RemovedWatcher = *it;
 					L.erase(it);
+					if (L.empty()) {
+						Notifiers_.erase(It);
+						Topics_.erase(Topic);
+						if (Consumer_ && Running_) {
+							try {
+								if (Topics_.empty()) Consumer_->unsubscribe();
+								else Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
+							} catch (const std::exception &E) {
+								Topics_.insert(Topic);
+								Notifiers_[Topic].push_back(RemovedWatcher);
+								std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+								poco_error(KafkaManager()->Logger(),
+									fmt::format("Failed to update subscription after unregistering topic '{}' on {}: {}", Topic, Role, E.what()));
+								throw;
+							} catch (...) {
+								Topics_.insert(Topic);
+								Notifiers_[Topic].push_back(RemovedWatcher);
+								std::string Role = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
+								poco_error(KafkaManager()->Logger(),
+									fmt::format("Failed to update subscription after unregistering topic '{}' on {}: unknown exception", Topic, Role));
+								throw;
+							}
+						}
+					}
 					break;
 				}
+			}
 		}
 	}
 
@@ -292,7 +422,8 @@ namespace OpenWifi {
 		if (!KafkaEnabled_)
 			return 0;
 		MaxPayloadSize_ = MicroServiceConfigGetInt("openwifi.kafka.max.payload", 250000);
-		ConsumerThr_.Start();
+		GroupConsumerThr_.Start();
+		BroadcastConsumerThr_.Start();
 		ProducerThr_.Start();
 		return 0;
 	}
@@ -301,7 +432,8 @@ namespace OpenWifi {
 		if (KafkaEnabled_) {
 			poco_information(Logger(), "Stopping...");
 			ProducerThr_.Stop();
-			ConsumerThr_.Stop();
+			BroadcastConsumerThr_.Stop();
+			GroupConsumerThr_.Stop();
 			poco_information(Logger(), "Stopped...");
 			return;
 		}

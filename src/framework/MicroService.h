@@ -239,6 +239,7 @@ namespace OpenWifi {
 		InstanceIdentity Identity_;
 		Poco::ThreadPool TimerPool_{"timer:pool", 2, 32};
         ArgVec Args_;
+		uint64_t ServiceEventsWatcherId_ = 0;
 	};
 
 	inline MicroService *MicroService::instance_ = nullptr;
