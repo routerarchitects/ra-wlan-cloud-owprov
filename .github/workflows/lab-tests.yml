@@ -117,7 +117,9 @@ jobs:
             test_dyn_topic_a \
             test_dyn_topic_b \
             test_bcast_topic_a \
-            test_bcast_topic_b; do
+            test_bcast_topic_b \
+            test_reentrant_deadlock_probe \
+            test_concurrent_unregister_probe; do
             docker exec kafka /opt/kafka/bin/kafka-topics.sh \
               --bootstrap-server localhost:9092 \
               --create \
@@ -153,6 +155,42 @@ jobs:
           fi
 
           echo "Kafka broker-backed integration test verified."
+
+
+      # ── Run Kafka callback deadlock diagnostic probes ─────────────────────────
+      - name: Run Kafka Callback Deadlock Diagnostic Probes
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --network host \
+            -e KAFKA_BROKERLIST=localhost:9092 \
+            owprov-build:test \
+            /owprov/cmake-build/kafka_callback_deadlock_test \
+            | tee kafka-callback-deadlock.log
+
+          # Fail if either probe was unexpectedly skipped (broker IS set).
+          if grep -Fq "SKIPPED" kafka-callback-deadlock.log; then
+            echo "ERROR: Deadlock probe was skipped despite KAFKA_BROKERLIST being set!"
+            exit 1
+          fi
+
+          # Require Test 2 PASS line.
+          grep -Fq \
+            "PASS: Concurrent unregistration and consumer shutdown completed safely." \
+            kafka-callback-deadlock.log
+
+          # Confirm Test 1 reported an observed diagnostic result (deadlock reproduced or safe).
+          grep -Eq \
+            "(Consistent with ConsumerMutex_ self-deadlock|Self-deadlock reproduced|NO DEADLOCK)" \
+            kafka-callback-deadlock.log
+
+          # Confirm overall diagnostic probes completion.
+          grep -Fq \
+            "Kafka callback deadlock diagnostic probes completed" \
+            kafka-callback-deadlock.log
+
+          echo "Kafka callback deadlock diagnostic probes verified."
 
 
       # ── Build owprov Docker image (with layer cache) ──────────────────────────

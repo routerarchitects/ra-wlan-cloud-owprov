@@ -305,3 +305,16 @@ target_link_libraries(kafka_consumer_roles_test PRIVATE
 
 add_test(NAME kafka_consumer_roles_test COMMAND kafka_consumer_roles_test)
 
+add_executable(kafka_callback_deadlock_test
+        tests/framework_tests/KafkaCallbackDeadlock_test.cpp
+        src/framework/KafkaManager.cpp
+)
+target_link_libraries(kafka_callback_deadlock_test PRIVATE
+        ${Poco_LIBRARIES}
+        CppKafka::cppkafka
+        fmt::fmt)
+
+add_test(NAME kafka_callback_deadlock_test COMMAND kafka_callback_deadlock_test)
+set_tests_properties(kafka_callback_deadlock_test
+        PROPERTIES SKIP_RETURN_CODE 77)
+
