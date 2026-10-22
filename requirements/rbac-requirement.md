@@ -176,7 +176,8 @@ Policies are allow-lists. Missing grants are denied. Permissions expand into ato
 ## 6. Management Roles
 
 ### 6.1 Role Structure and Uniqueness
-A Management Role associates a user with a policy over an exact scope:
+
+A Management Role associates a single user with a policy over an exact scope. Its JSON representation is:
 
 ```json
 {
@@ -190,12 +191,23 @@ A Management Role associates a user with a policy over an exact scope:
 }
 ```
 
+#### Single-User Array Cardinality Invariant
+Although the data model uses a JSON array (`"users": [...]`) for backwards compatibility with the underlying OpenWifi object schema, **each Management Role entry strictly binds exactly one user**:
+- **Mandatory Single-Element Cardinality:** Every role creation or update payload must contain **exactly one** user ID in the `users` array (`len(users) == 1`).
+- **Rejection of Multi-User Payloads:** Any request containing zero users (`"users": []`) or multiple users (e.g., `{"users": ["U1", "U2"]}`) **MUST be rejected with `400 Bad Request`**:
+  > *"Management role must contain exactly one user in the users array."*
+- **Discrete Role Identity:** A role record represents a discrete, non-shared assignment between one user, one exact scope, and one policy. Role batching is supported across *venues* for a single user (via V2 `venueIds`), but **never across multiple users**. Role allocation for multiple users requires separate API requests.
+
 #### Exact Scope Uniqueness Invariant
-For any given user, only one role may exist per exact scope key:
+Because each Management Role contains exactly one user ID, uniqueness is governed by the composite tuple:
 $$\text{Scope Key} = \langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \rangle$$
 - **Entity Scope Role:** `Venue ID` is empty (`""`).
 - **Venue Scope Role:** `Venue ID` is populated (`<venue-uuid>`).
-- **Upsert Semantics:** Submitting an assignment for an existing exact scope updates the `managementPolicy` ID and timestamp on the existing record rather than creating duplicate records.
+
+#### Idempotent Upsert Semantics on Creation (`POST`)
+- Submitting an assignment via `POST` for an exact scope key that already exists for that user updates the `managementPolicy` ID and `modified` timestamp on the existing record rather than creating a duplicate row.
+- **Authorization Semantics:** Calling `POST` to upsert an existing role operates as an idempotent, declarative provisioning command authorized at the gateway via the operational `managementRole:CREATE` grant.
+- **Policy Overwrite Safeguard:** Although the existing role's policy is updated in-place, **Pillar 5 (Delegation Subsetting)** strictly prevents privilege escalation: an Admin can only overwrite the existing policy with one whose grants are an equal or weaker subset of the permissions the Admin currently holds on that scope.
 
 ### 6.2 Management Role Provisioning APIs
 
@@ -233,9 +245,9 @@ Once created, a Management Role's scope and subject are immutable:
 | :--- | :---: | :---: | :---: |
 | **List Roles** | All Roles | Roles of users created by Admin | Own Roles Only |
 | **Get Role** | Any Role | Roles of users created by Admin | Own Roles Only |
-| **Create / Upsert Role** | Allowed | Allowed only for created users, requiring scope authority, effective `managementRole:CREATE` grant, and delegation subsetting; self-assignment prohibited | Denied |
-| **Update Policy** | Allowed | Allowed only for created users, requiring scope authority, effective `managementRole:UPDATE` grant, and delegation subsetting; self-modification prohibited | Denied |
-| **Delete Role** | Allowed | Allowed only for created users, requiring scope authority and effective `managementRole:DELETE` grant over exact scope; self-deletion prohibited | Denied |
+| **Create / Upsert Role** | Allowed | Allowed only for created users, requiring scope authority, explicit `managementRole:CREATE` grant, and delegation subsetting; self-assignment prohibited | Denied |
+| **Update Policy** | Allowed | Allowed only for created users, requiring scope authority, explicit `managementRole:UPDATE` grant, and delegation subsetting; self-modification prohibited | Denied |
+| **Delete Role** | Allowed | Allowed only for created users, requiring scope authority and explicit `managementRole:DELETE` grant over exact scope; self-deletion prohibited | Denied |
 
 ---
 
@@ -258,11 +270,11 @@ For any client-requested Management Role operation (create, update, delete), the
 1. **Pillar 1 — Requester Actor Identity:** The requester must be authenticated as `ROOT` or an `owsec` `Admin`. Standard functional users (`csr`, `installer`, `noc`, etc.) are unconditionally denied role-management endpoints.
 2. **Pillar 2 — Target-User Creator Ownership:** For non-root requesters, the target user must have been created directly by the requester (`TargetUser.createdBy == Requester.id`).
 3. **Pillar 3 — Scope Authority:** The requester must hold an active Management Role governing the exact target scope (either an exact Venue-scoped role for venue assignments or an Entity-scoped role covering that entity and its direct/nested venues).
-4. **Pillar 4 — Effective `managementRole` Operation Grant:** The requester's effective policy on that target scope must explicitly grant the required role-lifecycle permission:
-   - For creating or upserting roles: `managementRole:CREATE` (or `entity:CREATE`, `operator:CREATE`, or `*:FULL`).
-   - For updating role policies: `managementRole:UPDATE` (or `entity:UPDATE`, `operator:UPDATE`, or `*:FULL`).
-   - For deleting roles: `managementRole:DELETE` (or `entity:DELETE`, `operator:DELETE`, or `*:FULL`).
-   *Crucial distinction:* Holding administrative permissions on underlying functional resources (such as `inventory:FULL` or `configuration:FULL`) does **not** grant the ability to manage roles. Role management requires an explicit `managementRole` (or enclosing entity) operational grant.
+4. **Pillar 4 — Explicit `managementRole` Operation Grant:** The requester's effective policy on that target scope must explicitly grant the required role-lifecycle permission:
+   - For creating or upserting roles: `managementRole:CREATE` (or global `*:FULL`).
+   - For updating role policies: `managementRole:UPDATE` (or global `*:FULL`).
+   - For deleting roles: `managementRole:DELETE` (or global `*:FULL`).
+   *Strict Separation of Duties:* Permissions on organizational or structural resources (such as `entity:CREATE`, `entity:UPDATE`, `operator:CREATE`, `operator:UPDATE`) or functional resources (such as `inventory:FULL` or `configuration:FULL`) do **NOT** grant authority to manage roles. Role administration strictly requires an explicit `managementRole` grant on that target scope.
 5. **Pillar 5 — Delegated Policy Subsetting:** For role creation and policy updates, every resource grant defined in the target policy must be an equal or weaker subset of the permissions the assigner effectively holds on that target scope.
 
 ### 7.3 Permission Subsetting Rules
@@ -336,8 +348,11 @@ For creation operations, the resource being created does not exist in the databa
      - **Entity Creation (`POST /api/v1/entity/{id}`):** Resolves the target scope from `parent` in the request body. Authorization requires `entity:CREATE` on that parent Entity scope.
      - **Top-Level Venue Creation (`POST /api/v1/venue/{id}`):** Resolves `entity` in the request body. Authorization requires `venue:CREATE` on that parent Entity scope.
      - **Child Venue Creation (`POST /api/v1/venue/{id}`):** Resolves `parent` Venue in the request body. Authorization requires `venue:CREATE` on that exact parent Venue scope.
-     - **Operator Creation (`POST /api/v1/operator/{id}`):** Operates on the global Root Entity scope. Authorization requires `operator:CREATE` on the Root Entity (`0000-0000-0000`).
-     - **Inventory Registration (`POST /api/v1/inventory/{id}`):** Resolves target destination `venue` or `entity` from the payload.
+     - **Operator Creation (`POST /api/v1/operator/{id}`):** Operates on the global Root Entity scope. Authorization requires `operator:CREATE` on the Root Entity (`0000-0000-0000`). Provisions companion Operator Entity and creator role per Section 8.3.
+     - **Inventory Registration (`POST /api/v1/inventory/{id}`):**
+       - **Scope Mutual Exclusivity (`NotBoth`):** A device in inventory can be assigned directly to an Entity OR directly to a Venue, but **never both**. The payload must specify either `venue` or `entity`. If a request supplies both `entity` and `venue` simultaneously, it is rejected with `400 Bad Request` (`NotBoth`).
+       - If `venue` is specified, the authorization engine extracts the venue's authoritative owning entity from storage (`TargetEntity = Venue.entity`) and authorizes against that resolved scope.
+       - If `entity` is specified, authorization is evaluated directly on that Entity scope.
      - **Management Role Assignment (`POST /api/v1/managementRole/{id}` or `/api/v2/...`):** Resolves target `entity` and `venue` (or `venueIds`) from the request payload.
 
 #### 8.1.3 Conflict Validation and Disambiguation (No Silent Overrides)
@@ -346,6 +361,13 @@ To prevent security discrepancies where a request might be authorized against on
   1. All supplied identifiers must be verified for existence against stored records.
   2. The resolved scopes across parameters and body must be mutually consistent.
   3. Any conflicting or contradictory scope identifiers **MUST be rejected with `400 Bad Request`** rather than silently selecting or prioritizing one source over the other.
+
+#### 8.1.4 Dual-Scope Authorization for Cross-Scope Device Movement (`PUT`)
+When updating an existing inventory record to move a device between locations (e.g. updating `venue` or `entity` via `PUT /api/v1/inventory/{id}`):
+1. **Source Scope Authorization:** The requester must hold effective `inventory:UPDATE` on the **originating (source) scope** where the device currently resides (authorizing modification and removal from the existing container).
+2. **Destination Scope Authorization:** The requester must ALSO hold effective `inventory:UPDATE` (or `inventory:CREATE`) on the **destination target scope** (authorizing placement into the new entity or venue).
+3. A user cannot transfer a device into an entity or venue where they do not possess active management authority. If the requester lacks authority over either the source or destination scope, the movement operation is denied.
+4. **Scope Mutual Exclusivity on Update:** Moving a device to a new `venue` automatically detaches it from any previous direct `entity` binding, and moving it to a new direct `entity` clears any previous `venue` binding, preserving the single-scope invariant.
 
 If a scope constraint applies to the resource and resolution fails, the request is immediately denied.
 
@@ -366,11 +388,23 @@ When authorizing operations targeting a Venue or a device within a Venue:
 4. **Denial:** If neither an exact Venue role nor an owning Entity role matches, access is **denied**.
 
 ### 8.3 Automatic Creator-Role Assignment
-When an authorized non-ROOT user creates a new Entity or Venue:
-- The system automatically creates a Management Role for the creator on the newly created scope.
-- **Policy Inheritance:** Copies the exact Management Policy ID of the effective parent-scope role that authorized the creation.
+When an authorized non-ROOT user creates a new Entity, Venue, or Operator:
+- The system automatically provisions a Management Role for the creator on the newly created scope.
+- **Policy Inheritance:** Copies the exact Management Policy ID of the effective parent/authorizing-scope role that authorized the creation.
 - **Atomicity:** The new scope and creator role are committed in the same atomic transaction. If role creation fails, the entire creation transaction is rolled back.
 - **Bypass:** As a system-managed operation, automatic creator-role assignment is not subject to Admin creator-ownership restrictions.
+
+#### Composite Operator and Operator Entity Creation Flow
+Creating an Operator (`POST /api/v1/operator/{id}`) is a composite provisioning transaction authorized on the Root Entity (`0000-0000-0000`) requiring `operator:CREATE`:
+1. **Provisioned Resources:** The transaction provisions:
+   - The Operator record ($O$).
+   - A companion Operator Entity ($E$) parented under the Root Entity (`E.parent = RootUUID()`, `E.operatorId = O.id`, and `O.entityId = E.id`).
+   - The default Service Class for the Operator.
+2. **Automatic Operator Entity Creator Role:**
+   - Because Root Entity roles strictly hide tenant data and cannot view Operator records (Section 9.4), **OWPROV must automatically create a Management Role for the creator directly on the newly created Operator Entity ($E$)**.
+   - **Policy Assignment:** The newly created role assigns the creator the Management Policy ID of the Root Entity role that authorized the creation (or an administrative policy granting full operator management permissions).
+   - **Lifecycle Continuity:** This Operator Entity role immediately grants the creator visibility (`GET /api/v1/operator`, `GET /api/v1/operator/{id}`) and full administrative authority over the Operator and its nested scopes, preventing lifecycle lockouts.
+3. **Transaction Rollback:** The creation of the Operator record, Operator Entity, default Service Class, and the creator's Operator Entity role must occur atomically. If any component (including role creation) fails, the entire transaction is rolled back and no records are persisted.
 
 ---
 
@@ -408,7 +442,9 @@ Operator tenant data is strictly isolated:
    - An assignment on the Root Entity does **not** reveal Operators.
    - An assignment on a Normal Entity does **not** reveal Operators.
    - A Venue-scoped role does **not** reveal Operators, even if the venue belongs to the Operator Entity.
-3. **Operator Sub-Resources:**
+3. **Lifecycle Continuity via Operator Entity Role:**
+   - Non-ROOT creators who provision an Operator obtain visibility and management authority over that Operator strictly via their automatically assigned Operator Entity role (Section 8.3), preserving the invariant that Root Entity roles never leak tenant data.
+4. **Operator Sub-Resources:**
    - **Operator Details:** Requires `operator:READ`.
    - **Service Classes:** Scoped strictly to the Operator. Cross-operator access is blocked.
    - **Operator Devices and Subscribers:** Candidate devices must belong to subscribers of that Operator and pass individual venue scope and `inventory:READ` checks.
@@ -457,25 +493,25 @@ When a structurally eligible scope or user is deleted, associated authorization 
 | `DELETE` | `/api/v1/venue/{id}` | `venue:DELETE` | Target Venue `{id}` | Deletes venue (validates StillInUse) |
 | `GET` | `/api/v1/inventory` | `inventory:READ` | Scoped list | Lists inventory devices visible to user |
 | `GET` | `/api/v1/inventory/{id}` | `inventory:READ` | Device's Venue / Entity | Gets device details |
-| `POST` | `/api/v1/inventory/{id}` | `inventory:CREATE` | Destination `venue` or `entity` in body | Registers inventory tag |
-| `PUT` | `/api/v1/inventory/{id}` | `inventory:UPDATE` | Target Venue / Entity | Updates inventory tag |
+| `POST` | `/api/v1/inventory/{id}` | `inventory:CREATE` | Destination `venue` or `entity` in body (`NotBoth`) | Registers inventory tag |
+| `PUT` | `/api/v1/inventory/{id}` | `inventory:UPDATE` (Dual-Scope if transferring location) | Target Scope / Source & Destination Scopes | Updates inventory tag or transfers device between scopes |
 | `DELETE` | `/api/v1/inventory/{id}` | `inventory:DELETE` | Target Venue / Entity | Deletes inventory tag |
 | `GET` | `/api/v1/managementPolicy` | Authenticated | Global | Lists management policies |
 | `GET` | `/api/v1/managementPolicy/{uuid}` | Authenticated | Global | Gets policy details |
 | `POST` | `/api/v1/managementPolicy/{uuid}` | ROOT Only | Global | Creates management policy |
 | `PUT` | `/api/v1/managementPolicy/{uuid}` | ROOT Only | Global | Updates management policy |
 | `DELETE` | `/api/v1/managementPolicy/{uuid}` | ROOT Only | Global | Deletes policy (checks in-use) |
-| `GET` | `/api/v1/managementRole` | Scoped List | User Roles / Created Users | Lists management roles |
-| `GET` | `/api/v1/managementRole/{id}` | Scoped Read | Target Role Scope | Gets role details |
-| `POST` | `/api/v1/managementRole/{id}` | ROOT / Admin Delegation | Target Entity / Venue Scope (in body; `{id}` is placeholder `0`) | V1: Creates/upserts single role |
-| `POST` | `/api/v2/managementRole/{id}` | ROOT / Admin Delegation | Target Entity / `venueIds` (in body; `{id}` is placeholder `0`) | V2: Multi-venue batch role allocation |
-| `PUT` | `/api/v1/managementRole/{id}` | ROOT / Admin Delegation | Target Role Scope | Updates policy ID on existing role |
-| `PUT` | `/api/v2/managementRole/{id}` | ROOT / Admin Delegation | Target Role Scope | Updates policy ID on existing role |
-| `DELETE` | `/api/v1/managementRole/{id}` | ROOT / Admin Deletion | Target Role Scope | Deletes role |
-| `DELETE` | `/api/v2/managementRole/{id}` | ROOT / Admin Deletion | Target Role Scope | Deletes role |
+| `GET` | `/api/v1/managementRole` | `managementRole:READ` | User Roles / Created Users | Lists management roles |
+| `GET` | `/api/v1/managementRole/{id}` | `managementRole:READ` | Target Role Scope | Gets role details |
+| `POST` | `/api/v1/managementRole/{id}` | `managementRole:CREATE` (Pillars 1–5) | Target Entity / Venue Scope (in body; `{id}` is placeholder `0`) | V1: Creates/upserts single role (exactly 1 user) |
+| `POST` | `/api/v2/managementRole/{id}` | `managementRole:CREATE` (Pillars 1–5) | Target Entity / `venueIds` (in body; `{id}` is placeholder `0`) | V2: Multi-venue batch role allocation (exactly 1 user) |
+| `PUT` | `/api/v1/managementRole/{id}` | `managementRole:UPDATE` (Pillars 1–5) | Target Role Scope | Updates policy ID on existing role |
+| `PUT` | `/api/v2/managementRole/{id}` | `managementRole:UPDATE` (Pillars 1–5) | Target Role Scope | Updates policy ID on existing role |
+| `DELETE` | `/api/v1/managementRole/{id}` | `managementRole:DELETE` (Pillars 1–4) | Target Role Scope | Deletes role |
+| `DELETE` | `/api/v2/managementRole/{id}` | `managementRole:DELETE` (Pillars 1–4) | Target Role Scope | Deletes role |
 | `GET` | `/api/v1/operator` | `operator:READ` | Target Operator Entity | Lists operators visible to user |
 | `GET` | `/api/v1/operator/{id}` | `operator:READ` | Target Operator Entity | Gets operator details |
-| `POST` | `/api/v1/operator/{id}` | `operator:CREATE` | Root Entity Scope (`{id}` is placeholder `0`) | Creates operator and operator entity |
+| `POST` | `/api/v1/operator/{id}` | `operator:CREATE` | Root Entity Scope (`{id}` is placeholder `0`) | Creates operator, companion entity, and assigns creator role |
 | `PUT` | `/api/v1/operator/{id}` | `operator:UPDATE` | Target Operator Entity | Updates operator details |
 | `DELETE` | `/api/v1/operator/{id}` | `operator:DELETE` | Target Operator Entity | Deletes operator and operator entity |
 
