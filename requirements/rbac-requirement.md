@@ -402,8 +402,8 @@ Creating an Operator (`POST /api/v1/operator/{id}`) is a composite provisioning 
    - The default Service Class for the Operator.
 2. **Automatic Operator Entity Creator Role:**
    - Because Root Entity roles strictly hide tenant data and cannot view Operator records (Section 9.4), **OWPROV must automatically create a Management Role for the creator directly on the newly created Operator Entity ($E$)**.
-   - **Policy Assignment:** The newly created role assigns the creator the Management Policy ID of the Root Entity role that authorized the creation (or an administrative policy granting full operator management permissions).
-   - **Lifecycle Continuity:** This Operator Entity role immediately grants the creator visibility (`GET /api/v1/operator`, `GET /api/v1/operator/{id}`) and full administrative authority over the Operator and its nested scopes, preventing lifecycle lockouts.
+   - **Strict Policy Inheritance (No Escalation):** The newly created role assigns the creator the **exact same Management Policy ID** that the user holds on the Root Entity which authorized the creation. The system **MUST NOT** substitute an elevated or full administrative policy; the creator receives strictly identical permissions on the new scope without any privilege escalation.
+   - **Lifecycle Continuity Without Escalation:** This Operator Entity role grants the creator visibility (`GET /api/v1/operator`, `GET /api/v1/operator/{id}`) and ongoing management capabilities over the Operator strictly bounded by the permissions defined in that inherited policy, preventing lifecycle lockouts while fully preserving Section 7's non-escalation invariants.
 3. **Transaction Rollback:** The creation of the Operator record, Operator Entity, default Service Class, and the creator's Operator Entity role must occur atomically. If any component (including role creation) fails, the entire transaction is rolled back and no records are persisted.
 
 ---
