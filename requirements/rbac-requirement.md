@@ -199,13 +199,15 @@ Although the data model uses a JSON array (`"users": [...]`) for backwards compa
 - **Discrete Role Identity:** A role record represents a discrete, non-shared assignment between one user, one exact scope, and one policy. Role batching is supported across *venues* for a single user (via V2 `venueIds`), but **never across multiple users**. Role allocation for multiple users requires separate API requests.
 
 #### Exact Scope Uniqueness Invariant
-Because each Management Role contains exactly one user ID, uniqueness is governed by the composite tuple:
+For any given user, **strictly a single Management Role is permitted per exact scope key**:
 $$\text{Scope Key} = \langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \rangle$$
 - **Entity Scope Role:** `Venue ID` is empty (`""`).
 - **Venue Scope Role:** `Venue ID` is populated (`<venue-uuid>`).
+- **Strict Uniqueness Enforcement:** The system **MUST strictly enforce** that duplicate roles can never exist for the same composite $\langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \rangle$ key under any conditions, including concurrent provisioning requests. A user cannot possess multiple concurrent roles over the exact same scope.
 
 #### Idempotent Upsert Semantics on Creation (`POST`)
 - Submitting an assignment via `POST` for an exact scope key that already exists for that user updates the `managementPolicy` ID and `modified` timestamp on the existing record rather than creating a duplicate row.
+- **Concurrency & Race Condition Prevention:** The system must guarantee that concurrent requests targeting the same user and scope key can never produce duplicate role rows in storage.
 - **Authorization Semantics:** Calling `POST` to upsert an existing role operates as an idempotent, declarative provisioning command authorized at the gateway via the operational `managementRole:CREATE` grant.
 - **Policy Overwrite Safeguard:** Although the existing role's policy is updated in-place, **Pillar 5 (Delegation Subsetting)** strictly prevents privilege escalation: an Admin can only overwrite the existing policy with one whose grants are an equal or weaker subset of the permissions the Admin currently holds on that scope.
 
@@ -243,11 +245,22 @@ Once created, a Management Role's scope and subject are immutable:
 
 | Operation | ROOT | Admin | Other Users |
 | :--- | :---: | :---: | :---: |
-| **List Roles** | All Roles | Roles of users created by Admin | Own Roles Only |
-| **Get Role** | Any Role | Roles of users created by Admin | Own Roles Only |
+| **List Roles** | All Roles | Roles within authorized scopes (`managementRole:READ`) | Own Roles Only (Self-Inspection Exemption) |
+| **Get Role** | Any Role | Roles within authorized scopes (`managementRole:READ`) | Own Roles Only (Self-Inspection Exemption) |
 | **Create / Upsert Role** | Allowed | Allowed only for created users, requiring scope authority, explicit `managementRole:CREATE` grant, and delegation subsetting; self-assignment prohibited | Denied |
 | **Update Policy** | Allowed | Allowed only for created users, requiring scope authority, explicit `managementRole:UPDATE` grant, and delegation subsetting; self-modification prohibited | Denied |
 | **Delete Role** | Allowed | Allowed only for created users, requiring scope authority and explicit `managementRole:DELETE` grant over exact scope; self-deletion prohibited | Denied |
+
+#### Self-Role Inspection Exemption
+To allow client applications and dashboards to discover a logged-in user's active permissions and scope bindings without granting broad IAM administrative privileges:
+1. **Self-Inspection Exemption Rule:** Any authenticated user is inherently authorized to list and retrieve their own assigned Management Roles (where `role.users` contains `Requester.id`), regardless of whether their policy contains an explicit `managementRole:READ` grant.
+2. **Endpoint Behavior on Collection Listing (`GET /api/v1/managementRole`):**
+   - When a functional user lacking `managementRole:READ` queries the role collection, the endpoint automatically filters the result set to return **only roles assigned to that user** (`role.users` contains `Requester.id`).
+   - Requests passing `?user=<own_id>` return the caller's assigned roles.
+3. **Endpoint Behavior on Direct Role Fetch (`GET /api/v1/managementRole/{id}`):**
+   - If the target role's `users` array contains `Requester.id`, the request is granted under the Self-Inspection Exemption even in the absence of a `managementRole:READ` grant.
+4. **Administrative Scoped Role Reading:**
+   - Listing or retrieving roles assigned to **other users** strictly requires an effective `managementRole:READ` grant covering the target Entity or Venue scope. Non-ROOT users without `managementRole:READ` cannot view any role records belonging to other users.
 
 ---
 
@@ -287,6 +300,22 @@ An Admin cannot delegate permissions exceeding their own effective authority:
    - A Venue-scoped role can delegate **only** to that exact Venue. It cannot delegate to child venues or parent entities.
 4. **Rejection:** If any requested permission or scope exceeds the Admin's held authority, the assignment is rejected with:
    > *"Cannot assign permissions stronger than held: missing '<ACCESS>' on '<RESOURCE>'."*
+
+### 7.4 Independent Role Grants and Delegation Revocation Semantics
+The architectural design of OWPROV intentionally implements **independent role assignments with explicit administrative revocation**, rather than dynamic permission chaining:
+1. **Point-in-Time Subsetting Guardrail:**
+   - **Pillar 5 (Delegation Subsetting)** operates strictly as a **provisioning-time gatekeeper** evaluated at the moment a Management Role is created or updated (`POST` or `PUT`).
+   - It guarantees that an Admin cannot allocate permissions that exceed the Admin's own effective authority at the time of assignment.
+2. **Independent Post-Delegation Lifecycle:**
+   - Once successfully assigned, a Management Role is an **independent, first-class grant** bound directly to the recipient user and target scope.
+   - A delegated role is **NOT** dynamically constrained by subsequent changes to the delegating Admin's permissions.
+   - If the delegating Admin is subsequently downgraded, demoted, or stripped of permissions (e.g., if ROOT modifies the Admin's policy from `inventory:FULL` to `inventory:READ`), any subordinate users previously assigned `inventory:FULL` by that Admin **retain their assigned policy unchanged**.
+3. **Explicit Administrative Revocation:**
+   - The system does **not** perform cascading downgrades or dynamic runtime intersections against the assigner's current authority.
+   - Revocation is an **explicit administrative operation**: to modify or withdraw a subordinate user's permissions, an authorized administrator (ROOT or an authorized Admin governing that scope) must explicitly update or delete the subordinate's Management Role (`PUT` or `DELETE /api/v1/managementRole/{id}`).
+4. **Architectural Rationale:**
+   - **Performance and Caching:** Eliminates recursive, multi-hop creator lookups during runtime authorization checks, allowing rapid role and policy evaluation via local memory caches (`AuthCache`).
+   - **Operational Availability:** Prevents cascading outages and unintended loss of service across operational users (e.g., field technicians, automated installers) when a managerial account undergoes administrative updates, offboarding, or credential adjustments.
 
 ---
 
@@ -394,6 +423,17 @@ When an authorized non-ROOT user creates a new Entity, Venue, or Operator:
 - **Atomicity:** The new scope and creator role are committed in the same atomic transaction. If role creation fails, the entire creation transaction is rolled back.
 - **Bypass:** As a system-managed operation, automatic creator-role assignment is not subject to Admin creator-ownership restrictions.
 
+#### Deliberate Policy Inheritance Architecture (Creation Authority vs. Post-Creation Ownership)
+The automatic assignment of the authorizing parent-scope policy onto a newly created scope is a deliberate architectural design:
+1. **Immediate Operational Stewardship:**
+   - In OWPROV, provisioning a new container (Entity or Venue) inherently establishes the creator as its initial operational administrator.
+   - If the system did not inherit operational grants (such as `inventory` or `configuration` permissions held on the parent), the newly created scope would become an unmanageable black box, requiring out-of-band ROOT intervention merely to perform baseline onboarding tasks (e.g., registering inventory tags or binding device configurations).
+2. **Sole Authorizing Scope Isolation:**
+   - The inherited policy is derived **exclusively from the single effective role on the immediate parent scope** (`ParentVenue` or `ParentEntity`) that authorized the creation request.
+   - The system strictly **does not combine policies**, nor does it borrow grants from any broader, administrative, or unrelated roles the user may hold on other scopes.
+3. **Zero Privilege Escalation Guarantee:**
+   - Because parent-scope authority already hierarchically encompasses child containers under Entity fallback (Section 8.2), granting the exact same Management Policy ID on the child scope establishes permission parity with the parent container without introducing any privilege escalation.
+
 #### Composite Operator and Operator Entity Creation Flow
 Creating an Operator (`POST /api/v1/operator/{id}`) is a composite provisioning transaction authorized on the Root Entity (`0000-0000-0000`) requiring `operator:CREATE`:
 1. **Provisioned Resources:** The transaction provisions:
@@ -402,8 +442,8 @@ Creating an Operator (`POST /api/v1/operator/{id}`) is a composite provisioning 
    - The default Service Class for the Operator.
 2. **Automatic Operator Entity Creator Role:**
    - Because Root Entity roles strictly hide tenant data and cannot view Operator records (Section 9.4), **OWPROV must automatically create a Management Role for the creator directly on the newly created Operator Entity ($E$)**.
-   - **Strict Policy Inheritance (No Escalation):** The newly created role assigns the creator the **exact same Management Policy ID** that the user holds on the Root Entity which authorized the creation. The system **MUST NOT** substitute an elevated or full administrative policy; the creator receives strictly identical permissions on the new scope without any privilege escalation.
-   - **Lifecycle Continuity Without Escalation:** This Operator Entity role grants the creator visibility (`GET /api/v1/operator`, `GET /api/v1/operator/{id}`) and ongoing management capabilities over the Operator strictly bounded by the permissions defined in that inherited policy, preventing lifecycle lockouts while fully preserving Section 7's non-escalation invariants.
+   - **Strict Policy Inheritance Design:** The system's intentional architectural design is that the creator **always inherits the exact authorizing Management Policy ID** held on the Root Entity. The system **MUST NOT** fabricate or substitute an elevated administrative policy; the creator's authority on the new Operator Entity is strictly identical to what authorized the creation.
+   - **Guaranteed Visibility and Bounded Authority:** Because `operator:CREATE` inherently expands into `operator:READ` (Section 5.3), strict policy inheritance guarantees immediate visibility to inspect and list the created Operator (`GET /api/v1/operator`, `GET /api/v1/operator/{id}`). Subsequent operations (such as `operator:UPDATE` or `operator:DELETE`) remain strictly governed by whether the authorizing Root policy included those permissions, preventing visibility lockouts while upholding non-escalation invariants.
 3. **Transaction Rollback:** The creation of the Operator record, Operator Entity, default Service Class, and the creator's Operator Entity role must occur atomically. If any component (including role creation) fails, the entire transaction is rolled back and no records are persisted.
 
 ---
@@ -423,14 +463,23 @@ Visibility rules govern collection listing, searching, individual record lookups
 - A child Venue may be visible even when its parent Venue is unassigned or hidden.
 
 ### 9.3 Inventory and Device Visibility
-A device is visible if and only if both applicable scope and `inventory:READ` permit access:
+A device is visible and accessible if and only if the requester holds effective `inventory:READ` authority over the device's binding scope. Because devices can be assigned directly to an Entity OR directly to a Venue (`NotBoth` rule), visibility and authorization are evaluated as follows:
+
+1. **Devices Assigned Directly to an Entity (`entity != ""`, `venue == ""`):**
+   - **Entity Role Required:** Access and visibility strictly require an exact Entity-scoped role on that Entity (`role.entity == Device.entity` with `role.venue == ""`) granting `inventory:READ`.
+   - **Venue Role Exclusion:** A Venue-scoped role **never** grants access to directly Entity-owned devices, even if the venue belongs to that Entity.
+2. **Devices Assigned to a Venue (`venue != ""`):**
+   - **Exact Venue Role Precedence:** If the user holds an exact role on that Venue (`role.venue == Device.venue`), that role governs access. If it grants `inventory:READ`, access is allowed; if it lacks `inventory:READ`, access is denied (shadowing).
+   - **Entity Role Fallback:** If the user does not hold an exact role on that Venue, an Entity-scoped role on the owning Entity (`role.entity == Venue.entity`) granting `inventory:READ` authorizes access to the device (covering the entity and all unshadowed venues inside).
+3. **Unassigned Inventory:**
+   - Unassigned devices (`entity == ""` and `venue == ""`) are visible strictly to `ROOT`.
 
 | Assignment Type | Visible Devices |
 | :--- | :--- |
 | **ROOT** | All devices across all tenants. |
-| **Entity Scope Role (`inventory:READ`)** | Devices in direct and nested Venues of that Entity, **excluding** venues shadowed by an exact Venue role lacking `inventory:READ`. |
-| **Exact Venue Role (`inventory:READ`)** | Devices in that exact Venue only. |
-| **Shadowed Venue (Exact role lacks `inventory:READ`)** | Devices in that Venue remain hidden, even if the Entity role grants `inventory:READ`. |
+| **Entity Scope Role (`inventory:READ`)** | 1. Devices assigned directly to that Entity (`entity == EntityId`, `venue == ""`).<br>2. Devices in direct and nested Venues owned by that Entity, **excluding** venues shadowed by an exact Venue role lacking `inventory:READ`. |
+| **Exact Venue Role (`inventory:READ`)** | Devices in that exact Venue only. Does **not** expose devices assigned directly to the parent Entity. |
+| **Shadowed Venue (Exact role lacks `inventory:READ`)** | Devices in that Venue remain hidden, even if the owning Entity role grants `inventory:READ`. |
 | **Unassigned Scope** | Zero devices visible. |
 
 ### 9.4 Operator Tenancy Isolation
@@ -456,22 +505,22 @@ Operator tenant data is strictly isolated:
 Deletion requires both permission authorization and structural validation.
 
 ### 10.1 Structural Deletion Pre-conditions (`StillInUse`)
-A resource cannot be deleted if it is referenced by or contains dependent records:
+A resource cannot be deleted if it is referenced by or contains dependent physical, topological, or structural records. Management Roles do **not** block scope deletion; instead, they are cascadingly cleaned up once structural dependencies are cleared.
 
 | Resource Type | Blocking Dependencies | Result on Failed Dependency |
 | :--- | :--- | :--- |
 | **Root Entity** | Root Entity cannot be deleted under any circumstances. | Rejected (`CannotDeleteRoot`) |
 | **Operator Entity** | Cannot be deleted through generic Entity deletion. Must delete Operator. | Rejected (`StillInUse`) |
-| **Normal Entity** | Child entities, venues, devices, contacts, locations, configs, roles. | Rejected (`StillInUse`) |
+| **Normal Entity** | Child entities, venues, devices, contacts, locations, configs. | Rejected (`StillInUse`) |
 | **Venue** | Child venues, devices, or active subscriber bindings. | Rejected (`StillInUse`) |
 | **Operator** | Active subscribers or attached entity dependencies. | Rejected (`StillInUse`) |
 | **Management Policy** | Referenced by one or more active Management Roles. | Rejected (`StillInUse`) |
 
 ### 10.2 Cascade Cleanup on Deletion
-When a structurally eligible scope or user is deleted, associated authorization assignments are cleaned up:
-- **Entity Deletion:** Removes all Management Roles associated with that Entity ID.
-- **Venue Deletion:** Removes all Management Roles associated with that Venue ID.
-- **Cache Invalidation:** All affected authorization caches are invalidated immediately.
+When a structurally eligible scope or user is deleted, associated authorization assignments are cleaned up cascadingly in the same atomic transaction:
+- **Entity Deletion:** Once all structural blocking dependencies are cleared, deleting an Entity automatically purges all Management Roles associated with that Entity ID.
+- **Venue Deletion:** Once all structural blocking dependencies are cleared, deleting a Venue automatically purges all Management Roles associated with that Venue ID.
+- **Cache Invalidation:** All affected runtime authorization caches (`AuthCache`) are invalidated immediately upon scope or role deletion.
 - **User Deletion:** All Management Roles assigned to that User ID are deleted.
 - **Admin Deletion:** All Management Roles assigned to that Admin user are deleted. Users created by that Admin become orphan users until reassigned by ROOT.
 
@@ -501,8 +550,8 @@ When a structurally eligible scope or user is deleted, associated authorization 
 | `POST` | `/api/v1/managementPolicy/{uuid}` | ROOT Only | Global | Creates management policy |
 | `PUT` | `/api/v1/managementPolicy/{uuid}` | ROOT Only | Global | Updates management policy |
 | `DELETE` | `/api/v1/managementPolicy/{uuid}` | ROOT Only | Global | Deletes policy (checks in-use) |
-| `GET` | `/api/v1/managementRole` | `managementRole:READ` | User Roles / Created Users | Lists management roles |
-| `GET` | `/api/v1/managementRole/{id}` | `managementRole:READ` | Target Role Scope | Gets role details |
+| `GET` | `/api/v1/managementRole` | `managementRole:READ` (Exempt for self-assigned roles) | User Roles / Created Users | Lists management roles |
+| `GET` | `/api/v1/managementRole/{id}` | `managementRole:READ` (Exempt for self-assigned roles) | Target Role Scope | Gets role details |
 | `POST` | `/api/v1/managementRole/{id}` | `managementRole:CREATE` (Pillars 1–5) | Target Entity / Venue Scope (in body; `{id}` is placeholder `0`) | V1: Creates/upserts single role (exactly 1 user) |
 | `POST` | `/api/v2/managementRole/{id}` | `managementRole:CREATE` (Pillars 1–5) | Target Entity / `venueIds` (in body; `{id}` is placeholder `0`) | V2: Multi-venue batch role allocation (exactly 1 user) |
 | `PUT` | `/api/v1/managementRole/{id}` | `managementRole:UPDATE` (Pillars 1–5) | Target Role Scope | Updates policy ID on existing role |
