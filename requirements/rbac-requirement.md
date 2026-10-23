@@ -201,13 +201,17 @@ Although the data model uses a JSON array (`"users": [...]`) for backwards compa
 #### Exact Scope Uniqueness Invariant
 For any given user, **strictly a single Management Role is permitted per exact scope key**:
 $$\text{Scope Key} = \langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \rangle$$
-- **Entity Scope Role:** `Venue ID` is empty (`""`).
+- **Entity Scope Role:** `Venue ID` is empty string (`""`).
 - **Venue Scope Role:** `Venue ID` is populated (`<venue-uuid>`).
-- **Strict Uniqueness Enforcement:** The system **MUST strictly enforce** that duplicate roles can never exist for the same composite $\langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \rangle$ key under any conditions, including concurrent provisioning requests. A user cannot possess multiple concurrent roles over the exact same scope.
+- **Storage-Level Normalization & Unique Index:**
+  - Uniqueness must be enforced directly at the database engine level via a composite unique constraint or unique index covering $\langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \rangle$.
+  - **Single-User Array Compatibility:** Because each role strictly binds one user (`len(users) == 1`), the storage layer indexes the discrete user identifier (e.g., indexed directly or via normalized column/functional expression) alongside `entity` and `venue`.
+  - **SQL NULL Elimination:** For Entity-scoped roles, `venue` must be strictly normalized to an empty string (`""`) rather than SQL `NULL` (or indexed via `COALESCE(venue, '')`). This guarantees that SQL `NULL != NULL` behavior cannot permit duplicate Entity-level assignments for the same user.
+- **Strict Concurrency Safety:** The database-enforced unique constraint guarantees that duplicate records can never be persisted, even under high-concurrency client requests.
 
 #### Idempotent Upsert Semantics on Creation (`POST`)
 - Submitting an assignment via `POST` for an exact scope key that already exists for that user updates the `managementPolicy` ID and `modified` timestamp on the existing record rather than creating a duplicate row.
-- **Concurrency & Race Condition Prevention:** The system must guarantee that concurrent requests targeting the same user and scope key can never produce duplicate role rows in storage.
+- **Atomic Storage-Level Upsert:** To eliminate Time-of-Check to Time-of-Use (TOCTOU) race conditions, the storage layer must execute role creation and updates using atomic database upsert semantics (e.g., `INSERT ... ON CONFLICT DO UPDATE` or equivalent storage-level atomic transaction).
 - **Authorization Semantics:** Calling `POST` to upsert an existing role operates as an idempotent, declarative provisioning command authorized at the gateway via the operational `managementRole:CREATE` grant.
 - **Policy Overwrite Safeguard:** Although the existing role's policy is updated in-place, **Pillar 5 (Delegation Subsetting)** strictly prevents privilege escalation: an Admin can only overwrite the existing policy with one whose grants are an equal or weaker subset of the permissions the Admin currently holds on that scope.
 
@@ -219,11 +223,15 @@ $$\text{Scope Key} = \langle \text{User ID}, \text{Entity ID}, \text{Venue ID} \
 - Returns a single Management Role object.
 
 #### Multi-Venue Batch Provisioning (V2 API)
-- Designed for atomic, bulk multi-venue role provisioning.
+- Designed for atomic, bulk multi-venue role provisioning for a single user.
 - Request payload accepts `entity` and an array of venue identifiers (`venueIds: ["uuid1", "uuid2"]`).
 - When `venueIds` is omitted or empty (`[]`), creates or upserts one Entity-wide role (`venue = ""`).
-- When `venueIds` contains $K$ venue identifiers, creates or upserts $K$ individual Venue-scoped roles. It does **not** create an Entity-scoped role.
-- **Response Envelope:** Always returns an envelope containing all created/updated roles:
+- When `venueIds` contains venue identifiers, creates or upserts individual Venue-scoped roles (one per distinct venue). It does **not** create an Entity-scoped role.
+- **Input Deduplication and Order Preservation:**
+  - If `venueIds` contains duplicate venue UUIDs (e.g. `["V1", "V2", "V1"]`), the system **explicitly deduplicates the input array** prior to scope validation, authorization checks, and persistence.
+  - Deduplication preserves the **deterministic order of first appearance** of each unique venue.
+  - Supplying duplicate venue identifiers does not trigger request failure, unique constraint violations, or duplicate role records.
+- **Deterministic Response Envelope:** Always returns an envelope containing all created/updated roles corresponding 1-to-1 with the deduplicated venue sequence:
   ```json
   {
     "roles": [
@@ -393,10 +401,13 @@ To prevent security discrepancies where a request might be authorized against on
 
 #### 8.1.4 Dual-Scope Authorization for Cross-Scope Device Movement (`PUT`)
 When updating an existing inventory record to move a device between locations (e.g. updating `venue` or `entity` via `PUT /api/v1/inventory/{id}`):
-1. **Source Scope Authorization:** The requester must hold effective `inventory:UPDATE` on the **originating (source) scope** where the device currently resides (authorizing modification and removal from the existing container).
-2. **Destination Scope Authorization:** The requester must ALSO hold effective `inventory:UPDATE` (or `inventory:CREATE`) on the **destination target scope** (authorizing placement into the new entity or venue).
-3. A user cannot transfer a device into an entity or venue where they do not possess active management authority. If the requester lacks authority over either the source or destination scope, the movement operation is denied.
-4. **Scope Mutual Exclusivity on Update:** Moving a device to a new `venue` automatically detaches it from any previous direct `entity` binding, and moving it to a new direct `entity` clears any previous `venue` binding, preserving the single-scope invariant.
+1. **Operation Model:** Device movement is formally modeled as an **update across two scopes**, rather than as a removal-and-recreation.
+2. **Dual-Scope `inventory:UPDATE` Requirement:** The requester **MUST hold effective `inventory:UPDATE` on both scopes concurrently**:
+   - **Source Scope Authorization:** The requester must hold `inventory:UPDATE` on the **originating (source) scope** where the device currently resides (authorizing modification and detachment from the current container).
+   - **Destination Scope Authorization:** The requester must ALSO hold `inventory:UPDATE` on the **destination target scope** (authorizing placement and ongoing management within the target container).
+3. **Insufficiency of Destination `inventory:CREATE`:** Holding only `inventory:CREATE` on the destination scope is **insufficient** to receive a transferred device. Because transferring a device into a new container introduces an existing managed asset requiring ongoing operational governance, the actor must possess full `inventory:UPDATE` authority at the destination.
+4. **Denial:** If the requester lacks effective `inventory:UPDATE` on either the source or destination scope, the transfer operation is immediately denied.
+5. **Scope Mutual Exclusivity on Update:** Moving a device to a new `venue` automatically detaches it from any previous direct `entity` binding, and moving it to a new direct `entity` clears any previous `venue` binding, preserving the single-scope invariant.
 
 If a scope constraint applies to the resource and resolution fails, the request is immediately denied.
 
@@ -543,7 +554,7 @@ When a structurally eligible scope or user is deleted, associated authorization 
 | `GET` | `/api/v1/inventory` | `inventory:READ` | Scoped list | Lists inventory devices visible to user |
 | `GET` | `/api/v1/inventory/{id}` | `inventory:READ` | Device's Venue / Entity | Gets device details |
 | `POST` | `/api/v1/inventory/{id}` | `inventory:CREATE` | Destination `venue` or `entity` in body (`NotBoth`) | Registers inventory tag |
-| `PUT` | `/api/v1/inventory/{id}` | `inventory:UPDATE` (Dual-Scope if transferring location) | Target Scope / Source & Destination Scopes | Updates inventory tag or transfers device between scopes |
+| `PUT` | `/api/v1/inventory/{id}` | `inventory:UPDATE` (Dual-Scope `inventory:UPDATE` on source and destination if transferring) | Target Scope / Source & Destination Scopes | Updates inventory tag or transfers device between scopes |
 | `DELETE` | `/api/v1/inventory/{id}` | `inventory:DELETE` | Target Venue / Entity | Deletes inventory tag |
 | `GET` | `/api/v1/managementPolicy` | Authenticated | Global | Lists management policies |
 | `GET` | `/api/v1/managementPolicy/{uuid}` | Authenticated | Global | Gets policy details |
