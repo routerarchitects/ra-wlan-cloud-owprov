@@ -111,7 +111,8 @@ The provisioning service integrates with the OpenWifi Security Service (`owsec`)
 | **Create** | Child Venue | `Venue:CREATE` on Exact Parent Venue | Request specifies `parent` Venue ID and leaves `entity` empty. Inherits owning `entity` from parent venue. |
 | **Update** | Entity | `Entity:UPDATE` on Exact Entity | `parent` field is strictly **immutable**. Type cannot be converted. |
 | **Update** | Venue | `Venue:UPDATE` on Exact Venue | `parent` and `entity` references are strictly **immutable**. |
-| **Delete** | Entity / Venue | `Entity:DELETE` / `Venue:DELETE` | Dependency check: Must have zero children, devices, contacts, locations, configs, and subscribers. Returns `StillInUse` on failure. |
+| **Delete** | Entity | `Entity:DELETE` on Exact Entity | Dependency check: Must have zero child entities, venues, devices, contacts, locations, and configs. Returns `StillInUse` on failure. |
+| **Delete** | Venue | `Venue:DELETE` on Exact Venue | Dependency check: Must have zero child venues, devices, contacts, locations, configs, and active subscriber bindings. Returns `StillInUse` on failure. |
 
 ### 4.3 Parent Immutability Rule
 Once an Entity or Venue is created, its parent reference is permanent:
@@ -523,7 +524,7 @@ A resource cannot be deleted if it is referenced by or contains dependent physic
 | **Root Entity** | Root Entity cannot be deleted under any circumstances. | Rejected (`CannotDeleteRoot`) |
 | **Operator Entity** | Cannot be deleted through generic Entity deletion. Must delete Operator. | Rejected (`StillInUse`) |
 | **Normal Entity** | Child entities, venues, devices, contacts, locations, configs. | Rejected (`StillInUse`) |
-| **Venue** | Child venues, devices, or active subscriber bindings. | Rejected (`StillInUse`) |
+| **Venue** | Child venues, devices, contacts, locations, configs, active subscriber bindings. | Rejected (`StillInUse`) |
 | **Operator** | Active subscribers or attached entity dependencies. | Rejected (`StillInUse`) |
 | **Management Policy** | Referenced by one or more active Management Roles. | Rejected (`StillInUse`) |
 
