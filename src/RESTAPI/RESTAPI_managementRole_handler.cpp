@@ -25,7 +25,7 @@ namespace OpenWifi {
 		}
 
 		if (requesterRole != SecurityObjects::ROOT) {
-			if (TargetUser.createdBy != requesterUserId && TargetUser.id != requesterUserId) {
+			if (TargetUser.id == requesterUserId || TargetUser.createdBy != requesterUserId) {
 				ErrorDescription = "You are not authorized to assign or modify roles for users you did not create.";
 				return false;
 			}

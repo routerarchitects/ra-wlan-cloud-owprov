@@ -238,6 +238,24 @@ TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TARGET_USER_A="<user_a_uuid>" VE
 TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TARGET_USER_B="<user_b_uuid>" go test -v . -run TestRoleAssignment_CreatedByOwnershipCheck
 ```
 
+#### **5.4 Admin Self-Assignment Prohibition (Negative)**
+- **Test Function**: `TestAdmin_SelfAssignment_Prohibition_V1`, `TestAdmin_SelfAssignment_Prohibition_V2`
+- **Description**: Verifies an Admin attempting to assign a Management Role to themselves (via V1 or V2 API) is strictly prohibited.
+- **Expected Output**: **`400 Bad Request`** (*"You are not authorized to assign or modify roles for users you did not create."*)
+- **Command**:
+```bash
+go test -v . -run "TestAdmin_SelfAssignment_Prohibition"
+```
+
+#### **5.5 Admin Self-Modification and Self-Deletion Prohibition (Negative & Positive Controls)**
+- **Test Function**: `TestAdmin_SelfModification_And_SelfDeletion_Prohibition`
+- **Description**: Verifies an Admin attempting `PUT` or `DELETE` on a role assigned to themselves is strictly prohibited with 400 Bad Request, while preserving the Self-Inspection Exemption (`GET`) and ROOT administrative governance.
+- **Expected Output**: **`400 Bad Request`** for Admin self-modification and self-deletion; **`200 OK`** for self-inspection GET and ROOT governance.
+- **Command**:
+```bash
+go test -v . -run TestAdmin_SelfModification_And_SelfDeletion_Prohibition
+```
+
 ---
 
 ### 6. Hierarchy, Parent Immutability & Deletion Tests (Sections 4 & 5)
