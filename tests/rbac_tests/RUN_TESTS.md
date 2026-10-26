@@ -136,6 +136,33 @@ TEST_TOKEN="Bearer <token_operator_a>" OPERATOR_B_UUID="<uuid_b>" go test -v . -
 TEST_TOKEN="Bearer <root_entity_user_token>" go test -v . -run TestOperatorIsolation_GetAndList/Root_Entity
 ```
 
+#### **2.4 Operator Creation Auto-Created Creator Role (Positive)**
+- **Test Function**: `TestOperator_CreatorRole_AutoCreated_Positive`
+- **Description**: Verifies that when a non-root Admin creates an Operator via `POST /api/v1/operator/0`, a Management Role is automatically created for the creator directly on the companion Operator Entity with exact policy inheritance, guaranteeing immediate `GET /operator/{id}` visibility and verifying cascade role deletion on operator removal.
+- **Expected Output**: **`200 OK` / `201 Created`**; auto-created role found on companion entity; operator access granted.
+- **Command**:
+```bash
+go test -v . -run TestOperator_CreatorRole_AutoCreated_Positive
+```
+
+#### **2.5 Operator Creation by ROOT Exemption (Positive)**
+- **Test Function**: `TestOperator_CreatorRole_RootExemption_Positive`
+- **Description**: Verifies that ROOT can create operators without requiring a redundant local scoped role.
+- **Expected Output**: **`200 OK` / `201 Created`**
+- **Command**:
+```bash
+go test -v . -run TestOperator_CreatorRole_RootExemption_Positive
+```
+
+#### **2.6 Operator Creation Negative & Edge Validations (Negative)**
+- **Test Function**: `TestOperator_Creation_MissingPermission_Negative`, `TestOperator_Creation_DuplicateRegistrationId_Negative`, `TestOperator_Creation_EntityIdInPayload_Negative`, `TestOperator_CrossTenant_Isolation_Negative`
+- **Description**: Verifies `403 Access Denied` on missing `operator:CREATE`, `400 Bad Request` on duplicate `registrationId`, `400 Bad Request` on body `entityId`, and cross-tenant isolation enforcement.
+- **Expected Output**: **`403 Access Denied`** or **`400 Bad Request`**
+- **Command**:
+```bash
+go test -v . -run "TestOperator_Creation_|TestOperator_CrossTenant_"
+```
+
 ---
 
 ### 3. Subscriber Scope Resolution & CRUD Tests (Section 11.2)

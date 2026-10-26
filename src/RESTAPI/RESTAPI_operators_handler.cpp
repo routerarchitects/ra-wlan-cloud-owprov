@@ -120,6 +120,16 @@ namespace OpenWifi {
 				return BadRequest(RESTAPI::Errors::StillInUse);
 			}
 
+			ManagementRoleDB::RecordVec MatchingRoles;
+			std::string WhereRoles = "entity='" + ORM::Escape(LinkedEntity.info.id) + "'";
+			if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingRoles, WhereRoles)) {
+				for (const auto &Role : MatchingRoles) {
+					StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
+					MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
+				}
+			}
+			AuthCache::GetInstance()->Clear();
+
 			MoveUsage(StorageService()->PolicyDB(), StorageService()->EntityDB(),
 					  LinkedEntity.managementPolicy, "", LinkedEntity.info.id);
 			StorageService()->EntityDB().DeleteRecord("id", LinkedEntity.info.id);
@@ -198,7 +208,20 @@ namespace OpenWifi {
 			DefSer.period = "monthly";
 			DefSer.billingCode = "basic";
 			DefSer.currency = "USD";
-			StorageService()->ServiceClassDB().CreateRecord(DefSer);
+			if (!StorageService()->ServiceClassDB().CreateRecord(DefSer)) {
+				DB_.DeleteRecord("id", NewObject.info.id);
+				StorageService()->EntityDB().DeleteChild("id", NewEntity.parent, NewEntity.info.id);
+				StorageService()->EntityDB().DeleteRecord("id", NewEntity.info.id);
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
+
+			if (!AutoCreateCreatorRole(NewEntity.info.id, "", NewEntity.parent, "")) {
+				StorageService()->ServiceClassDB().DeleteRecord("id", DefSer.info.id);
+				DB_.DeleteRecord("id", NewObject.info.id);
+				StorageService()->EntityDB().DeleteChild("id", NewEntity.parent, NewEntity.info.id);
+				StorageService()->EntityDB().DeleteRecord("id", NewEntity.info.id);
+				return InternalError(RESTAPI::Errors::RecordNotCreated);
+			}
 
 			ProvObjects::Operator New;
 			DB_.GetRecord("id", NewObject.info.id, New);

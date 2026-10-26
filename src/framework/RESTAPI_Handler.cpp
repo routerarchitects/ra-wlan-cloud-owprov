@@ -173,8 +173,8 @@ namespace OpenWifi {
 		}
 
 		const bool HasBoundObjectId =
-			!Id.empty() && Id != "0" &&
-			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0);
+			!Id.empty() &&
+			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0));
 
 		Logger_.information(fmt::format("RESOLVE_DEBUG: Path='{}' Method='{}' Id='{}' HasBoundObjectId={}", Path, Method, Id, HasBoundObjectId));
 		for (const auto &[bKey, bVal] : Bindings_) {
@@ -546,8 +546,8 @@ namespace OpenWifi {
 			}
 		}
 
-		if (!Id.empty() && Id != "0" &&
-			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0)) {
+		if (!Id.empty() &&
+			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0))) {
 			return true;
 		}
 
