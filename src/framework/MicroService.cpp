@@ -2,6 +2,8 @@
 //
 // Created by stephane bourque on 2022-10-26.
 //
+#include <algorithm>
+#include <cctype>
 
 #include "Poco/AsyncChannel.h"
 #include "Poco/ConsoleChannel.h"
@@ -64,9 +66,16 @@ namespace OpenWifi {
 				if (MsgInstanceId.empty()) {
 					std::string rawIdStr = RawId.toString();
 					if (!rawIdStr.empty()) {
-						std::string PrivateEndPoint = Object->optValue<std::string>(KafkaTopics::ServiceEvents::Fields::PRIVATE, "");
-						if (!PrivateEndPoint.empty()) {
-							MsgInstanceId = rawIdStr + "@" + PrivateEndPoint;
+						bool isNumericId = RawId.isInteger() ||
+										   std::all_of(rawIdStr.begin(), rawIdStr.end(),
+													   [](unsigned char c) { return std::isdigit(c); });
+						if (isNumericId) {
+							std::string PrivateEndPoint = Object->optValue<std::string>(KafkaTopics::ServiceEvents::Fields::PRIVATE, "");
+							if (!PrivateEndPoint.empty()) {
+								MsgInstanceId = rawIdStr + "@" + PrivateEndPoint;
+							} else {
+								MsgInstanceId = rawIdStr;
+							}
 						} else {
 							MsgInstanceId = rawIdStr;
 						}

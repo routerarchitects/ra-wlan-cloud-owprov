@@ -1128,6 +1128,119 @@ static void test_legacy_peers_distinct_endpoints_same_numeric_id() {
 	std::cout << "  PASS: test_legacy_peers_distinct_endpoints_same_numeric_id" << std::endl;
 }
 
+// Test 25: Canonical spec §12.4 string UUID in id field without instanceId field lifecycle
+static void test_uuid_in_id_field_lifecycle() {
+	TestMicroService svc;
+
+	std::string uuidA = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+	std::string uuidB = "8c91a320-9883-49d6-b251-178696b957e8";
+	std::string endpointA = "https://owgw-node-a.internal:17004";
+	std::string endpointB = "https://owgw-node-b.internal:17004";
+
+	// 1. JOIN for instance A with UUID in id and NO instanceId field
+	Poco::JSON::Object joinA;
+	joinA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::ID, uuidA);
+	joinA.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, endpointA);
+	joinA.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::KEY, "key-uuid-a");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssJoinA;
+	Poco::JSON::Stringifier::stringify(joinA, ssJoinA);
+	svc.BusMessageReceived("service_events", ssJoinA.str());
+
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Instance A registered");
+	// Crucial: The instance key must be the exact UUID string, NOT uuidA@endpoint
+	TEST_ASSERT(instances.find(uuidA) != instances.end(), "Instance A registered under canonical UUID directly");
+	TEST_ASSERT(instances[uuidA].InstanceId == uuidA, "Stored InstanceId equals canonical UUID");
+	TEST_ASSERT(instances[uuidA].Id == 0, "Non-numeric UUID maps numeric Id to 0");
+	TEST_ASSERT(instances.find(uuidA + "@" + endpointA) == instances.end(), "Must NOT append @PrivateEndPoint for string UUID");
+
+	// 2. JOIN for instance B with UUID in id and NO instanceId field
+	Poco::JSON::Object joinB;
+	joinB.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::ID, uuidB);
+	joinB.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, endpointB);
+	joinB.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::KEY, "key-uuid-b");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssJoinB;
+	Poco::JSON::Stringifier::stringify(joinB, ssJoinB);
+	svc.BusMessageReceived("service_events", ssJoinB.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 2, "Both UUID instances registered");
+	TEST_ASSERT(instances.find(uuidA) != instances.end(), "Instance A still present");
+	TEST_ASSERT(instances.find(uuidB) != instances.end(), "Instance B registered under canonical UUID directly");
+
+	auto routes = svc.GetServices("owgw");
+	TEST_ASSERT(routes.size() == 2, "Both endpoints routed");
+
+	// 3. KEEP_ALIVE for instance A with UUID in id and NO instanceId field
+	uint64_t initialUpdateTime = instances[uuidA].LastUpdate;
+	Poco::JSON::Object kaA;
+	kaA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "keep-alive");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::ID, uuidA);
+	kaA.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, endpointA);
+	kaA.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::KEY, "key-uuid-a");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssKaA;
+	Poco::JSON::Stringifier::stringify(kaA, ssKaA);
+	svc.BusMessageReceived("service_events", ssKaA.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 2, "Instances preserved across KEEP_ALIVE");
+	TEST_ASSERT(instances.find(uuidA) != instances.end(), "Instance A remains registered");
+	TEST_ASSERT(instances[uuidA].LastUpdate >= initialUpdateTime, "LastUpdate refreshed");
+
+	// 4. LEAVE for instance A with UUID in id and NO instanceId field (even if private endpoint changed)
+	Poco::JSON::Object leaveA;
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "leave");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::ID, uuidA);
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, "https://owgw-node-a-changed.internal:17004");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::KEY, "key-uuid-a");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssLeaveA;
+	Poco::JSON::Stringifier::stringify(leaveA, ssLeaveA);
+	svc.BusMessageReceived("service_events", ssLeaveA.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Instance A removed on LEAVE despite changed endpoint");
+	TEST_ASSERT(instances.find(uuidA) == instances.end(), "Instance A cleanly deleted from registry");
+	TEST_ASSERT(instances.find(uuidB) != instances.end(), "Instance B preserved when instance A leaves");
+
+	routes = svc.GetServices("owgw");
+	TEST_ASSERT(routes.size() == 1, "Only instance B route remains");
+	TEST_ASSERT(routes[0].PrivateEndPoint == endpointB, "Instance B endpoint is routed");
+
+	// 5. LEAVE for instance B
+	Poco::JSON::Object leaveB;
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::EVENT, "leave");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::ID, uuidB);
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, endpointB);
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::KEY, "key-uuid-b");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssLeaveB;
+	Poco::JSON::Stringifier::stringify(leaveB, ssLeaveB);
+	svc.BusMessageReceived("service_events", ssLeaveB.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.empty(), "All instances removed after instance B leaves");
+	routes = svc.GetServices("owgw");
+	TEST_ASSERT(routes.empty(), "No routes remain");
+
+	std::cout << "  PASS: test_uuid_in_id_field_lifecycle" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -1155,6 +1268,7 @@ int main() {
 	test_get_services_preserves_distinct_types_sharing_endpoint();
 	test_malformed_event_does_not_bypass_stale_cleanup();
 	test_legacy_peers_distinct_endpoints_same_numeric_id();
+	test_uuid_in_id_field_lifecycle();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;
