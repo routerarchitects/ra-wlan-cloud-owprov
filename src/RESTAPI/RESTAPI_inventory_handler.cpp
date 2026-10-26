@@ -331,6 +331,7 @@ namespace OpenWifi {
 		}
 
 		std::string previous_venue = Existing.venue;
+		std::string previous_entity = Existing.entity;
 
 		auto RemoveSubscriber = GetParameter("removeSubscriber");
 		if (!RemoveSubscriber.empty()) {
@@ -422,6 +423,49 @@ namespace OpenWifi {
 		if (!CreateMove(RawObject, "venue", &InventoryDB::RecordName::venue, Existing, FromVenue,
 						ToVenue, StorageService()->VenueDB()))
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
+
+		if (RawObject->has("venue") && RawObject->has("entity") && !ToVenue.empty() && !ToEntity.empty()) {
+			return BadRequest(RESTAPI::Errors::NotBoth);
+		}
+
+		if (OpenWifi::EntityDB::IsRoot(Existing.entity)) {
+			return BadRequest(RESTAPI::Errors::ValidNonRootUUID);
+		}
+
+		if (RawObject->has("venue") && !ToVenue.empty() && !Existing.entity.empty() && !RawObject->has("entity")) {
+			FromEntity = Existing.entity;
+			ToEntity.clear();
+			Existing.entity.clear();
+		} else if (RawObject->has("entity") && !ToEntity.empty() && !Existing.venue.empty() && !RawObject->has("venue")) {
+			FromVenue = Existing.venue;
+			ToVenue.clear();
+			Existing.venue.clear();
+		}
+
+		const bool isTransferring = (Existing.venue != previous_venue) || (Existing.entity != previous_entity);
+		if (isTransferring && UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			if (Existing.venue.empty() && Existing.entity.empty()) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+
+			if (!Existing.venue.empty()) {
+				ProvObjects::Venue destVenueRecord;
+				if (!StorageService()->VenueDB().GetRecord("id", Existing.venue, destVenueRecord)) {
+					return BadRequest(RESTAPI::Errors::VenueMustExist);
+				}
+				if (!destVenueRecord.subscriber.empty()) {
+					return BadRequest(RESTAPI::Errors::VenueAddDeviceRequiresSubscriberApi);
+				}
+				std::string destEntity = destVenueRecord.entity.empty() ? FindParentEntity(destVenueRecord) : destVenueRecord.entity;
+				if (!IsScopeAuthorized(destEntity, Existing.venue, "inventory", Poco::Net::HTTPRequest::HTTP_PUT)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+			} else if (!Existing.entity.empty()) {
+				if (!IsScopeAuthorized(Existing.entity, "", "inventory", Poco::Net::HTTPRequest::HTTP_PUT)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+			}
+		}
 
 		std::string FromLocation, ToLocation;
 		if (!CreateMove(RawObject, "location", &InventoryDB::RecordName::location, Existing,

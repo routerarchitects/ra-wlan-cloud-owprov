@@ -94,6 +94,43 @@ namespace OpenWifi {
 
 		Logger_.information(fmt::format("AUTH_DEBUG: Resolved TargetEntity='{}' TargetVenue='{}'", TargetEntity, TargetVenue));
 
+		if (IsScopeAuthorized(TargetEntity, TargetVenue, Resource, Method, &Reason)) {
+			return true;
+		}
+
+		if (Reason.empty()) {
+			Reason = "No authorized role matches the required scope and permission.";
+		}
+		Logger_.information(fmt::format("AUTH_DEBUG: Denied for Path='{}'. Reason='{}'", Path, Reason));
+		return false;
+	}
+
+	bool RESTAPIHandler::IsScopeAuthorized(const std::string &TargetEntity,
+										   const std::string &TargetVenue,
+										   const std::string &Resource,
+										   const std::string &Method,
+										   std::string *Reason) {
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
+			return true;
+		}
+
+		std::vector<ProvObjects::ManagementRole> Roles;
+		FindAllUserRoles(UserInfo_.userinfo.id, Roles);
+
+		auto CheckRolePolicy = [&](const ProvObjects::ManagementRole &role) -> bool {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					Logger_.information(fmt::format("AUTH_DEBUG: Policy ID '{}' not found in DB", role.managementPolicy));
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			bool res = PolicyAllows(Policy, Resource, Method);
+			Logger_.information(fmt::format("AUTH_DEBUG: PolicyAllows(policy='{}', resource='{}', method='{}') -> {}", Policy.info.id, Resource, Method, res));
+			return res;
+		};
+
 		if (!TargetVenue.empty()) {
 			bool foundSpecificVenueRole = false;
 			for (const auto &role : Roles) {
@@ -105,7 +142,9 @@ namespace OpenWifi {
 				}
 			}
 			if (foundSpecificVenueRole) {
-				Reason = "Specific venue role policy denied access.";
+				if (Reason) {
+					*Reason = "Specific venue role policy denied access.";
+				}
 				Logger_.information(fmt::format("AUTH_DEBUG: Denied by specific venue role policy"));
 				return false;
 			}
@@ -138,8 +177,9 @@ namespace OpenWifi {
 			}
 		}
 
-		Reason = "No authorized role matches the required scope and permission.";
-		Logger_.information(fmt::format("AUTH_DEBUG: Denied for Path='{}'. Reason='{}'", Path, Reason));
+		if (Reason) {
+			*Reason = "No authorized role matches the required scope and permission.";
+		}
 		return false;
 	}
 

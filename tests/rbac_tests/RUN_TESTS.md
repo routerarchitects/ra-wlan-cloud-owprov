@@ -405,6 +405,82 @@ TEST_TOKEN="Bearer <root_token>" go test -v . -run TestManagementPolicyDeletionP
 
 ---
 
+### **9. Issue 3 (P1): Dual-Scope Inventory Transfer Authorization (`PUT /inventory/{id}`)**
+
+#### **9.1 Lacking Role on Destination Scope (Negative)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Negative: Transfer rejected when actor lacks role on Destination Venue`)
+- **Description**: Verifies that an actor holding `inventory:UPDATE` on the originating venue but lacking an assigned role on the destination venue is rejected with 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/lacks_role
+```
+
+#### **9.2 Destination Scope Has Only `inventory:READ` (Negative)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Negative: Transfer rejected when Destination Venue has only inventory:READ`)
+- **Description**: Verifies that holding only `inventory:READ` on the destination venue is insufficient; the transfer is rejected with 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/only_inventory:READ
+```
+
+#### **9.3 Destination Scope Has Only `inventory:CREATE` (Negative)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Negative: Transfer rejected when Destination Venue has only inventory:CREATE`)
+- **Description**: Verifies Section 8.1.4 Item 3: holding only `inventory:CREATE` on destination scope is insufficient to receive a transferred device; returns 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/only_inventory:CREATE
+```
+
+#### **9.4 Authorized Dual-Scope Transfer (Positive)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Positive: Transfer succeeds when actor holds inventory:UPDATE on both scopes`)
+- **Description**: Verifies that holding effective `inventory:UPDATE` on both source and destination venues allows device transfer with 200 OK and updates container memberships.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/holds_inventory:UPDATE_on_both_scopes
+```
+
+#### **9.5 Mutual Exclusivity Violation on `PUT` (Edge Case)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Edge: Supplying both entity and venue simultaneously is rejected with NotBoth`)
+- **Description**: Verifies that supplying both `entity` and `venue` simultaneously in `PUT /inventory/{id}` is rejected with 400 Bad Request (`NotBoth`).
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/NotBoth
+```
+
+#### **9.6 Single-Scope Invariant Auto-Detachment (Edge Case)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Edge: Moving to Venue automatically clears direct Entity binding`)
+- **Description**: Verifies that moving a directly entity-bound device to a venue automatically detaches it from the entity (`entity == ""`), ensuring the single-scope invariant.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/Moving_to_Venue_automatically_clears
+```
+
+#### **9.7 Detaching to Unassigned Scope Blocked for Non-Root (Edge Case)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Edge: Detaching device to unassigned pool by non-root is rejected`)
+- **Description**: Verifies that non-root actors cannot detach devices into unassigned inventory (`venue: ""` and `entity: ""`), returning 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/Detaching_device_to_unassigned
+```
+
+#### **9.8 ROOT Unconditional Transfer Parity (Positive)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Positive: ROOT user can transfer devices unconditionally`)
+- **Description**: Verifies that ROOT user can move devices between any scopes unconditionally without scope role constraints.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestInventoryDualScopeTransfer/ROOT_user_can_transfer
+```
+
+---
+
 ## Run All Tests Simultaneously
 
 To run all RBAC tests in one single command:
