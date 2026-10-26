@@ -550,13 +550,13 @@ go test -v . -run TestVenueDeletionDependencies/blocked_by_attached_contact
 go test -v . -run TestVenueDeletionDependencies/blocked_by_attached_location
 ```
 
-#### **11.3 Venue Deletion Blocked by Attached Configuration (Negative)**
-- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Negative: Venue deletion blocked by attached configuration with clear error`)
-- **Description**: Verifies Section 4.2 & 10.1 — venue deletion is blocked when device configurations are attached, identifying `configuration profile(s)`.
-- **Expected Output**: **`400 Bad Request`** (*"Still in use. (Cannot delete venue while dependencies exist: 1 configuration profile(s))"*)
+#### **11.3 Venue Deletion Permitted When Configuration Is Attached (Positive)**
+- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Positive: Venue deletion permitted when configuration is attached`)
+- **Description**: Verifies Section 4.2 & 10.1 — venue deletion is not blocked by attached configurations (configurations are detached upon deletion).
+- **Expected Output**: **`200 OK`**
 - **Command**:
 ```bash
-go test -v . -run TestVenueDeletionDependencies/blocked_by_attached_configuration
+go test -v . -run TestVenueDeletionDependencies/Venue_deletion_permitted_when_configuration
 ```
 
 #### **11.4 Venue Deletion Blocked by Child Venue (Negative)**
@@ -575,6 +575,77 @@ go test -v . -run TestVenueDeletionDependencies/blocked_by_child_venue
 - **Command**:
 ```bash
 go test -v . -run TestVenueDeletionDependencies/Management_roles_do_not_block
+```
+
+---
+
+### **12. Issue 6 (P2): Self-Role Inspection Exemption for Functional Users (`GET /managementRole`, `GET /managementRole/{id}`)**
+
+#### **12.1 Functional User Can List Own Roles Without `managementRole:READ` (Positive)**
+- **Test Function**: `TestSelfRoleInspectionExemption` (Sub-test: `Positive: Functional user can list own roles without managementRole:READ`)
+- **Description**: Verifies Section 6.4 — functional callers without `managementRole:READ` get their own assigned roles filtered and returned, without leaking other users' roles.
+- **Expected Output**: **`200 OK`** (contains only caller's roles)
+- **Command**:
+```bash
+go test -v . -run "TestSelfRoleInspectionExemption/Positive:_Functional_user_can_list_own_roles"
+```
+
+#### **12.2 Querying `?user=<own_id>` Returns Own Roles (Positive)**
+- **Test Function**: `TestSelfRoleInspectionExemption` (Sub-test: `Positive: Functional user query with ?user=<own_id> returns own roles`)
+- **Description**: Verifies Section 6.4 — filtering by own user ID returns assigned roles.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run "TestSelfRoleInspectionExemption/Positive:_Functional_user_query_with_\?user=<own_id>"
+```
+
+#### **12.3 Direct Role Fetch by ID under Self-Inspection Exemption (Positive)**
+- **Test Function**: `TestSelfRoleInspectionExemption` (Sub-test: `Positive: Functional user can fetch own role directly by ID`)
+- **Description**: Verifies Section 6.4 — `GET /api/v1/managementRole/{id}` permits direct inspection of own role even without `managementRole:READ`.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run "TestSelfRoleInspectionExemption/Positive:_Functional_user_can_fetch_own_role_directly_by_ID"
+```
+
+#### **12.4 Direct Role Fetch of Other User's Role Denied (Negative)**
+- **Test Function**: `TestSelfRoleInspectionExemption` (Sub-test: `Negative: Functional user fetching other user's role by ID is denied (403)`)
+- **Description**: Verifies Section 6.4 — attempting to fetch another user's role without `managementRole:READ` is rejected with 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run "TestSelfRoleInspectionExemption/Negative:_Functional_user_fetching_other_user's_role"
+```
+
+#### **12.5 Querying `?user=<other_id>` Returns Empty List (Negative)**
+- **Test Function**: `TestSelfRoleInspectionExemption` (Sub-test: `Negative: Functional user querying ?user=<other_user_id> returns empty list`)
+- **Description**: Verifies Section 6.4 — attempting to query another user's roles via `?user=<other>` returns an empty list `[]` (not error, but zero records).
+- **Expected Output**: **`200 OK`** (`roles: []`)
+- **Command**:
+```bash
+go test -v . -run "TestSelfRoleInspectionExemption/Negative:_Functional_user_querying_\?user=<other_user_id>"
+```
+
+---
+
+### **13. Variable Resource Access & Scope Resolution (`GET /variable`)**
+
+#### **13.1 Admin Can Read Variable Block via `?select={uuid}` (Positive)**
+- **Test Function**: `TestVariableAccessAuthorization` (Sub-test: `Positive: Admin can read variable block via ?select={uuid}`)
+- **Description**: Verifies that `/variable` maps to `configuration` permissions, resolves target scope from DB via `?select=`, and allows admin within scope.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run "TestVariableAccessAuthorization/Positive:_Admin_can_read_variable_block_via_\?select={uuid}"
+```
+
+#### **13.2 Admin Can Read Variable Block by Direct UUID Path (Positive)**
+- **Test Function**: `TestVariableAccessAuthorization` (Sub-test: `Positive: Admin can read variable block by direct UUID path`)
+- **Description**: Verifies direct path `/api/v1/variable/{uuid}` resolves target scope and authorizes access.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run "TestVariableAccessAuthorization/Positive:_Admin_can_read_variable_block_by_direct_UUID_path"
 ```
 
 ---

@@ -88,11 +88,51 @@ namespace OpenWifi {
 			}
 
 			if (AllowedEntities.empty() && AllowedVenues.empty()) {
-				if (QB_.CountOnly) {
-					return ReturnCountOnly(0);
+				// Self-Inspection Exemption (Section 6.4):
+				// Functional users lacking managementRole:READ can only inspect their own roles.
+				if (!userParam.empty() && userParam != UserInfo_.userinfo.id) {
+					if (QB_.CountOnly) {
+						return ReturnCountOnly(0);
+					}
+					ProvObjects::ManagementRoleVec EmptyRoles;
+					return MakeJSONObjectArray("roles", EmptyRoles, *this);
 				}
-				ProvObjects::ManagementRoleVec EmptyRoles;
-				return MakeJSONObjectArray("roles", EmptyRoles, *this);
+
+				ProvObjects::ManagementRoleVec SelfRoles;
+				for (const auto &role : RequesterRoles) {
+					if (!policyParam.empty() && role.managementPolicy != policyParam) {
+						continue;
+					}
+					if (!entityParam.empty() && role.entity != entityParam) {
+						continue;
+					}
+					if (!venueParam.empty() && role.venue != venueParam) {
+						continue;
+					}
+					if (!venueParam.empty() && DeniedVenues.count(venueParam)) {
+						continue;
+					}
+					if (!QB_.Select.empty() &&
+						std::find(QB_.Select.begin(), QB_.Select.end(), role.info.id) == QB_.Select.end()) {
+						continue;
+					}
+					SelfRoles.push_back(role);
+				}
+
+				if (QB_.CountOnly) {
+					return ReturnCountOnly(SelfRoles.size());
+				}
+
+				ProvObjects::ManagementRoleVec PaginatedRoles;
+				if (QB_.Offset < SelfRoles.size()) {
+					auto start = SelfRoles.begin() + QB_.Offset;
+					auto end = (QB_.Limit > 0 && QB_.Offset + QB_.Limit < SelfRoles.size())
+								   ? start + QB_.Limit
+								   : SelfRoles.end();
+					PaginatedRoles.assign(start, end);
+				}
+
+				return MakeJSONObjectArray("roles", PaginatedRoles, *this);
 			}
 		}
 
@@ -119,17 +159,20 @@ namespace OpenWifi {
 				}
 
 				if (!isRoot) {
-					if (!role.venue.empty() && DeniedVenues.count(role.venue)) {
-						return BadRequest(RESTAPI::Errors::UnknownId);
-					}
-					bool inScope = false;
-					if (!role.venue.empty() && AllowedVenues.count(role.venue)) {
-						inScope = true;
-					} else if (!role.entity.empty() && AllowedEntities.count(role.entity)) {
-						inScope = true;
-					}
-					if (!inScope) {
-						return BadRequest(RESTAPI::Errors::UnknownId);
+					bool isOwnRole = (std::find(role.users.begin(), role.users.end(), UserInfo_.userinfo.id) != role.users.end());
+					if (!isOwnRole) {
+						if (!role.venue.empty() && DeniedVenues.count(role.venue)) {
+							return BadRequest(RESTAPI::Errors::UnknownId);
+						}
+						bool inScope = false;
+						if (!role.venue.empty() && AllowedVenues.count(role.venue)) {
+							inScope = true;
+						} else if (!role.entity.empty() && AllowedEntities.count(role.entity)) {
+							inScope = true;
+						}
+						if (!inScope) {
+							return BadRequest(RESTAPI::Errors::UnknownId);
+						}
 					}
 				}
 

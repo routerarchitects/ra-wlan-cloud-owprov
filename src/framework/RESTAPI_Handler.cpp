@@ -94,6 +94,21 @@ namespace OpenWifi {
 
 		Logger_.information(fmt::format("AUTH_DEBUG: Resolved TargetEntity='{}' TargetVenue='{}'", TargetEntity, TargetVenue));
 
+		// Self-Role Inspection Exemption (Section 6.4):
+		// Any authenticated user is inherently authorized to inspect their own assigned Management Roles.
+		if (Resource == "managementRole" && Method == Poco::Net::HTTPRequest::HTTP_GET) {
+			auto itRole = Bindings_.find("id");
+			if (itRole != Bindings_.end() && !itRole->second.empty()) {
+				ProvObjects::ManagementRole R;
+				if (StorageService()->RolesDB().GetRecord("id", itRole->second, R)) {
+					if (std::find(R.users.begin(), R.users.end(), UserInfo_.userinfo.id) != R.users.end()) {
+						Logger_.information(fmt::format("AUTH_DEBUG: Granted self-inspection exemption for role '{}'", R.info.id));
+						return true;
+					}
+				}
+			}
+		}
+
 		if (IsScopeAuthorized(TargetEntity, TargetVenue, Resource, Method, &Reason)) {
 			return true;
 		}
