@@ -15,32 +15,40 @@ namespace OpenWifi {
 											[[maybe_unused]] const std::string &DeviceType) {
 		std::lock_guard G(Mutex_);
 
-		uint64_t SN = std::stoull(S, nullptr, 16);
-		if (std::find(std::begin(SNs_), std::end(SNs_), SN) == std::end(SNs_)) {
-			auto insert_point = std::lower_bound(SNs_.begin(), SNs_.end(), SN);
-			SNs_.insert(insert_point, SN);
+		try {
+			uint64_t SN = std::stoull(S, nullptr, 16);
+			if (std::find(std::begin(SNs_), std::end(SNs_), SN) == std::end(SNs_)) {
+				auto insert_point = std::lower_bound(SNs_.begin(), SNs_.end(), SN);
+				SNs_.insert(insert_point, SN);
 
-			auto R = ReverseSerialNumber(S);
-			uint64_t RSN = std::stoull(R, nullptr, 16);
-			auto rev_insert_point = std::lower_bound(Reverse_SNs_.begin(), Reverse_SNs_.end(), RSN);
-			Reverse_SNs_.insert(rev_insert_point, RSN);
+				auto R = ReverseSerialNumber(S);
+				uint64_t RSN = std::stoull(R, nullptr, 16);
+				auto rev_insert_point = std::lower_bound(Reverse_SNs_.begin(), Reverse_SNs_.end(), RSN);
+				Reverse_SNs_.insert(rev_insert_point, RSN);
+			}
+		} catch (const std::exception &) {
+			// Skip non-hex simulated or test serial numbers
 		}
 	}
 
 	void SerialNumberCache::DeleteSerialNumber(const std::string &S) {
 		std::lock_guard G(Mutex_);
 
-		uint64_t SN = std::stoull(S, nullptr, 16);
-		auto It = std::find(SNs_.begin(), SNs_.end(), SN);
-		if (It != SNs_.end()) {
-			SNs_.erase(It);
+		try {
+			uint64_t SN = std::stoull(S, nullptr, 16);
+			auto It = std::find(SNs_.begin(), SNs_.end(), SN);
+			if (It != SNs_.end()) {
+				SNs_.erase(It);
 
-			auto R = ReverseSerialNumber(S);
-			uint64_t RSN = std::stoull(R, nullptr, 16);
-			auto RIt = std::find(Reverse_SNs_.begin(), Reverse_SNs_.end(), RSN);
-			if (RIt != Reverse_SNs_.end()) {
-				Reverse_SNs_.erase(RIt);
+				auto R = ReverseSerialNumber(S);
+				uint64_t RSN = std::stoull(R, nullptr, 16);
+				auto RIt = std::find(Reverse_SNs_.begin(), Reverse_SNs_.end(), RSN);
+				if (RIt != Reverse_SNs_.end()) {
+					Reverse_SNs_.erase(RIt);
+				}
 			}
+		} catch (const std::exception &) {
+			// Skip non-hex simulated or test serial numbers
 		}
 	}
 
@@ -60,37 +68,41 @@ namespace OpenWifi {
 										  std::vector<uint64_t> &A, bool ReverseResult) {
 		std::lock_guard G(Mutex_);
 
-		if (S.length() == 12) {
-			uint64_t SN = std::stoull(S, nullptr, 16);
-			auto It = std::find(SNArr.begin(), SNArr.end(), SN);
-			if (It != SNArr.end()) {
-				A.push_back(ReverseResult ? Reverse(*It) : *It);
-			}
-		} else if (S.length() < 12) {
-			std::string SS{S};
-			SS.insert(SS.end(), 12 - SS.size(), '0');
-			uint64_t SN = std::stoull(SS, nullptr, 16);
-			auto LB = std::lower_bound(SNArr.begin(), SNArr.end(), SN);
-			if (LB != SNArr.end()) {
-				for (; LB != SNArr.end() && HowMany; ++LB, --HowMany) {
-					if (ReverseResult) {
-						const auto TSN =
-							ReverseSerialNumber(Utils::IntToSerialNumber(Reverse(*LB)));
-						if (S == TSN.substr(0, S.size())) {
-							A.emplace_back(Reverse(*LB));
+		try {
+			if (S.length() == 12) {
+				uint64_t SN = std::stoull(S, nullptr, 16);
+				auto It = std::find(SNArr.begin(), SNArr.end(), SN);
+				if (It != SNArr.end()) {
+					A.push_back(ReverseResult ? Reverse(*It) : *It);
+				}
+			} else if (S.length() < 12) {
+				std::string SS{S};
+				SS.insert(SS.end(), 12 - SS.size(), '0');
+				uint64_t SN = std::stoull(SS, nullptr, 16);
+				auto LB = std::lower_bound(SNArr.begin(), SNArr.end(), SN);
+				if (LB != SNArr.end()) {
+					for (; LB != SNArr.end() && HowMany; ++LB, --HowMany) {
+						if (ReverseResult) {
+							const auto TSN =
+								ReverseSerialNumber(Utils::IntToSerialNumber(Reverse(*LB)));
+							if (S == TSN.substr(0, S.size())) {
+								A.emplace_back(Reverse(*LB));
+							} else {
+								break;
+							}
 						} else {
-							break;
-						}
-					} else {
-						const auto TSN = Utils::IntToSerialNumber(*LB);
-						if (S == TSN.substr(0, S.size())) {
-							A.emplace_back(*LB);
-						} else {
-							break;
+							const auto TSN = Utils::IntToSerialNumber(*LB);
+							if (S == TSN.substr(0, S.size())) {
+								A.emplace_back(*LB);
+							} else {
+								break;
+							}
 						}
 					}
 				}
 			}
+		} catch (const std::exception &) {
+			// Skip invalid hex prefix
 		}
 	}
 

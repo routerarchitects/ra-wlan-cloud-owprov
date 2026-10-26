@@ -35,6 +35,7 @@ namespace OpenWifi::Types {
 	typedef std::vector<double> DoubleList;
 
 	struct MicroServiceMeta {
+		std::string InstanceId;
 		uint64_t Id = 0;
 		std::string Type;
 		std::string PrivateEndPoint;
@@ -44,6 +45,8 @@ namespace OpenWifi::Types {
 		uint64_t LastUpdate = 0;
 	};
 
+	typedef std::map<std::string, MicroServiceMeta> MicroServiceInstanceMap;
+	typedef std::map<std::string, MicroServiceInstanceMap> MicroServiceTypeMap;
 	typedef std::map<std::string, MicroServiceMeta> MicroServiceMetaMap;
 	typedef std::vector<MicroServiceMeta> MicroServiceMetaVec;
 } // namespace OpenWifi::Types

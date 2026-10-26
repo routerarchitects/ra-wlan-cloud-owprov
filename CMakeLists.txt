@@ -318,3 +318,29 @@ add_test(NAME kafka_callback_deadlock_test COMMAND kafka_callback_deadlock_test)
 set_tests_properties(kafka_callback_deadlock_test
         PROPERTIES SKIP_RETURN_CODE 77)
 
+add_executable(service_discovery_test
+        tests/framework_tests/ServiceDiscovery_test.cpp
+        src/framework/MicroService.cpp
+        src/framework/MicroServiceFuncs.cpp
+        src/framework/SubSystemServer.cpp
+        src/framework/utils.cpp
+        src/framework/RESTAPI_IntServer.cpp
+        src/framework/RESTAPI_ExtServer.cpp
+        src/framework/AuthClient.cpp
+        src/framework/ALBserver.cpp
+        src/framework/EventBusManager.cpp
+        src/framework/KafkaManager.cpp
+        src/framework/UI_WebSocketClientServer.cpp
+        src/framework/UI_WebSocketClientNotifications.cpp
+)
+target_link_libraries(service_discovery_test PRIVATE
+        ${Poco_LIBRARIES}
+        CppKafka::cppkafka
+        OpenSSL::Crypto
+        OpenSSL::SSL
+        ZLIB::ZLIB
+        resolv
+        fmt::fmt)
+
+add_test(NAME service_discovery_test COMMAND service_discovery_test)
+
