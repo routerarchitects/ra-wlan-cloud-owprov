@@ -530,6 +530,55 @@ go test -v . -run TestManagementRoleDecoupling/Explicit_managementRole:FULL
 
 ---
 
+### **11. Issue 5 (P2): Venue Deletion Structural Dependency Checks (`DELETE /venue/{id}`)**
+
+#### **11.1 Venue Deletion Blocked by Attached Contact (Negative)**
+- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Negative: Venue deletion blocked by attached contact with clear error`)
+- **Description**: Verifies Section 4.2 & 10.1 — venue deletion is blocked when contacts are attached, returning `StillInUse` (1005) with clear message identifying `contact(s)`.
+- **Expected Output**: **`400 Bad Request`** (*"Still in use. (Cannot delete venue while dependencies exist: 1 contact(s))"*)
+- **Command**:
+```bash
+go test -v . -run TestVenueDeletionDependencies/blocked_by_attached_contact
+```
+
+#### **11.2 Venue Deletion Blocked by Attached Location (Negative)**
+- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Negative: Venue deletion blocked by attached location with clear error`)
+- **Description**: Verifies Section 4.2 & 10.1 — venue deletion is blocked when a location is attached, returning `StillInUse` with clear message identifying `attached location`.
+- **Expected Output**: **`400 Bad Request`** (*"Still in use. (Cannot delete venue while dependencies exist: attached location)"*)
+- **Command**:
+```bash
+go test -v . -run TestVenueDeletionDependencies/blocked_by_attached_location
+```
+
+#### **11.3 Venue Deletion Blocked by Attached Configuration (Negative)**
+- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Negative: Venue deletion blocked by attached configuration with clear error`)
+- **Description**: Verifies Section 4.2 & 10.1 — venue deletion is blocked when device configurations are attached, identifying `configuration profile(s)`.
+- **Expected Output**: **`400 Bad Request`** (*"Still in use. (Cannot delete venue while dependencies exist: 1 configuration profile(s))"*)
+- **Command**:
+```bash
+go test -v . -run TestVenueDeletionDependencies/blocked_by_attached_configuration
+```
+
+#### **11.4 Venue Deletion Blocked by Child Venue (Negative)**
+- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Negative: Venue deletion blocked by child venue with clear error`)
+- **Description**: Verifies Section 4.2 & 10.1 — venue deletion is blocked when child venues exist, identifying `child venue(s)`.
+- **Expected Output**: **`400 Bad Request`** (*"Still in use. (Cannot delete venue while dependencies exist: 1 child venue(s))"*)
+- **Command**:
+```bash
+go test -v . -run TestVenueDeletionDependencies/blocked_by_child_venue
+```
+
+#### **11.5 Management Roles Do NOT Block Deletion & Are Cascaded (Positive)**
+- **Test Function**: `TestVenueDeletionDependencies` (Sub-test: `Positive: Management roles do not block deletion and are cascadingly purged`)
+- **Description**: Verifies Section 10.1 & 10.2 — Management Roles do not block venue deletion; deleting a venue returns 200 OK and automatically cascades deletion of all associated Management Roles.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestVenueDeletionDependencies/Management_roles_do_not_block
+```
+
+---
+
 ## Run All Tests Simultaneously
 
 To run all RBAC tests in one single command:

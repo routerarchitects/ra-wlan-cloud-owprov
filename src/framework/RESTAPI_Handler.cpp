@@ -212,6 +212,17 @@ namespace OpenWifi {
 			}
 		}
 
+		if (Id.empty()) {
+			auto selectParam = GetParameter("select", "");
+			if (!selectParam.empty()) {
+				auto commaPos = selectParam.find(',');
+				if (commaPos != std::string::npos) {
+					selectParam = selectParam.substr(0, commaPos);
+				}
+				Id = Poco::trim(selectParam);
+			}
+		}
+
 		const bool HasBoundObjectId =
 			!Id.empty() &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0));
@@ -355,11 +366,17 @@ namespace OpenWifi {
 					return true;
 				}
 				return false;
-			} else if (Path.find("/api/v1/variables") != std::string::npos) {
+			} else if (Path.find("/api/v1/variable") != std::string::npos) {
 				ProvObjects::VariableBlock V;
 				if (StorageService()->VariablesDB().GetRecord("id", Id, V)) {
 					TargetEntity = V.entity;
 					TargetVenue = V.venue;
+					if (TargetEntity.empty() && !TargetVenue.empty()) {
+						ProvObjects::Venue Ven;
+						if (StorageService()->VenueDB().GetRecord("id", TargetVenue, Ven)) {
+							TargetEntity = Ven.entity;
+						}
+					}
 					return true;
 				}
 				return false;
@@ -561,7 +578,7 @@ namespace OpenWifi {
 			(Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
 			 Resource == "configuration" || Resource == "managementRole" ||
 			 Resource == "contact" || Resource == "location" || Resource == "managementPolicy" ||
-			 Resource == "map" || Resource == "variables" || Resource == "serviceClass" ||
+			 Resource == "map" || Resource == "variables" || Resource == "variable" || Resource == "serviceClass" ||
 			 Resource == "operator" || Resource == "overrides" || Resource == "subscriber" ||
 			 Resource == "subscriberDevice" || Resource == "op_contact" ||
 			 Resource == "op_location");
@@ -583,6 +600,17 @@ namespace OpenWifi {
 				if (it != Bindings_.end()) {
 					Id = it->second;
 				}
+			}
+		}
+
+		if (Id.empty()) {
+			auto selectParam = GetParameter("select", "");
+			if (!selectParam.empty()) {
+				auto commaPos = selectParam.find(',');
+				if (commaPos != std::string::npos) {
+					selectParam = selectParam.substr(0, commaPos);
+				}
+				Id = Poco::trim(selectParam);
 			}
 		}
 
@@ -626,6 +654,8 @@ namespace OpenWifi {
 			bool ResourceMatches = false;
 			for (const auto &res : entry.resources) {
 				if (Poco::icompare(res, Resource) == 0 || res == "*" ||
+					((Resource == "variable" || Resource == "variables") && Poco::icompare(res, "configuration") == 0) ||
+					(Resource == "map" && (Poco::icompare(res, "venue") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
 					(Resource == "overrides" && Poco::icompare(res, "inventory") == 0) ||
@@ -802,8 +832,8 @@ namespace OpenWifi {
 			return "location";
 		if (Path.find("/api/v1/map") != std::string::npos)
 			return "map";
-		if (Path.find("/api/v1/variables") != std::string::npos)
-			return "variables";
+		if (Path.find("/api/v1/variable") != std::string::npos)
+			return "variable";
 		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos ||
 			Path.find("/api/v1/RADIUSEndPoints") != std::string::npos)
 			return "radiusEndpoint";
