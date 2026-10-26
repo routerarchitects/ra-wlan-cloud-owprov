@@ -626,8 +626,6 @@ namespace OpenWifi {
 			bool ResourceMatches = false;
 			for (const auto &res : entry.resources) {
 				if (Poco::icompare(res, Resource) == 0 || res == "*" ||
-					((Resource == "managementRole" || Resource == "managementPolicy") &&
-					 (Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
 					(Resource == "overrides" && Poco::icompare(res, "inventory") == 0) ||

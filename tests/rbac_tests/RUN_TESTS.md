@@ -481,6 +481,55 @@ go test -v . -run TestInventoryDualScopeTransfer/ROOT_user_can_transfer
 
 ---
 
+### **10. Issue 4 (P2): Decouple Entity / Operator Permissions from Management Role Administration**
+
+#### **10.1 `entity:FULL` Insufficient for `managementRole:CREATE` (Negative)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Negative: entity:FULL is denied managementRole:CREATE`)
+- **Description**: Verifies Section 7.2 Pillar 4 (Strict Separation of Duties) — holding `entity:FULL` without an explicit `managementRole` grant is rejected with 403 Forbidden when creating/assigning roles.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/entity:FULL_is_denied
+```
+
+#### **10.2 `operator:FULL` Insufficient for `managementRole:CREATE` (Negative)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Negative: operator:FULL is denied managementRole:CREATE`)
+- **Description**: Verifies that holding `operator:FULL` without an explicit `managementRole` grant is rejected with 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/operator:FULL_is_denied
+```
+
+#### **10.3 Non-Root Users Cannot Mutate `managementPolicy` (Negative)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Negative: entity:FULL cannot mutate managementPolicy (ROOT only)`)
+- **Description**: Verifies Section 6.4 — management policy mutation is strictly restricted to ROOT; non-root users holding `entity:FULL` are rejected with 403 Forbidden.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/cannot_mutate_managementPolicy
+```
+
+#### **10.4 Authenticated Users Can Read `managementPolicy` (Positive)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Positive: Authenticated users can GET managementPolicy`)
+- **Description**: Verifies that all authenticated users can view/list management policies (`GET /api/v1/managementPolicy`).
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/can_GET_managementPolicy
+```
+
+#### **10.5 Explicit `managementRole` Grant Authorizes Role Assignment (Positive)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Positive: Explicit managementRole:FULL authorizes managementRole:CREATE`)
+- **Description**: Verifies that holding an explicit `managementRole:FULL` or `managementRole:CREATE` grant authorizes role administration.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/Explicit_managementRole:FULL
+```
+
+---
+
 ## Run All Tests Simultaneously
 
 To run all RBAC tests in one single command:
