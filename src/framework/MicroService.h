@@ -194,12 +194,15 @@ namespace OpenWifi {
         inline void SetConfigContent(const std::string &Content) { ConfigContent_ = Content; }
 
         inline std::optional<OpenWifi::Types::MicroServiceMeta> GetPrivateEndPointServiceKey( const std::string & ServicePrivateEndPoint ) {
-            std::lock_guard   G(InfraMutex_);
-            auto K = Services_.find(ServicePrivateEndPoint);
-            if(K==end(Services_)) {
-                return std::nullopt;
+            std::lock_guard G(InfraMutex_);
+            for (const auto &[_, Instances] : Services_) {
+                for (const auto &[_, Inst] : Instances) {
+                    if (Inst.PrivateEndPoint == ServicePrivateEndPoint) {
+                        return Inst;
+                    }
+                }
             }
-            return K->second;
+            return std::nullopt;
         }
 
 	  private:
@@ -215,7 +218,7 @@ namespace OpenWifi {
 		std::string WWWAssetsDir_;
 		Poco::Crypto::CipherFactory &CipherFactory_ = Poco::Crypto::CipherFactory::defaultFactory();
 		Poco::Crypto::Cipher *Cipher_ = nullptr;
-		Types::MicroServiceMetaMap Services_;
+		Types::MicroServiceTypeMap Services_;
 		std::string MyHash_;
 		std::string MyPrivateEndPoint_;
 		std::string MyPublicEndPoint_;

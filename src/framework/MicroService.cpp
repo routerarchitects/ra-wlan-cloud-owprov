@@ -2,6 +2,8 @@
 //
 // Created by stephane bourque on 2022-10-26.
 //
+#include <algorithm>
+#include <cctype>
 
 #include "Poco/AsyncChannel.h"
 #include "Poco/ConsoleChannel.h"
@@ -36,16 +38,16 @@
 
 namespace OpenWifi {
 
-	static std::string MakeServiceListString(const Types::MicroServiceMetaMap &Services) {
-        std::string SvcList;
-        for (const auto &Svc : Services) {
-            if (SvcList.empty())
-                SvcList = Svc.second.Type;
-            else
-                SvcList += ", " + Svc.second.Type;
-        }
-        return SvcList;
-    }
+	static std::string MakeServiceListString(const Types::MicroServiceTypeMap &Services) {
+		std::string SvcList;
+		for (const auto &[Type, Instances] : Services) {
+			if (!Instances.empty()) {
+				if (!SvcList.empty()) SvcList += ", ";
+				SvcList += Type;
+			}
+		}
+		return SvcList;
+	}
 
 	void MicroService::BusMessageReceived([[maybe_unused]] const std::string &Key,
 										  const std::string &Payload) {
@@ -59,105 +61,116 @@ namespace OpenWifi {
 
 			if (Object->has(KafkaTopics::ServiceEvents::Fields::ID) &&
 				Object->has(KafkaTopics::ServiceEvents::Fields::EVENT)) {
-				uint64_t ID = Object->get(KafkaTopics::ServiceEvents::Fields::ID);
-				auto Event = Object->get(KafkaTopics::ServiceEvents::Fields::EVENT).toString();
-				if (ID != ID_) {
-					if (Event == KafkaTopics::ServiceEvents::EVENT_JOIN ||
-						Event == KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE ||
-						Event == KafkaTopics::ServiceEvents::EVENT_LEAVE) {
-						if (Object->has(KafkaTopics::ServiceEvents::Fields::TYPE) &&
-							Object->has(KafkaTopics::ServiceEvents::Fields::PUBLIC) &&
-							Object->has(KafkaTopics::ServiceEvents::Fields::PRIVATE) &&
-							Object->has(KafkaTopics::ServiceEvents::Fields::VRSN) &&
-							Object->has(KafkaTopics::ServiceEvents::Fields::KEY)) {
-							auto PrivateEndPoint =
-								Object->get(KafkaTopics::ServiceEvents::Fields::PRIVATE).toString();
-							if (Event == KafkaTopics::ServiceEvents::EVENT_LEAVE) {
-								Services_.erase(PrivateEndPoint);
-								poco_information(
-									BusLogger,
-									fmt::format(
-										"Service {} ID={} leaving system.",
-										Object->get(KafkaTopics::ServiceEvents::Fields::PRIVATE)
-											.toString(),
-										ID));
-							} else if (Event == KafkaTopics::ServiceEvents::EVENT_JOIN ||
-									   Event == KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE) {
-								auto ServiceInfo = Types::MicroServiceMeta{
-									.Id = ID,
-									.Type = Poco::toLower(
-										Object->get(KafkaTopics::ServiceEvents::Fields::TYPE)
-											.toString()),
-									.PrivateEndPoint =
-										Object->get(KafkaTopics::ServiceEvents::Fields::PRIVATE)
-											.toString(),
-									.PublicEndPoint =
-										Object->get(KafkaTopics::ServiceEvents::Fields::PUBLIC)
-											.toString(),
-									.AccessKey =
-										Object->get(KafkaTopics::ServiceEvents::Fields::KEY)
-											.toString(),
-									.Version = Object->get(KafkaTopics::ServiceEvents::Fields::VRSN)
-												   .toString(),
-									.LastUpdate = Utils::Now()};
-
-                                auto s1 = MakeServiceListString(Services_);
-								auto PreviousSize = Services_.size();
-								Services_[PrivateEndPoint] = ServiceInfo;
-								auto CurrentSize = Services_.size();
-								if(Event == KafkaTopics::ServiceEvents::EVENT_JOIN) {
-									if(!s1.empty()) {
-										poco_information(
-											BusLogger,
-											fmt::format(
-												"Service {} ID={} is joining the system.",
-												Object
-													->get(
-														KafkaTopics::ServiceEvents::Fields::PRIVATE)
-													.toString(),
-												ID));
-									}
-									std::string SvcList;
-									for (const auto &Svc : Services_) {
-										if (SvcList.empty())
-											SvcList = Svc.second.Type;
-										else
-											SvcList += ", " + Svc.second.Type;
-									}
-									poco_information(
-										BusLogger,
-										fmt::format("Current list of microservices: {}", SvcList));
-								} else if(CurrentSize!=PreviousSize) {
-									poco_information(
-										BusLogger,
-										fmt::format(
-											"Service {} ID={} is being added back in.",
-											Object
-												->get(KafkaTopics::ServiceEvents::Fields::PRIVATE)
-												.toString(),
-											ID));
-								}
+				auto RawId = Object->get(KafkaTopics::ServiceEvents::Fields::ID);
+				std::string MsgInstanceId = Object->optValue<std::string>("instanceId", "");
+				if (MsgInstanceId.empty()) {
+					std::string rawIdStr = RawId.toString();
+					if (!rawIdStr.empty()) {
+						bool isNumericId = RawId.isInteger() ||
+										   std::all_of(rawIdStr.begin(), rawIdStr.end(),
+													   [](unsigned char c) { return std::isdigit(c); });
+						if (isNumericId) {
+							std::string PrivateEndPoint = Object->optValue<std::string>(KafkaTopics::ServiceEvents::Fields::PRIVATE, "");
+							if (!PrivateEndPoint.empty()) {
+								MsgInstanceId = rawIdStr + "@" + PrivateEndPoint;
+							} else {
+								MsgInstanceId = rawIdStr;
 							}
 						} else {
-							poco_information(
-								BusLogger,
-								fmt::format("KAFKA-MSG: invalid event '{}', missing a field.",
-											Event));
+							MsgInstanceId = rawIdStr;
 						}
-					} else if (Event == KafkaTopics::ServiceEvents::EVENT_REMOVE_TOKEN) {
-						if (Object->has(KafkaTopics::ServiceEvents::Fields::TOKEN)) {
-#ifndef TIP_SECURITY_SERVICE
-							AuthClient()->RemovedCachedToken(
-								Object->get(KafkaTopics::ServiceEvents::Fields::TOKEN).toString());
-#endif
+					}
+				}
+				if (MsgInstanceId.empty()) {
+					poco_warning(BusLogger, "KAFKA-MSG: rejecting event, empty instance ID.");
+				} else {
+					// Self-event detection:
+					// Only events carrying this process's unique runtime instance UUID are self-events.
+					// Numeric-only events (legacy peers) are never self-events of this running process,
+					// as this process always stamps its own broadcasts with its runtime UUID.
+					bool isSelf = false;
+					if (Object->has("instanceId") && !Object->get("instanceId").toString().empty()) {
+						isSelf = (Object->get("instanceId").toString() == InstanceId());
+					} else if (!RawId.isInteger()) {
+						isSelf = (RawId.toString() == InstanceId());
+					}
+
+					if (!isSelf) {
+						auto Event = Object->get(KafkaTopics::ServiceEvents::Fields::EVENT).toString();
+						if (Event == KafkaTopics::ServiceEvents::EVENT_JOIN ||
+							Event == KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE ||
+							Event == KafkaTopics::ServiceEvents::EVENT_LEAVE) {
+							if (Object->has(KafkaTopics::ServiceEvents::Fields::TYPE) &&
+								Object->has(KafkaTopics::ServiceEvents::Fields::PUBLIC) &&
+								Object->has(KafkaTopics::ServiceEvents::Fields::PRIVATE) &&
+								Object->has(KafkaTopics::ServiceEvents::Fields::VRSN) &&
+								Object->has(KafkaTopics::ServiceEvents::Fields::KEY)) {
+								auto Type = Poco::toLower(Object->get(KafkaTopics::ServiceEvents::Fields::TYPE).toString());
+								auto PrivateEndPoint = Object->get(KafkaTopics::ServiceEvents::Fields::PRIVATE).toString();
+								if (Type.empty() || PrivateEndPoint.empty()) {
+									poco_information(BusLogger, fmt::format("KAFKA-MSG: invalid event '{}', missing required fields.", Event));
+								} else if (Event == KafkaTopics::ServiceEvents::EVENT_LEAVE) {
+									auto it = Services_.find(Type);
+									if (it != Services_.end()) {
+										it->second.erase(MsgInstanceId);
+										if (it->second.empty()) {
+											Services_.erase(it);
+										}
+									}
+									poco_information(
+										BusLogger,
+										fmt::format("Service {} ID={} leaving system.", PrivateEndPoint, MsgInstanceId));
+								} else if (Event == KafkaTopics::ServiceEvents::EVENT_JOIN ||
+										   Event == KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE) {
+									auto PublicEndPoint = Object->get(KafkaTopics::ServiceEvents::Fields::PUBLIC).toString();
+									auto AccessKey = Object->get(KafkaTopics::ServiceEvents::Fields::KEY).toString();
+									if (PublicEndPoint.empty() || AccessKey.empty()) {
+										poco_information(BusLogger, fmt::format("KAFKA-MSG: invalid event '{}', empty public endpoint or key.", Event));
+									} else {
+										auto ServiceInfo = Types::MicroServiceMeta{
+											.InstanceId = MsgInstanceId,
+											.Id = RawId.isInteger() ? RawId.convert<uint64_t>() : 0,
+											.Type = Type,
+											.PrivateEndPoint = PrivateEndPoint,
+											.PublicEndPoint = PublicEndPoint,
+											.AccessKey = AccessKey,
+											.Version = Object->get(KafkaTopics::ServiceEvents::Fields::VRSN).toString(),
+											.LastUpdate = Utils::Now()};
+
+										auto s1 = MakeServiceListString(Services_);
+										Services_[Type][MsgInstanceId] = ServiceInfo;
+										if (Event == KafkaTopics::ServiceEvents::EVENT_JOIN) {
+											if (!s1.empty()) {
+												poco_information(
+													BusLogger,
+													fmt::format("Service {} ID={} is joining the system.", PrivateEndPoint, MsgInstanceId));
+											}
+											poco_information(
+												BusLogger,
+												fmt::format("Current list of microservices: {}", MakeServiceListString(Services_)));
+										}
+									}
+								}
+							} else {
+								poco_information(
+									BusLogger,
+									fmt::format("KAFKA-MSG: invalid event '{}', missing a field.", Event));
+							}
+						} else if (Event == KafkaTopics::ServiceEvents::EVENT_REMOVE_TOKEN) {
+							if (Object->has(KafkaTopics::ServiceEvents::Fields::TOKEN)) {
+	#ifndef TIP_SECURITY_SERVICE
+								AuthClient()->RemovedCachedToken(
+									Object->get(KafkaTopics::ServiceEvents::Fields::TOKEN).toString());
+	#endif
+							} else {
+								poco_information(
+									BusLogger,
+									fmt::format("KAFKA-MSG: invalid event '{}', missing token", Event));
+							}
 						} else {
-							poco_information(
-								BusLogger,
-								fmt::format("KAFKA-MSG: invalid event '{}', missing token", Event));
+							poco_information(BusLogger,
+									   fmt::format("Unknown Event: {} Source: {}", Event, RawId.toString()));
 						}
-					} else {
-						poco_information(BusLogger,
-								   fmt::format("Unknown Event: {} Source: {}", Event, ID));
 					}
 				}
 			} else {
@@ -166,21 +179,30 @@ namespace OpenWifi {
 				poco_error(BusLogger, fmt::format("Bad bus message: {}", os.str()));
 			}
 
-			auto ServiceHint = Services_.begin();
+			// Prune stale instances (120-second timeout adapted to nested registry)
 			auto now = Utils::Now();
-            auto si1 = Services_.size();
-            auto ss1 = MakeServiceListString(Services_);
-			while(ServiceHint!=Services_.end()) {
-				if ((now - ServiceHint->second.LastUpdate) > 120) {
-					poco_information(BusLogger, fmt::format("ZombieService: Removing service {}, ", ServiceHint->second.PublicEndPoint));
-					ServiceHint = Services_.erase(ServiceHint);
-				} else
-					++ServiceHint;
+			auto si1 = Services_.size();
+			auto ss1 = MakeServiceListString(Services_);
+			for (auto itType = Services_.begin(); itType != Services_.end(); ) {
+				auto &Instances = itType->second;
+				for (auto it = Instances.begin(); it != Instances.end(); ) {
+					if (now >= it->second.LastUpdate && (now - it->second.LastUpdate) > 120) {
+						poco_information(BusLogger, fmt::format("ZombieService: Removing service {}, instance {}", it->second.PublicEndPoint, it->first));
+						it = Instances.erase(it);
+					} else {
+						++it;
+					}
+				}
+				if (Instances.empty()) {
+					itType = Services_.erase(itType);
+				} else {
+					++itType;
+				}
 			}
-            if(Services_.size() != si1) {
-                auto ss2 = MakeServiceListString(Services_);
-                poco_information(BusLogger, fmt::format("Current list of microservices: {} -> {}", ss1, ss2));
-            }
+			if (Services_.size() != si1) {
+				auto ss2 = MakeServiceListString(Services_);
+				poco_information(BusLogger, fmt::format("Current list of microservices: {} -> {}", ss1, ss2));
+			}
 
 		} catch (const Poco::Exception &E) {
 			BusLogger.log(E);
@@ -189,25 +211,31 @@ namespace OpenWifi {
 
 	Types::MicroServiceMetaVec MicroService::GetServices(const std::string &Type) {
 		std::lock_guard G(InfraMutex_);
-
-		auto T = Poco::toLower(Type);
 		Types::MicroServiceMetaVec Res;
-		for (const auto &[_, ServiceRec] : Services_) {
-			if (ServiceRec.Type == T)
-				Res.push_back(ServiceRec);
+		auto it = Services_.find(Poco::toLower(Type));
+		if (it != Services_.end()) {
+			std::set<std::string> SeenEndpoints;
+			for (const auto &[_, Meta] : it->second) {
+				if (SeenEndpoints.insert(Meta.PrivateEndPoint).second) {
+					Res.push_back(Meta);
+				}
+			}
 		}
 		return Res;
 	}
 
 	Types::MicroServiceMetaVec MicroService::GetServices() {
 		std::lock_guard G(InfraMutex_);
-
 		Types::MicroServiceMetaVec Res;
-		for (const auto &[_, ServiceRec] : Services_) {
-			Res.push_back(ServiceRec);
+		for (const auto &[_, Instances] : Services_) {
+			std::set<std::string> SeenEndpoints;
+			for (const auto &[_, Meta] : Instances) {
+				if (SeenEndpoints.insert(Meta.PrivateEndPoint).second) {
+					Res.push_back(Meta);
+				}
+			}
 		}
 		return Res;
-
 	}
 
 	void MicroService::LoadConfigurationFile() {
@@ -820,7 +848,11 @@ namespace OpenWifi {
 	std::string MicroService::MakeSystemEventMessage(const std::string &Type) const {
 		Poco::JSON::Object Obj;
 		Obj.set(KafkaTopics::ServiceEvents::Fields::EVENT, Type);
+
+		// Retain numeric 'id' for legacy peer compatibility; 'instanceId' identifies runtime instances.
 		Obj.set(KafkaTopics::ServiceEvents::Fields::ID, ID_);
+		Obj.set("instanceId", InstanceId());
+
 		Obj.set(KafkaTopics::ServiceEvents::Fields::TYPE, Poco::toLower(DAEMON_APP_NAME));
 		Obj.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, MyPublicEndPoint_);
 		Obj.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, MyPrivateEndPoint_);
