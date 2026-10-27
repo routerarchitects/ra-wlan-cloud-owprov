@@ -205,6 +205,13 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			if (!IsScopeAuthorized(EntityDB::RootUUID(), "", "operator", Poco::Net::HTTPRequest::HTTP_POST) ||
+				!IsScopeAuthorized(EntityDB::RootUUID(), "", "entity", Poco::Net::HTTPRequest::HTTP_POST)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+		}
+
 		if (!ProvObjects::CreateObjectInfo(RawObject, UserInfo_.userinfo, NewObject.info)) {
 			return BadRequest(RESTAPI::Errors::NameMustBeSet);
 		}

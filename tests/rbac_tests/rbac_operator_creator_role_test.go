@@ -441,4 +441,97 @@ func TestOperator_Deletion_AtomicMultiRoleCleanup_Positive(t *testing.T) {
 	}
 }
 
+/*
+ * TestOperatorCreation_NonRootWithoutRootScope_Rejected
+ *
+ * VALIDATES:
+ *   Finding 3 (P1): Non-root users can create root-level operators without an effective root-scope grant.
+ *   - Operator creation (POST /api/v1/operator/0) attaches a companion entity to EntityDB::RootUUID().
+ *   - Callers MUST hold both operator:CREATE and entity:CREATE on the Root Entity.
+ *   - A non-root user holding operator:CREATE or FULL only on a sub-entity/tenant entity MUST be rejected with 403 Forbidden.
+ */
+func TestOperatorCreation_NonRootWithoutRootScope_Rejected(t *testing.T) {
+	rootToken, _, _, entityId, _, _ := getLiveTestTokensAndFixtures(t)
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+
+	// 1. Get an admin token for non-root user
+	var adminToken string
+	var adminUserId string
+	cmd := exec.Command("docker", "exec", "openwifi-postgresql-1", "psql", "-U", "owsec", "-d", "owsec", "-t", "-A", "-c",
+		"SELECT 'Bearer ' || t.token, u.id FROM tokens t JOIN users u ON t.username = u.id WHERE u.userrole = 'admin' ORDER BY t.created DESC LIMIT 1;")
+	out, err := cmd.Output()
+	if err == nil {
+		parts := strings.Split(strings.TrimSpace(string(out)), "|")
+		if len(parts) == 2 {
+			adminToken = parts[0]
+			adminUserId = parts[1]
+		}
+	}
+	if adminToken == "" {
+		adminToken = "Bearer user-admin-operator-a-token"
+		adminUserId = "741f7ce6-7053-40e5-8772-f2197db06853"
+	}
+
+	// 2. Discover full operator policy in DB
+	var fullPolicyId string
+	cmd = exec.Command("docker", "exec", "openwifi-postgresql-1", "psql", "-U", "owprov", "-d", "owprov", "-t", "-A", "-c",
+		"SELECT id FROM policies WHERE entries LIKE '%operator%' AND entries LIKE '%FULL%' LIMIT 1;")
+	out, err = cmd.Output()
+	if err == nil && len(strings.TrimSpace(string(out))) > 10 {
+		fullPolicyId = strings.TrimSpace(string(out))
+	} else {
+		fullPolicyId = "c5d4ea77-26e2-4c4f-b403-5fa906c7635d"
+	}
+
+	// 3. Assign this policy to the admin user ONLY on a sub-entity (child entity, NOT Root Entity)
+	subEntityRolePayload := map[string]interface{}{
+		"name":             fmt.Sprintf("sub-entity-op-role-%d", time.Now().UnixNano()),
+		"description":      "Role granting operator:FULL only on child entity scope",
+		"entity":           entityId,
+		"venue":            "",
+		"managementPolicy": fullPolicyId,
+		"users":            []string{adminUserId},
+	}
+
+	var createdSubRoleId string
+	status, body, err := client.DoRequest("POST", "/managementRole/0", rootToken, subEntityRolePayload)
+	if err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+		var resp struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(body, &resp) == nil && resp.ID != "" {
+			createdSubRoleId = resp.ID
+		}
+	}
+	defer func() {
+		if createdSubRoleId != "" {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", createdSubRoleId), rootToken, nil)
+		}
+	}()
+
+	// 4. Attempt to create a root-level operator using the non-root admin token
+	opPayload := map[string]interface{}{
+		"name":           fmt.Sprintf("unauth-op-%d", time.Now().UnixNano()),
+		"description":    "Unauthorized root operator creation attempt",
+		"registrationId": fmt.Sprintf("unauth-%d", time.Now().UnixNano()%100000),
+	}
+
+	opStatus, opBody, opErr := client.DoRequest("POST", "/operator/0", adminToken, opPayload)
+	if opErr != nil {
+		t.Fatalf("POST /operator/0 failed with network error: %v", opErr)
+	}
+
+	// 5. Must be strictly rejected with 403 Forbidden (or 401 Unauthorized)
+	if opStatus != http.StatusForbidden && opStatus != http.StatusUnauthorized {
+		t.Errorf("Security Violation: Expected 403 Forbidden when creating root operator without Root Entity grant, got %d. Body: %s", opStatus, string(opBody))
+		var createdOp struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(opBody, &createdOp) == nil && createdOp.ID != "" {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/operator/%s", createdOp.ID), rootToken, nil)
+		}
+	}
+}
+
+
 

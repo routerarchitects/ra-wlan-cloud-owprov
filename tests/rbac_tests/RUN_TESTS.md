@@ -172,6 +172,15 @@ go test -v . -run "TestOperator_Creation_|TestOperator_CrossTenant_"
 go test -v . -run TestOperator_Deletion_AtomicMultiRoleCleanup_Positive
 ```
 
+#### **2.8 Non-Root Operator Creation Without Root Scope Grant Blocked (Negative)**
+- **Test Function**: `TestOperatorCreation_NonRootWithoutRootScope_Rejected`
+- **Description**: Verifies Finding 3 (P1) — operator creation (`POST /api/v1/operator/0`) attaches a companion entity to `EntityDB::RootUUID()`. A non-root caller holding `operator:CREATE` or `FULL` on a sub-entity/tenant entity without an effective grant on `EntityDB::RootUUID()` is rejected with `403 Forbidden`.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestOperatorCreation_NonRootWithoutRootScope_Rejected
+```
+
 ---
 
 ### 3. Subscriber Scope Resolution & CRUD Tests (Section 11.2)
@@ -682,6 +691,42 @@ go test -v . -run "TestVariableAccessAuthorization/Positive:_Admin_can_read_vari
 - **Command**:
 ```bash
 go test -v . -run "TestVariableAccessAuthorization/Positive:_Admin_can_read_variable_block_by_direct_UUID_path"
+```
+
+#### **13.3 Multi-ID Selection Skips Unauthorized Variable Block (Negative)**
+- **Test Function**: `TestVariableAccessAuthorization` (Sub-test: `Negative: Multi-ID selection skips unauthorized out-of-scope variable block`)
+- **Description**: Verifies that when a caller queries `GET /api/v1/variable?select=<authorized_id>,<unauthorized_id>`, each ID is evaluated against the caller's allowed scopes with `configuration:READ`; the authorized variable block is returned and the unauthorized variable block is skipped without leaking tenant data.
+- **Expected Output**: **`200 OK`** (only authorized variable blocks included in array)
+- **Command**:
+```bash
+go test -v . -run "TestVariableAccessAuthorization/Negative:_Multi-ID_selection_skips_unauthorized"
+```
+
+#### **13.4 Unfiltered Listing Excludes Out-of-Scope Variable Blocks (Negative)**
+- **Test Function**: `TestVariableAccessAuthorization` (Sub-test: `Negative: Unfiltered listing excludes out-of-scope variable blocks`)
+- **Description**: Verifies that `GET /api/v1/variable` filters variables strictly by caller's allowed entities/venues with `configuration:READ`. Variable blocks from other tenants/entities are excluded.
+- **Expected Output**: **`200 OK`** (strictly scoped variable blocks)
+- **Command**:
+```bash
+go test -v . -run "TestVariableAccessAuthorization/Negative:_Unfiltered_listing_excludes_out-of-scope"
+```
+
+#### **13.5 Variable Block Transfer to Unauthorized Destination Blocked (Negative)**
+- **Test Function**: `TestVariableAccessAuthorization` (Sub-test: `Negative: Transferring variable block to unauthorized entity scope is blocked (403)`)
+- **Description**: Verifies Finding 4 (P1) — when mutating a variable block's `entity` or `venue` via `PUT /api/v1/variable/{uuid}`, the caller must hold `configuration:UPDATE` on the destination scope. Transfers without destination authorization are rejected with `403 Forbidden`.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run "TestVariableAccessAuthorization/Negative:_Transferring_variable_block_to_unauthorized"
+```
+
+#### **13.6 Mutual Exclusivity Violation on Variable Update (Edge Case)**
+- **Test Function**: `TestVariableAccessAuthorization` (Sub-test: `Edge: Supplying both entity and venue on variable update is rejected with 400 NotBoth`)
+- **Description**: Verifies that supplying both `entity` and `venue` simultaneously in `PUT /api/v1/variable/{uuid}` is rejected with `400 Bad Request` (`NotBoth`), preserving the single-scope invariant.
+- **Expected Output**: **`400 Bad Request`**
+- **Command**:
+```bash
+go test -v . -run "TestVariableAccessAuthorization/Edge:_Supplying_both_entity_and_venue"
 ```
 
 ---
