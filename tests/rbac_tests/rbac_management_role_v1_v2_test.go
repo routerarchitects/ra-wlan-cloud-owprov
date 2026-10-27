@@ -1435,16 +1435,25 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		}
 		var resp struct {
 			Roles []struct {
-				Venue string `json:"venue"`
+				ID     string `json:"id"`
+				Entity string `json:"entity"`
+				Venue  string `json:"venue"`
 			} `json:"roles"`
 		}
 		if err := json.Unmarshal(body, &resp); err != nil {
 			t.Fatalf("Failed to parse response: %v", err)
 		}
+		hasEntityRole := false
 		for _, r := range resp.Roles {
 			if r.Venue == fixtures.venueA1 {
 				t.Errorf("Shadowed venue %s leaked in role listing", fixtures.venueA1)
 			}
+			if r.Entity == fixtures.entityA && r.Venue == "" {
+				hasEntityRole = true
+			}
+		}
+		if !hasEntityRole && fixtures.entityA != "" {
+			t.Errorf("Entity-scoped role under %s was incorrectly excluded when user has shadowed denied venue %s", fixtures.entityA, fixtures.venueA1)
 		}
 
 		// 2. Explicit query for shadowed venue returns 200 OK with empty roles list

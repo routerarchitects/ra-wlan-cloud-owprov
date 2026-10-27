@@ -228,14 +228,14 @@ namespace OpenWifi {
 				}
 
 				if (!DeniedVenues.empty()) {
-					std::string deniedClause = "venue NOT IN (";
+					std::string deniedClause = "(venue IS NULL OR venue='' OR venue NOT IN (";
 					bool first = true;
 					for (const auto &id : DeniedVenues) {
 						if (!first) deniedClause += ",";
 						deniedClause += "'" + ORM::Escape(id) + "'";
 						first = false;
 					}
-					deniedClause += ")";
+					deniedClause += "))";
 					if (!Where.empty()) {
 						Where += " AND ";
 					}
