@@ -181,6 +181,15 @@ go test -v . -run TestOperator_Deletion_AtomicMultiRoleCleanup_Positive
 go test -v . -run TestOperatorCreation_NonRootWithoutRootScope_Rejected
 ```
 
+#### **2.9 Non-Root Operator Creation With Root Scope Grant Allowed (Positive)**
+- **Test Function**: `TestOperatorCreation_NonRootWithRootScope_Allowed`
+- **Description**: Verifies that when a non-root Admin holds `operator:CREATE` and `entity:CREATE` on `EntityDB::RootUUID()`, `POST /api/v1/operator/0` successfully resolves target scope to Root Entity without failing on the new unpersisted `registrationId`, and creates the operator.
+- **Expected Output**: **`200 OK` / `201 Created`**
+- **Command**:
+```bash
+go test -v . -run TestOperatorCreation_NonRootWithRootScope_Allowed
+```
+
 ---
 
 ### 3. Subscriber Scope Resolution & CRUD Tests (Section 11.2)

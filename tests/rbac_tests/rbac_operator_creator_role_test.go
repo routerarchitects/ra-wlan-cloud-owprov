@@ -533,5 +533,82 @@ func TestOperatorCreation_NonRootWithoutRootScope_Rejected(t *testing.T) {
 	}
 }
 
+/*
+ * TestOperatorCreation_NonRootWithRootScope_Allowed
+ *
+ * VALIDATES:
+ *   - Scope Resolution handles operator creation before looking up registrationId in DB.
+ *   - A non-root Admin holding operator:CREATE and entity:CREATE on the Root Entity (0000-0000-0000)
+ *     is authorized to create an operator with a brand new registrationId.
+ */
+func TestOperatorCreation_NonRootWithRootScope_Allowed(t *testing.T) {
+	rootToken, _, _, _, _, _ := getLiveTestTokensAndFixtures(t)
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+
+	// 1. Set up an Admin with Root Entity authority (operator + entity FULL)
+	adminToken, adminUserId, fullPolicyId, teardown := getAdminWithRootOperatorPolicy(t, client, rootToken)
+	defer teardown()
+
+	// 2. Also ensure Admin holds entity:CREATE on Root Entity
+	rootEntityRolePayload := map[string]interface{}{
+		"name":             fmt.Sprintf("root-entity-auth-role-%d", time.Now().UnixNano()),
+		"description":      "Authorizing entity role on Root Entity",
+		"entity":           "0000-0000-0000",
+		"venue":            "",
+		"managementPolicy": fullPolicyId,
+		"users":            []string{adminUserId},
+	}
+	var createdEntityRoleId string
+	status, body, err := client.DoRequest("POST", "/managementRole/0", rootToken, rootEntityRolePayload)
+	if err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+		var resp struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(body, &resp) == nil && resp.ID != "" {
+			createdEntityRoleId = resp.ID
+		}
+	}
+	defer func() {
+		if createdEntityRoleId != "" {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", createdEntityRoleId), rootToken, nil)
+		}
+	}()
+
+	// 3. Admin creates an Operator with a brand-new registrationId (no entity in payload)
+	uniqueId := time.Now().UnixNano()
+	opPayload := map[string]interface{}{
+		"name":           fmt.Sprintf("auth-nonroot-op-%d", uniqueId),
+		"description":    "Non-root admin authorized operator creation",
+		"registrationId": fmt.Sprintf("reg-%d", uniqueId%100000),
+	}
+
+	opStatus, opBody, opErr := client.DoRequest("POST", "/operator/0", adminToken, opPayload)
+	if opErr != nil {
+		t.Fatalf("POST /operator/0 failed with network error: %v", opErr)
+	}
+
+	if opStatus != http.StatusOK && opStatus != http.StatusCreated {
+		t.Fatalf("Expected 200 OK / 201 Created for Admin with Root Entity role, got %d. Body: %s", opStatus, string(opBody))
+	}
+
+	var createdOp struct {
+		ID       string `json:"id"`
+		EntityID string `json:"entityId"`
+	}
+	if err := json.Unmarshal(opBody, &createdOp); err != nil {
+		t.Fatalf("Failed to parse operator response: %v", err)
+	}
+	defer func() {
+		if createdOp.ID != "" {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/operator/%s", createdOp.ID), rootToken, nil)
+		}
+	}()
+
+	if createdOp.ID == "" || createdOp.EntityID == "" {
+		t.Errorf("Expected valid ID and EntityID for created operator, got id=%s, entityId=%s", createdOp.ID, createdOp.EntityID)
+	}
+}
+
+
 
 

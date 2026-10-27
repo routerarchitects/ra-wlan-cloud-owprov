@@ -489,6 +489,15 @@ namespace OpenWifi {
 		// SOURCE 3: Request body (entity / venue / operator / parent fields).
 		// Only consulted when params yielded nothing.
 		// ----------------------------------------------------------------
+		// When creating an operator (POST /api/v1/operator/0), its companion entity is always
+		// attached directly to the Root Entity (EntityDB::RootUUID()). Target scope is therefore Root Entity.
+		// Handle this before checking CandidateOperator so a new registrationId is not looked up in DB.
+		if (Path.find("/api/v1/operator") != std::string::npos && Method == Poco::Net::HTTPRequest::HTTP_POST) {
+			TargetEntity = EntityDB::RootUUID();
+			TargetVenue = "";
+			return true;
+		}
+
 		if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_) {
 			if (ParsedBody_->has("entity"))
 				CandidateEntity = ParsedBody_->get("entity").toString();
@@ -578,14 +587,6 @@ namespace OpenWifi {
 			}
 			Logger_.information(fmt::format("RESOLVE_DEBUG: CandidateOperator='{}' not found in OperatorDB or EntityDB", CandidateOperator));
 			return false; // Operator ID provided but not found in DB.
-		}
-
-		// When creating an operator (POST /api/v1/operator/0), its companion entity is always
-		// attached directly to the Root Entity (EntityDB::RootUUID()). Target scope is therefore Root Entity.
-		if (Path.find("/api/v1/operator") != std::string::npos && Method == Poco::Net::HTTPRequest::HTTP_POST) {
-			TargetEntity = EntityDB::RootUUID();
-			TargetVenue = "";
-			return true;
 		}
 
 		// No scope information found from any source.
