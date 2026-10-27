@@ -26,7 +26,7 @@ The required operational model for subscribers differs fundamentally from admini
 1. Administrative users possess configurable, hierarchical grants scoped to `Entity` and `Venue` organizational trees.
 2. Subscribers possess uniform, platform-invariant self-care capabilities strictly bounded to their authenticated user identity and directly owned resources.
 
-To resolve this issue without polluting administrative role storage with synthetic management roles, `owprov` requires a dedicated subscriber authorization path that enforces static, exact-match capabilities and cryptographic ownership scoping.
+To resolve this issue without polluting administrative role storage with synthetic management roles, `owprov` requires a dedicated subscriber authorization path that enforces static, exact-match capabilities and direct resource ownership scoping (`resource.subscriberId == CallerId`).
 
 ---
 
@@ -59,7 +59,7 @@ In-scope functional and security requirements comprise:
 The following areas are explicitly excluded from the scope of Issue #90:
 - **Standalone Configuration Endpoints**: Direct subscriber access to `/api/v1/configuration*` is administrative-only and denied fail-closed.
 - **Administrative RBAC Redesign**: Modifications to administrative role structures, policy inheritance, entity hierarchy, or staff permissions.
-- **Hardware Proof-of-Possession**: Physical hardware entitlement, cryptographic challenge-response proofs, or supply-chain validation during device claiming.
+- **Hardware Proof-of-Possession**: Physical hardware entitlement, challenge-response verification, or supply-chain validation during device claiming.
 - **Database / ORM Overhaul**: General ORM refactoring, database schema migrations, composite index additions, query restructuring, or caching layers.
 - **Platform Concurrency Redesign**: Global transaction management, distributed database locking, or general multi-column race condition refactoring outside exploitable subscriber ownership boundaries.
 - **Cross-Service Reconciliation**: Distributed event synchronization, background state reconciliation between `owprov` and `owgw`, or message bus delivery semantics.
@@ -112,13 +112,15 @@ Authorization MUST fail closed at the earliest failing stage. A request MUST NOT
 
 ### 4.2 Subscriber Capability
 
-1. **Static In-Code Source**: Subscriber capabilities MUST be defined as an immutable, in-memory static policy lookup table compiled directly into `owprov`.
-2. **No Policy Database Dependency**: Subscriber capabilities MUST NOT be loaded from, stored in, or modified by `RolesDB` or `PolicyDB`.
-3. **Zero Method Aliasing**: The system MUST enforce exact-match HTTP method authorization.
+1. **Static In-Code Policy**: Subscriber authorization policy is a static in-code policy and MUST NOT depend on administrative `RolesDB` or `PolicyDB` resolution.
+2. **Dedicated and Explicit**: The subscriber policy MUST be dedicated to subscriber self-service authorization, explicit, and fail-closed.
+3. **No Management Role Dependency**: Subscriber policy MUST NOT be derived from `ManagementRole` records, MUST NOT require `FindAllUserRoles()`, and MUST NOT introduce synthetic management roles into administrative storage.
+4. **Evaluation Precedence**: Subscriber authorization MUST be evaluated before administrative RBAC resolution, `ManagementRole` queries, and staff/operator shortcuts.
+5. **Zero Method Aliasing**: The system MUST enforce exact-match HTTP method authorization.
    - An explicit grant for `GET` MUST NOT authorize `POST`, `PUT`, or `DELETE`.
    - An explicit grant for `PUT` MUST NOT authorize `POST` or `DELETE`.
    - Method-aliasing semantics in `PolicyAllows()` (such as `UPDATE` satisfying `CREATE`) MUST NOT be applied to subscribers.
-4. **Capability Matrix**: The system MUST enforce the following exact-match capability table:
+6. **Capability Matrix**: The system MUST enforce the following exact-match capability matrix:
 
 | Resource | `GET` | `POST` | `PUT` | `DELETE` | Capability Rule |
 |---|:---:|:---:|:---:|:---:|---|
@@ -146,7 +148,7 @@ When an authorized endpoint contains an explicit target resource ID in its URI p
    - For `Venue`: `Venue.subscriber == CallerId`
 3. If the record does not exist, the system MUST return `HTTP 404 Not Found`.
 4. If the record exists but the ownership assertion fails (`Device.subscriberId != CallerId` or `Venue.subscriber != CallerId`), the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
-5. Resource ownership verification MUST be evaluated as an individual cryptographic ownership check; it MUST NOT be delegated to tenant or operator checks.
+5. Resource ownership verification MUST be evaluated as an individual direct resource ownership check (`resource.subscriberId == CallerId` or `venue.subscriber == CallerId`); it MUST NOT be delegated to tenant or operator checks.
 
 ### 4.4 Collection Scoping
 
@@ -160,15 +162,26 @@ When an authorized endpoint contains an explicit target resource ID in its URI p
 ### 4.5 Fail-Closed Authorization
 
 1. **Evaluation Order**: The subscriber authorization pipeline MUST be evaluated in `RESTAPIHandler::RoleIsAuthorized()` BEFORE `FindAllUserRoles()`, BEFORE administrative `ManagementRole` database queries, and BEFORE staff/operator global GET shortcuts.
-2. **Rejection Precedence**: If a subscriber request fails capability checks, path shape validation, ownership verification, or mutation allowlists, the request MUST be rejected immediately with `HTTP 403 ACCESS_DENIED`.
-3. **No Administrative Fallthrough**: A rejected or unmatched subscriber request MUST NOT fall through to administrative RBAC evaluation.
-4. **Ambiguity Rejection**: Any ambiguous, malformed, or missing authorization token, role claim, or path variable MUST result in immediate rejection with `HTTP 403 ACCESS_DENIED`.
+2. **Authorization Rejection Precedence**: If a subscriber request fails authorization conditions—including capability checks, unauthorized method/path operations, missing or unresolvable identity context, foreign resource ownership, or attempts to modify administrative fields—the request MUST fail closed immediately with `HTTP 403 ACCESS_DENIED`.
+3. **Invalid Request and Schema Precedence**: If an authorized subscriber request contains malformed request syntax, unknown top-level mutation fields, unknown nested configuration keys, or unsupported nested configuration structures, the request MUST fail closed with `HTTP 400 Bad Request` in accordance with Section 9.
+4. **No Administrative Fallthrough**: A rejected or unmatched subscriber request MUST NOT fall through to administrative RBAC evaluation.
+5. **Path and Operation Boundary**:
+   - When a requested path or operation is syntactically recognized but represents an action or path variant the subscriber is not permitted to invoke (such as `DELETE /api/v1/subscriber/{id}`, `POST /api/v1/venue`, or `POST /api/v1/subscriberDevice/{non-zero-id}`), authorization MUST fail closed with `HTTP 403 ACCESS_DENIED`.
+   - When the request structure or path parameter itself is malformed or cannot be interpreted as a valid request representation by the parsing layer, the request MUST fail closed with `HTTP 400 Bad Request`.
 
 ### 4.6 Client-Supplied Identity and Scope
 
-1. **Zero Authority**: Client-supplied identifiers—including `subscriberId`, `operatorId`, `tenantId`, `entityId`, and `email`—MUST NOT establish, expand, or substitute for caller authorization context.
-2. **Body Ownership Overrides**: If a client supplies ownership fields in a JSON request payload that conflict with `CallerId`, the system MUST reject the request with `HTTP 403 ACCESS_DENIED` or unconditionally overwrite the fields with `CallerId`.
-3. **Elimination of Tenant Logic**: The subscriber authorization path MUST NOT evaluate `CallerTenant`, tenant equality checks, multi-tenant derivation logic, or operator boundaries. Subscriber authorization is strictly bounded by `CallerId` and direct resource ownership.
+1. **Zero Authority**: Client-supplied identifiers—including `subscriberId`, `operatorId`, `tenantId`, `entityId`, and `email`—have zero authority to establish, override, or expand subscriber ownership or authorization scope.
+2. **Mandatory Caller-Derived Ownership**: For all subscriber-created or subscriber-claimed resources, ownership MUST be derived directly from the authenticated caller (`CallerId`). Specifically, on device creation (`POST /api/v1/subscriberDevice/0`), the implementation MUST enforce:
+   ```cpp
+   newDevice.subscriberId = CallerId;
+   ```
+   A client MUST NOT be able to choose or assign ownership to any other subscriber.
+3. **Handling of Client-Supplied Ownership Fields**: If a client supplies `subscriberId` or any other ownership field in a request payload:
+   - The supplied value MUST NEVER cause ownership to be assigned to that value.
+   - The implementation MAY reject the conflicting field with `HTTP 403 ACCESS_DENIED` or ignore/overwrite it where existing endpoint-specific behavior permits.
+   - The final persisted ownership of the resource MUST always be `CallerId`.
+4. **Elimination of Tenant and Operator Logic**: The subscriber authorization path MUST NOT evaluate `CallerTenant`, tenant equality checks, multi-tenant derivation logic, entity hierarchy checks, or operator boundaries. Subscriber authorization is strictly bounded by `CallerId` and direct resource ownership.
 
 ---
 
@@ -199,9 +212,10 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
 ### 5.1 Subscriber
 
 #### 5.1.1 POST `/api/v1/subscriber`
-1. The system MUST reject direct subscriber invocations of `POST /api/v1/subscriber` as an unauthorized capability.
-2. `POST /api/v1/subscriber` MUST be reserved exclusively for the internal trusted registration flow (Flow A) authenticated via internal service credentials (`X-API-KEY`).
-3. An unauthenticated or Bearer-token-authenticated subscriber calling this endpoint MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED` or `HTTP 401 Unauthorized`.
+1. Direct external invocation without valid trusted internal service authentication MUST NOT be permitted.
+2. `POST /api/v1/subscriber` is part of the trusted internal registration flow (Flow A) and is NOT an authenticated subscriber RBAC capability.
+3. The existing authentication/authorization layer determines the appropriate HTTP status for missing or invalid internal service authentication.
+4. The system MUST NOT evaluate subscriber Bearer-token authorization, MUST NOT perform a `CallerId` ownership assertion, MUST NOT perform a `subscriberId == CallerId` check, and MUST NOT require subscriber role lookups on this endpoint.
 
 #### 5.1.2 GET `/api/v1/subscriber`
 1. The system MUST authorize authenticated subscribers to retrieve their own subscriber profile.
@@ -255,8 +269,12 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
 
 #### 5.2.3 POST `/api/v1/subscriberDevice/0` (Claiming & Creation)
 1. **Mandatory Sentinel Path**: The system MUST permit subscriber device creation exclusively on the sentinel path `/api/v1/subscriberDevice/0`.
-2. **Rejection of Arbitrary Paths**: Any request targeting alternate paths (such as `/new`, empty ID, an existing device UUID, or a MAC address) MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
-3. **Server-Derived Ownership**: The system MUST unconditionally set `newDevice.subscriberId = CallerId`. Client-supplied ownership values in the request body MUST NOT override `CallerId`.
+2. **Rejection of Arbitrary Paths**: Any request targeting alternate, syntactically recognized paths (such as `/new`, empty ID, an existing device UUID, or a MAC address) MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`. Genuinely malformed request syntax or unparseable paths MUST be rejected with `HTTP 400 Bad Request`.
+3. **Server-Derived Ownership**: The system MUST derive device ownership strictly from the authenticated caller:
+   ```cpp
+   newDevice.subscriberId = CallerId;
+   ```
+   Client-supplied ownership values in the request body MUST NOT override `CallerId`. If the client supplies a conflicting `subscriberId`, the system MUST reject the request with `HTTP 403 ACCESS_DENIED` or ignore/overwrite it with `CallerId`, ensuring the persisted device owner is always `CallerId`.
 4. **Device Claim Eligibility**: The system MUST enforce existing claim validations:
    - Serial number MUST NOT already exist in `SubscriberDeviceDB`.
    - Serial number MUST satisfy syntax validation (`ValidSerialNumber`).
@@ -402,10 +420,10 @@ Dedicated Subscriber Authorization Pipeline (CallerId = UserInfo_.userinfo.id)
 Subscriber-Scoped Handler & Business Operation
 ```
 
-1. **Flow A Authentication**: `POST /api/v1/subscriber` is part of Flow A and MUST be authenticated via trusted internal service credentials (`X-API-KEY`).
-2. **No Subscriber RBAC on Registration**: Flow A is NOT a subscriber RBAC capability. Unauthenticated external users MUST NOT invoke `POST /api/v1/subscriber` directly.
+1. **Flow A Authentication**: `POST /api/v1/subscriber` is part of Flow A and MUST be authenticated via trusted internal service credentials (`X-API-KEY`). Direct external invocation without valid trusted internal service authentication MUST NOT be permitted.
+2. **No Subscriber RBAC on Registration**: Flow A is NOT a subscriber RBAC capability. Unauthenticated external users and Bearer-token callers MUST NOT invoke `POST /api/v1/subscriber` without valid internal service credentials. The existing authentication/authorization layer determines the appropriate HTTP status for missing or invalid internal service authentication.
 3. **No Bearer Requirement for Registration**: The system MUST NOT require a Bearer token or authenticated `UserInfo_` context for Flow A.
-4. **No Caller Identity Assertion on Registration**: The system MUST NOT execute `subscriberId == CallerId` assertions on `POST /api/v1/subscriber`.
+4. **No Caller Identity Assertion on Registration**: The system MUST NOT execute `subscriberId == CallerId` assertions, subscriber role lookups, or caller ownership checks on `POST /api/v1/subscriber`.
 
 ---
 
@@ -440,7 +458,7 @@ The system MUST enforce a clear semantic separation between authorization failur
 | - Administrative endpoint access (DELETE /subscriber/{id}, POST venue). |
 | - Standalone configuration API access (/api/v1/configuration*).         |
 | - Mutation of administrative fields (deviceType, managementPolicy).     |
-| - Device creation on non-sentinel path (POST /subscriberDevice/123).    |
+| - Syntactically valid unauthorized path (POST /subscriberDevice/123).   |
 | - Prohibited query parameters (email, macAddress, listOnly on GET).     |
 | - Query parameter signupUUID mismatching CallerId.                      |
 | - Missing or ambiguous subscriber identity/context.                     |
@@ -454,12 +472,12 @@ The system MUST enforce a clear semantic separation between authorization failur
 | violates schema rules, field allowlists, or business integrity rules.   |
 |                                                                         |
 | Enforced for:                                                           |
-| - Malformed JSON payload syntax.                                        |
+| - Malformed request syntax or malformed JSON payload.                   |
 | - Unknown top-level fields in device mutation payload.                  |
-| - Unknown nested Wi-Fi configuration keys.                              |
+| - Unknown nested Wi-Fi configuration keys or unsupported structure.    |
 | - Nested Wi-Fi payload targeting non-wireless interfaces.               |
 | - Nested Wi-Fi payload referencing network: "management".               |
-| - Malformed data types or values outside allowable ranges.              |
+| - Malformed data types, formats, or values outside allowable ranges.    |
 | - Active devices remaining during subscriber self-deletion (StillInUse).|
 +-------------------------------------------------------------------------+
 ```
@@ -469,14 +487,14 @@ The system MUST enforce a clear semantic separation between authorization failur
 ## 10. Security Requirements
 
 1. **Cross-Subscriber Isolation**: The system MUST strictly enforce isolation between subscribers. A subscriber MUST NOT be able to view, claim, mutate, or delete resources belonging to any other subscriber.
-2. **Server-Derived Ownership**: Ownership of newly claimed or created resources MUST be assigned server-side from `CallerId`. Client-supplied ownership values MUST NOT override authenticated caller identity.
+2. **Server-Derived Ownership**: Ownership of newly claimed or created resources MUST be assigned server-side from `CallerId`. Client-supplied ownership values have zero authority to establish, override, or expand caller authorization scope.
 3. **No Operator / Tenant Dependency**: The subscriber authorization path MUST NOT evaluate or depend upon `operatorId`, `CallerTenant`, or tenant equality checks.
 4. **Strict Collection Scoping**: Device collection queries MUST be scoped strictly to `WHERE subscriberId = CallerId` with zero possibility of falling back to operator-wide visibility.
 5. **Exact-Match Capabilities**: The system MUST enforce exact-match HTTP method capabilities with zero method aliasing.
 6. **Property-Level Mutation Allowlists**: The system MUST enforce strict property-level allowlists for all mutations; denylist-based authorization controls MUST NOT be used.
 7. **Administrative Field Immutability**: Administrative, management, and ownership properties MUST remain strictly read-only for subscribers and rejected with `403 ACCESS_DENIED` upon mutation attempt.
 8. **Deep Configuration Protection**: Nested configuration JSON MUST enforce schema and structural constraints, preventing modification of management networks or non-client wireless interfaces.
-9. **Fail-Closed Default**: Any unrecognized path, method, parameter, operation, or incomplete identity context MUST result in immediate denial with `403 ACCESS_DENIED`.
+9. **Fail-Closed Default**: Authorization MUST fail closed with `HTTP 403 ACCESS_DENIED` for any unauthorized capability, unsupported subscriber operation, unauthorized path variant, ownership mismatch, or missing/incomplete identity context. Structurally invalid, malformed, or unparseable request representations MUST fail closed with `HTTP 400 Bad Request`.
 10. **Subscriber-Safe Response Projection**: The system MUST project subscriber profile responses to strip internal operator notes, classification tags, and internal error traces.
 11. **Preservation of Administrative RBAC**: Administrative roles, policies, and privileges MUST remain unaffected by subscriber authorization logic.
 12. **Business Logic Separation**: Authorization logic determines whether an operation is permitted; existing business logic handlers remain responsible for operational integrity checks (e.g., serial syntax, MAC uniqueness).
@@ -502,7 +520,7 @@ The system MUST enforce a clear semantic separation between authorization failur
 - **AC-DEV-2**: An authenticated subscriber calling `GET /api/v1/subscriberDevice/{id}` for an owned device receives the device payload; calling for a foreign device receives `HTTP 403 ACCESS_DENIED`.
 - **AC-DEV-3**: An authenticated subscriber calling `POST /api/v1/subscriberDevice/0` with eligible claim data successfully claims the device, with ownership assigned to `CallerId`.
 - **AC-DEV-4**: An authenticated subscriber calling `POST /api/v1/subscriberDevice/{non_zero_id}` receives `HTTP 403 ACCESS_DENIED`.
-- **AC-DEV-5**: A client-supplied foreign `subscriberId` in the body of `POST /api/v1/subscriberDevice/0` is overridden by `CallerId`.
+- **AC-DEV-5**: A client-supplied foreign `subscriberId` in the body of `POST /api/v1/subscriberDevice/0` cannot establish ownership; the persisted record is assigned to `CallerId` (or the conflicting request is rejected with `HTTP 403 ACCESS_DENIED`).
 - **AC-DEV-6**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on an owned device with allowlisted fields (`ssid`, `wifiPassword`, `parentalControl`) successfully updates the device.
 - **AC-DEV-7**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on a foreign device receives `HTTP 403 ACCESS_DENIED`.
 - **AC-DEV-8**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` with unknown top-level fields receives `HTTP 400 Bad Request`.
@@ -523,7 +541,7 @@ The system MUST enforce a clear semantic separation between authorization failur
 - **AC-CFG-1**: Any direct subscriber request targeting `/api/v1/configuration*` (`GET`, `POST`, `PUT`, `DELETE`) receives `HTTP 403 ACCESS_DENIED`.
 
 ### 11.5 Registration Flow
-- **AC-REG-1**: A direct external request to `POST /api/v1/subscriber` without valid internal service credentials (`X-API-KEY`) is rejected with `HTTP 401 Unauthorized` or `HTTP 403 ACCESS_DENIED`.
+- **AC-REG-1**: A direct external request to `POST /api/v1/subscriber` without valid internal service credentials (`X-API-KEY`) is rejected by the authentication/authorization layer.
 - **AC-REG-2**: An internal service call from UserPortal with valid `X-API-KEY` to `POST /api/v1/subscriber` succeeds and initiates the signup workflow.
 
 ### 11.6 Administrative RBAC Preservation
@@ -589,11 +607,11 @@ Test suites MUST provide comprehensive verification across all authorization bou
 
 ## 13. Non-Functional Constraints
 
-1. **Evaluation Efficiency ($O(1)$ Rejection)**: The subscriber capability and path validation checks MUST execute in-memory with $O(1)$ complexity, rejecting unauthorized subscriber requests before executing expensive database queries.
-2. **Compile-Time Tamper Resistance**: Subscriber capabilities MUST be statically compiled into the binary, preventing runtime tampering via database modification or misconfigured operator policies.
-3. **Delivery Single-PR Invariant**: The complete subscriber authorization pipeline across all three active resources (`Subscriber`, `SubscriberDevice`, `Venue`) MUST be delivered as a single cohesive implementation PR.
-4. **Zero Administrative Performance Overhead**: Evaluating the subscriber check prior to `FindAllUserRoles()` MUST eliminate unnecessary administrative role database queries for subscriber requests.
-5. **Anti-TOCTOU Integrity**: Concurrency controls MUST guarantee that a race condition cannot permit a subscriber to claim or mutate a resource that has transitioned to another owner.
+1. **Evaluation Efficiency**: Subscriber capability and path authorization checks MUST be evaluated before executing administrative role resolution or expensive downstream queries, rejecting unauthorized subscriber requests as early as possible.
+2. **Policy Tamper Resistance**: Subscriber authorization policy MUST be defined statically in code rather than loaded from runtime-configurable database records, preventing unauthorized modification via database state or misconfigured administrative policies.
+3. **Cohesive Scope Delivery**: The complete subscriber authorization pipeline across all three active resources (`Subscriber`, `SubscriberDevice`, `Venue`) MUST function end-to-end to satisfy Issue #90.
+4. **Administrative Query Avoidance**: Evaluating the subscriber authorization branch prior to administrative role resolution MUST avoid executing unnecessary administrative `ManagementRole` database queries for subscriber requests.
+5. **Anti-TOCTOU Integrity**: Concurrency controls MUST guarantee that a race condition cannot permit a subscriber to claim, access, or mutate a resource that belongs to or has transitioned to another owner.
 
 ---
 
