@@ -754,13 +754,13 @@ static void test_peer_discovery_consumer_preserves_shared_route_on_replica_leave
 
 // Test 18: Self-event detection uses instanceId and does not collide on identical default numeric ID
 static void test_self_event_detection_uses_instance_identity() {
-	TestMicroService svc; // Initialized with InstanceId "owprov-1", default numeric ID_ = 10
+	TestMicroService svc; // Initialized with InstanceId "owprov-1", numeric ID = svc.ID()
 
-	// 1. Peer instance "owprov-2" has a different instanceId, but identical numeric ID (10)
+	// 1. Peer instance "owprov-2" has a different instanceId, but identical numeric ID (svc.ID())
 	// Must NOT be ignored because instanceId is present and distinct!
 	Poco::JSON::Object peerMsg;
 	peerMsg.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
-	peerMsg.set(KafkaTopics::ServiceEvents::Fields::ID, (uint64_t)10); // Same numeric ID as svc (ID_ = 10)
+	peerMsg.set(KafkaTopics::ServiceEvents::Fields::ID, svc.ID()); // Same numeric ID as svc (ID_ = svc.ID())
 	peerMsg.set("instanceId", "owprov-2"); // Different instance ID
 	peerMsg.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owprov");
 	peerMsg.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, "https://owprov-internal:17005");
@@ -776,7 +776,7 @@ static void test_self_event_detection_uses_instance_identity() {
 	// 2. Self event with matching instance identity must be ignored
 	Poco::JSON::Object selfMsg;
 	selfMsg.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
-	selfMsg.set(KafkaTopics::ServiceEvents::Fields::ID, (uint64_t)10);
+	selfMsg.set(KafkaTopics::ServiceEvents::Fields::ID, svc.ID());
 	selfMsg.set("instanceId", svc.InstanceId()); // Matches svc.InstanceId()
 	selfMsg.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owprov");
 	selfMsg.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, "https://owprov-internal:17005");
@@ -791,11 +791,11 @@ static void test_self_event_detection_uses_instance_identity() {
 	TEST_ASSERT(instMapAfterSelf.find(svc.InstanceId()) == instMapAfterSelf.end(),
 		"Self-broadcast with matching UUID ignored");
 
-	// 3. Legacy peer event with numeric ID colliding with ID_ = 10 and same type "owprov"
+	// 3. Legacy peer event with numeric ID colliding with ID_ = svc.ID() and same type "owprov"
 	// must NOT be dropped as self-event, because it lacks the process's unique runtime instanceId UUID.
 	Poco::JSON::Object legacyMsg;
 	legacyMsg.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
-	legacyMsg.set(KafkaTopics::ServiceEvents::Fields::ID, (uint64_t)10); // Same numeric ID as svc (ID_ = 10)
+	legacyMsg.set(KafkaTopics::ServiceEvents::Fields::ID, svc.ID()); // Same numeric ID as svc
 	legacyMsg.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owprov");
 	legacyMsg.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, "https://owprov-legacy:17005");
 	legacyMsg.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owprov-legacy.example.com:16005");
@@ -806,7 +806,8 @@ static void test_self_event_detection_uses_instance_identity() {
 
 	svc.BusMessageReceived("service_events", ssLegacy.str());
 	auto instMapAfterLegacy = svc.GetServiceInstances("owprov");
-	TEST_ASSERT(instMapAfterLegacy.find("10@https://owprov-legacy:17005") != instMapAfterLegacy.end(),
+	std::string expectedLegacyKey = fmt::format("{}@https://owprov-legacy:17005", svc.ID());
+	TEST_ASSERT(instMapAfterLegacy.find(expectedLegacyKey) != instMapAfterLegacy.end(),
 		"Legacy peer event with colliding numeric ID and same type must be registered, not dropped as self");
 
 	std::cout << "  PASS: test_self_event_detection_uses_instance_identity" << std::endl;
@@ -1183,7 +1184,10 @@ static void test_uuid_in_id_field_lifecycle() {
 	TEST_ASSERT(routes.size() == 2, "Both endpoints routed");
 
 	// 3. KEEP_ALIVE for instance A with UUID in id and NO instanceId field
-	uint64_t initialUpdateTime = instances[uuidA].LastUpdate;
+	uint64_t oldTimeA = Utils::Now() - 30;
+	uint64_t originalTimeB = instances[uuidB].LastUpdate;
+	svc.SetInstanceLastUpdateForTest("owgw", uuidA, oldTimeA);
+
 	Poco::JSON::Object kaA;
 	kaA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "keep-alive");
 	kaA.set(KafkaTopics::ServiceEvents::Fields::ID, uuidA);
@@ -1199,7 +1203,8 @@ static void test_uuid_in_id_field_lifecycle() {
 	instances = svc.GetServiceInstances("owgw");
 	TEST_ASSERT(instances.size() == 2, "Instances preserved across KEEP_ALIVE");
 	TEST_ASSERT(instances.find(uuidA) != instances.end(), "Instance A remains registered");
-	TEST_ASSERT(instances[uuidA].LastUpdate >= initialUpdateTime, "LastUpdate refreshed");
+	TEST_ASSERT(instances[uuidA].LastUpdate > oldTimeA, "LastUpdate refreshed");
+	TEST_ASSERT(instances[uuidB].LastUpdate == originalTimeB, "Instance B LastUpdate unaffected");
 
 	// 4. LEAVE for instance A with UUID in id and NO instanceId field (even if private endpoint changed)
 	Poco::JSON::Object leaveA;
