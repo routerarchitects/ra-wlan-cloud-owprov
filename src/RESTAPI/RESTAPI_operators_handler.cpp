@@ -119,28 +119,54 @@ namespace OpenWifi {
 				!LinkedEntity.contacts.empty() || !LinkedEntity.configurations.empty()) {
 				return BadRequest(RESTAPI::Errors::StillInUse);
 			}
+		}
 
-			ManagementRoleDB::RecordVec MatchingRoles;
-			std::string WhereRoles = "entity='" + ORM::Escape(LinkedEntity.info.id) + "'";
-			if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingRoles, WhereRoles)) {
-				for (const auto &Role : MatchingRoles) {
-					StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
-					MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
+		try {
+			auto tx = StorageService()->BeginTransaction();
+
+			if (HaveLinkedEntity) {
+				// 1. Delete all management roles assigned to this companion entity in one atomic statement (no record cap)
+				std::string WhereRoles = "entity='" + ORM::Escape(LinkedEntity.info.id) + "'";
+				if (!StorageService()->RolesDB().DeleteRecordsUnsafe(tx, WhereRoles, []() {
+					AuthCache::GetInstance()->Clear();
+				})) {
+					return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+				}
+
+				// 2. Clean up policy in-use tracking for the companion entity
+				MoveUsage(StorageService()->PolicyDB(), StorageService()->EntityDB(),
+						  LinkedEntity.managementPolicy, "", LinkedEntity.info.id);
+
+				// 3. Delete companion entity
+				if (!StorageService()->EntityDB().DeleteRecord(tx, "id", LinkedEntity.info.id)) {
+					return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+				}
+
+				if (!LinkedEntity.parent.empty()) {
+					StorageService()->EntityDB().DeleteChild("id", LinkedEntity.parent, LinkedEntity.info.id);
 				}
 			}
-			AuthCache::GetInstance()->Clear();
 
-			MoveUsage(StorageService()->PolicyDB(), StorageService()->EntityDB(),
-					  LinkedEntity.managementPolicy, "", LinkedEntity.info.id);
-			StorageService()->EntityDB().DeleteRecord("id", LinkedEntity.info.id);
-			StorageService()->EntityDB().DeleteChild("id", LinkedEntity.parent,
-													 LinkedEntity.info.id);
-		}
+			// 4. Delete the operator
+			if (!DB_.DeleteRecord(tx, "id", uuid)) {
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
 
-		if (!DB_.DeleteRecord("id", uuid)) {
+			// 5. Delete service classes
+			std::string scWhere = fmt::format("operatorId='{}'", ORM::Escape(uuid));
+			if (!StorageService()->ServiceClassDB().DeleteRecordsUnsafe(tx, scWhere, []() {})) {
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
+
+			if (!tx.Commit()) {
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
+		} catch (const Poco::Exception &E) {
+			Logger_.log(E);
 			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
 		}
-		StorageService()->ServiceClassDB().DeleteRecords(fmt::format(" operatorId='{}'", uuid));
+
+		AuthCache::GetInstance()->Clear();
 		return OK();
 	}
 

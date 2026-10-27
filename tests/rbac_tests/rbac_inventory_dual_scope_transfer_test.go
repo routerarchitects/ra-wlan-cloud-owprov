@@ -401,5 +401,136 @@ func TestInventoryDualScopeTransfer(t *testing.T) {
 			t.Errorf("Expected 200 OK for ROOT device transfer, got %d. Body: %s", putStatus, string(putBody))
 		}
 	})
+
+	// =========================================================================
+	// Scenario 10: Negative - Transfer of Subscriber-Assigned Device Prohibited for Admin
+	// Validates business invariant: subscriber-assigned inventory cannot be transferred
+	// even when the Admin holds dual-scope authorization on both source and target.
+	// =========================================================================
+	t.Run("Negative: Transfer of subscriber-assigned device prohibited for Admin (400 Bad Request)", func(t *testing.T) {
+		subId := "11111111-2222-3333-4444-555555555555"
+		subSerial := fmt.Sprintf("02%010x", time.Now().UnixNano()&0xFFFFFFFFFF)
+		createPayload := map[string]interface{}{
+			"serialNumber": subSerial,
+			"name":         "test-sub-ap-" + subSerial,
+			"deviceType":   "AP",
+			"venue":        venueAId,
+			"subscriber":   subId,
+		}
+		cStatus, cBody, cErr := client.DoRequest("POST", fmt.Sprintf("/inventory/%s", subSerial), rootToken, createPayload)
+		if cErr != nil || (cStatus != http.StatusOK && cStatus != http.StatusCreated) {
+			t.Fatalf("Failed to create subscriber inventory device: status=%d, err=%v, body=%s", cStatus, cErr, string(cBody))
+		}
+		defer func() {
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/inventory/%s?removeSubscriber=%s", subSerial, subId), rootToken, nil)
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/inventory/%s", subSerial), rootToken, nil)
+		}()
+
+		// Admin holds UPDATE on both Venue A and Venue B
+		_, cleanupRoleA := createRoleForAdmin(entityId, venueAId, policyUpdateId)
+		defer cleanupRoleA()
+		_, cleanupRoleB := createRoleForAdmin(entityId, venueBId, policyUpdateId)
+		defer cleanupRoleB()
+
+		putPayload := map[string]interface{}{
+			"venue": venueBId,
+		}
+		putStatus, putBody, putErr := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s", subSerial), adminToken, putPayload)
+		if putErr != nil {
+			t.Fatalf("PUT request failed: %v", putErr)
+		}
+
+		if putStatus != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for Admin transferring subscriber device, got %d. Body: %s", putStatus, string(putBody))
+		}
+		if !strings.Contains(string(putBody), "Subscriber-assigned inventory cannot be transferred") &&
+			!strings.Contains(string(putBody), "1005") {
+			t.Logf("Notice: Response description: %s", string(putBody))
+		}
+	})
+
+	// =========================================================================
+	// Scenario 11: Negative - Transfer of Subscriber-Assigned Device Prohibited for ROOT
+	// Validates business invariant: subscriber-assigned inventory cannot be transferred
+	// even by ROOT user (must remove subscriber first).
+	// =========================================================================
+	t.Run("Negative: Transfer of subscriber-assigned device prohibited for ROOT (400 Bad Request)", func(t *testing.T) {
+		subId := "22222222-3333-4444-5555-666666666666"
+		subSerial := fmt.Sprintf("02%010x", time.Now().UnixNano()&0xFFFFFFFFFF)
+		createPayload := map[string]interface{}{
+			"serialNumber": subSerial,
+			"name":         "test-sub-ap-root-" + subSerial,
+			"deviceType":   "AP",
+			"venue":        venueAId,
+			"subscriber":   subId,
+		}
+		cStatus, cBody, cErr := client.DoRequest("POST", fmt.Sprintf("/inventory/%s", subSerial), rootToken, createPayload)
+		if cErr != nil || (cStatus != http.StatusOK && cStatus != http.StatusCreated) {
+			t.Fatalf("Failed to create subscriber inventory device: status=%d, err=%v, body=%s", cStatus, cErr, string(cBody))
+		}
+		defer func() {
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/inventory/%s?removeSubscriber=%s", subSerial, subId), rootToken, nil)
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/inventory/%s", subSerial), rootToken, nil)
+		}()
+
+		putPayload := map[string]interface{}{
+			"venue": venueBId,
+		}
+		putStatus, putBody, putErr := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s", subSerial), rootToken, putPayload)
+		if putErr != nil {
+			t.Fatalf("PUT request failed: %v", putErr)
+		}
+
+		if putStatus != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for ROOT transferring subscriber device, got %d. Body: %s", putStatus, string(putBody))
+		}
+	})
+
+	// =========================================================================
+	// Scenario 12: Positive - Transfer Permitted After Subscriber Removed
+	// Once subscriber is removed via ?removeSubscriber=, device can be transferred.
+	// =========================================================================
+	t.Run("Positive: Transfer permitted after subscriber assignment removed", func(t *testing.T) {
+		subId := "33333333-4444-5555-6666-777777777777"
+		subSerial := fmt.Sprintf("02%010x", time.Now().UnixNano()&0xFFFFFFFFFF)
+		createPayload := map[string]interface{}{
+			"serialNumber": subSerial,
+			"name":         "test-sub-ap-flow-" + subSerial,
+			"deviceType":   "AP",
+			"venue":        venueAId,
+			"subscriber":   subId,
+		}
+		cStatus, cBody, cErr := client.DoRequest("POST", fmt.Sprintf("/inventory/%s", subSerial), rootToken, createPayload)
+		if cErr != nil || (cStatus != http.StatusOK && cStatus != http.StatusCreated) {
+			t.Fatalf("Failed to create subscriber inventory device: status=%d, err=%v, body=%s", cStatus, cErr, string(cBody))
+		}
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/inventory/%s", subSerial), rootToken, nil)
+		}()
+
+		// 1. Attempt transfer while subscriber is attached -> rejected
+		putPayload := map[string]interface{}{
+			"venue": venueBId,
+		}
+		bStatus, _, _ := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s", subSerial), rootToken, putPayload)
+		if bStatus != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request while subscriber attached, got %d", bStatus)
+		}
+
+		// 2. Remove subscriber via de-provisioning parameter
+		remStatus, _, remErr := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s?removeSubscriber=%s", subSerial, subId), rootToken, nil)
+		if remErr != nil || remStatus != http.StatusOK {
+			t.Fatalf("Failed to remove subscriber: status=%d, err=%v", remStatus, remErr)
+		}
+
+		// 3. Re-attempt transfer now that subscriber is removed -> succeeds
+		tStatus, tBody, tErr := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s", subSerial), rootToken, putPayload)
+		if tErr != nil {
+			t.Fatalf("PUT transfer request failed: %v", tErr)
+		}
+		if tStatus != http.StatusOK {
+			t.Errorf("Expected 200 OK for transferring device after subscriber removed, got %d. Body: %s", tStatus, string(tBody))
+		}
+	})
 }
 

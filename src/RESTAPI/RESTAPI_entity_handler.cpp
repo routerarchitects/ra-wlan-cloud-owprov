@@ -52,21 +52,36 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::StillInUse);
 		}
 
-		MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
-				  Existing.info.id);
+		try {
+			auto tx = StorageService()->BeginTransaction();
 
-		ManagementRoleDB::RecordVec MatchingRoles;
-		std::string WhereRoles = "entity='" + ORM::Escape(UUID) + "'";
-		if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingRoles, WhereRoles)) {
-			for (const auto &Role : MatchingRoles) {
-				StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
-				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
+			std::string WhereRoles = "entity='" + ORM::Escape(UUID) + "'";
+			if (!StorageService()->RolesDB().DeleteRecordsUnsafe(tx, WhereRoles, []() {
+				AuthCache::GetInstance()->Clear();
+			})) {
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
 			}
-		}
-		AuthCache::GetInstance()->Clear();
 
-		DB_.DeleteRecord("id", UUID);
-		DB_.DeleteChild("id", Existing.parent, UUID);
+			MoveUsage(StorageService()->PolicyDB(), DB_, Existing.managementPolicy, "",
+					  Existing.info.id);
+
+			if (!DB_.DeleteRecord(tx, "id", UUID)) {
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
+
+			if (!Existing.parent.empty()) {
+				DB_.DeleteChild("id", Existing.parent, UUID);
+			}
+
+			if (!tx.Commit()) {
+				return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+			}
+		} catch (const Poco::Exception &E) {
+			Logger_.log(E);
+			return InternalError(RESTAPI::Errors::CouldNotBeDeleted);
+		}
+
+		AuthCache::GetInstance()->Clear();
 		return OK();
 	}
 

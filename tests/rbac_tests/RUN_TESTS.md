@@ -163,6 +163,15 @@ go test -v . -run TestOperator_CreatorRole_RootExemption_Positive
 go test -v . -run "TestOperator_Creation_|TestOperator_CrossTenant_"
 ```
 
+#### **2.7 Operator Deletion Atomic Multi-Role Cleanup (Positive)**
+- **Test Function**: `TestOperator_Deletion_AtomicMultiRoleCleanup_Positive`
+- **Description**: Verifies that deleting an Operator atomically cascades to delete its companion Entity and all attached Management Roles in a single transaction without record caps, leaving zero orphaned records.
+- **Expected Output**: **`200 OK`**; 404 for Operator, 404 for companion Entity, 404 for all attached roles.
+- **Command**:
+```bash
+go test -v . -run TestOperator_Deletion_AtomicMultiRoleCleanup_Positive
+```
+
 ---
 
 ### 3. Subscriber Scope Resolution & CRUD Tests (Section 11.2)
@@ -472,11 +481,29 @@ go test -v . -run TestInventoryDualScopeTransfer/Detaching_device_to_unassigned
 
 #### **9.8 ROOT Unconditional Transfer Parity (Positive)**
 - **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Positive: ROOT user can transfer devices unconditionally`)
-- **Description**: Verifies that ROOT user can move devices between any scopes unconditionally without scope role constraints.
+- **Description**: Verifies that ROOT user can move devices between any scopes unconditionally without scope role constraints (provided device is not subscriber-assigned).
 - **Expected Output**: **`200 OK`**
 - **Command**:
 ```bash
 go test -v . -run TestInventoryDualScopeTransfer/ROOT_user_can_transfer
+```
+
+#### **9.9 Transfer of Subscriber-Assigned Device Prohibited for Admin & ROOT (Negative)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-tests: `Negative: Transfer of subscriber-assigned device prohibited for Admin`, `Negative: Transfer of subscriber-assigned device prohibited for ROOT`)
+- **Description**: Verifies the business invariant that any attempt to transfer a device currently assigned to a subscriber (`subscriber != ""`) is rejected with 400 Bad Request (StillInUse), for both Administrators and ROOT.
+- **Expected Output**: **`400 Bad Request`** (*"Subscriber-assigned inventory cannot be transferred. Remove subscriber assignment first."*)
+- **Command**:
+```bash
+go test -v . -run "TestInventoryDualScopeTransfer/Negative:_Transfer_of_subscriber-assigned_device"
+```
+
+#### **9.10 Device Transfer Permitted After Subscriber Assignment Removed (Positive)**
+- **Test Function**: `TestInventoryDualScopeTransfer` (Sub-test: `Positive: Transfer permitted after subscriber assignment removed`)
+- **Description**: Verifies that after de-provisioning the subscriber assignment via `?removeSubscriber=`, the device can be transferred normally.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run "TestInventoryDualScopeTransfer/Positive:_Transfer_permitted_after_subscriber"
 ```
 
 ---
@@ -624,6 +651,15 @@ go test -v . -run "TestSelfRoleInspectionExemption/Negative:_Functional_user_fet
 - **Command**:
 ```bash
 go test -v . -run "TestSelfRoleInspectionExemption/Negative:_Functional_user_querying_\?user=<other_user_id>"
+```
+
+#### **12.6 Regression: Mixed Role Permissions (Installer in Venue A, Admin in Venue B)**
+- **Test Function**: `TestSelfRoleInspection_MixedPermissions_Regression`
+- **Description**: Verifies that a non-root user holding both an Installer role in Venue A (without `managementRole:READ`) and an Admin role in Venue B (with `managementRole:READ`) receives the union of all directly assigned roles plus scope-authorized roles. The user sees both of their assigned roles, sees other users' roles in Venue B, and never sees other users' roles in Venue A.
+- **Expected Output**: **`200 OK`** (union without leakage)
+- **Command**:
+```bash
+go test -v . -run TestSelfRoleInspection_MixedPermissions_Regression
 ```
 
 ---

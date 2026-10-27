@@ -332,6 +332,7 @@ namespace OpenWifi {
 
 		std::string previous_venue = Existing.venue;
 		std::string previous_entity = Existing.entity;
+		std::string persisted_subscriber = Existing.subscriber;
 
 		auto RemoveSubscriber = GetParameter("removeSubscriber");
 		if (!RemoveSubscriber.empty()) {
@@ -443,6 +444,11 @@ namespace OpenWifi {
 		}
 
 		const bool isTransferring = (Existing.venue != previous_venue) || (Existing.entity != previous_entity);
+		if (isTransferring && !persisted_subscriber.empty()) {
+			return BadRequest(RESTAPI::Errors::StillInUse,
+							  "Subscriber-assigned inventory cannot be transferred. Remove subscriber assignment first.");
+		}
+
 		if (isTransferring && UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 			if (Existing.venue.empty() && Existing.entity.empty()) {
 				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);

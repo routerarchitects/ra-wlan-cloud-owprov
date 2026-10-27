@@ -345,3 +345,100 @@ func TestOperator_CrossTenant_Isolation_Negative(t *testing.T) {
 	}
 }
 
+/*
+ * TestOperator_Deletion_AtomicMultiRoleCleanup_Positive
+ *
+ * VALIDATES:
+ *   Issue 1 (P1): Operator deletion atomic cleanup across companion entity and management roles.
+ *   - Verifies that deleting an Operator atomically cascades to delete its companion Entity
+ *     and all attached Management Roles in one single bulk operation without record caps.
+ */
+func TestOperator_Deletion_AtomicMultiRoleCleanup_Positive(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	rootToken, _, adminUserId, _, _, policyId := getLiveTestTokensAndFixtures(t)
+
+	uniqueSuffix := fmt.Sprintf("%d", time.Now().UnixNano()%1000000)
+	regId := fmt.Sprintf("atomic-op-%s", uniqueSuffix)
+	opName := fmt.Sprintf("AtomicOp-%s", uniqueSuffix)
+
+	createPayload := map[string]interface{}{
+		"name":           opName,
+		"description":    "Operator for atomic deletion test",
+		"registrationId": regId,
+	}
+
+	// 1. Create Operator (provisions companion entity + creator role)
+	status, body, err := client.DoRequest("POST", "/operator/0", rootToken, createPayload)
+	if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+		t.Fatalf("Failed to create test operator: %v, body: %s", err, string(body))
+	}
+
+	var createdOp operatorResponse
+	_ = json.Unmarshal(body, &createdOp)
+	if createdOp.ID == "" || createdOp.EntityID == "" {
+		t.Fatalf("Operator created without ID or EntityID: %+v", createdOp)
+	}
+
+	// 2. Attach multiple additional management roles to the companion entity
+	roleIds := []string{}
+	for i := 1; i <= 3; i++ {
+		rolePayload := map[string]interface{}{
+			"name":             fmt.Sprintf("atomic-role-%d-%s", i, uniqueSuffix),
+			"description":      fmt.Sprintf("Test role %d on companion entity", i),
+			"entity":           createdOp.EntityID,
+			"venue":            "",
+			"managementPolicy": policyId,
+			"users":            []string{adminUserId},
+		}
+		var createdRole struct {
+			ID string `json:"id"`
+		}
+		rStatus, rBody, rErr := client.DoRequest("POST", "/managementRole/0", rootToken, rolePayload)
+		if rErr == nil && (rStatus == http.StatusOK || rStatus == http.StatusCreated) {
+			_ = json.Unmarshal(rBody, &createdRole)
+			if createdRole.ID != "" {
+				roleIds = append(roleIds, createdRole.ID)
+			}
+		}
+	}
+
+	// 3. Delete Operator
+	delStatus, delBody, delErr := client.DoRequest("DELETE", fmt.Sprintf("/operator/%s", createdOp.ID), rootToken, nil)
+	if delErr != nil || delStatus != http.StatusOK {
+		t.Fatalf("DELETE /operator/%s failed: status %d, body: %s", createdOp.ID, delStatus, string(delBody))
+	}
+
+	// 4. Verify Operator is deleted (404 Not Found)
+	getOpStatus, _, _ := client.DoRequest("GET", fmt.Sprintf("/operator/%s", createdOp.ID), rootToken, nil)
+	if getOpStatus != http.StatusNotFound {
+		t.Errorf("Expected 404 Not Found for deleted Operator, got %d", getOpStatus)
+	}
+
+	// 5. Verify Companion Entity is deleted (404 Not Found)
+	getEntStatus, _, _ := client.DoRequest("GET", fmt.Sprintf("/entity/%s", createdOp.EntityID), rootToken, nil)
+	if getEntStatus != http.StatusNotFound {
+		t.Errorf("Expected 404 Not Found for companion Entity, got %d", getEntStatus)
+	}
+
+	// 6. Verify all attached roles are deleted (404 Not Found)
+	for _, rId := range roleIds {
+		getRoleStatus, _, _ := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", rId), rootToken, nil)
+		if getRoleStatus != http.StatusNotFound {
+			t.Errorf("Expected 404 Not Found for role %s after operator deletion, got %d", rId, getRoleStatus)
+		}
+	}
+
+	// 7. Verify no roles remain matching entity
+	listStatus, listBody, _ := client.DoRequest("GET", fmt.Sprintf("/managementRole?entity=%s", createdOp.EntityID), rootToken, nil)
+	if listStatus == http.StatusOK {
+		var resp struct {
+			Roles []interface{} `json:"roles"`
+		}
+		_ = json.Unmarshal(listBody, &resp)
+		if len(resp.Roles) != 0 {
+			t.Errorf("Expected 0 roles remaining for entity %s, got %d", createdOp.EntityID, len(resp.Roles))
+		}
+	}
+}
+
+

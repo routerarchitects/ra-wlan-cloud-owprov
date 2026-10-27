@@ -129,14 +129,8 @@ namespace OpenWifi {
 		if (!Existing.entity.empty())
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
 
-		ManagementRoleDB::RecordVec MatchingVenueRoles;
 		std::string WhereVenueRoles = "venue='" + ORM::Escape(UUID) + "'";
-		if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingVenueRoles, WhereVenueRoles)) {
-			for (const auto &Role : MatchingVenueRoles) {
-				StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
-				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
-			}
-		}
+		StorageService()->RolesDB().DeleteRecords(WhereVenueRoles);
 		AuthCache::GetInstance()->Clear();
 
 		DB_.DeleteRecord("id", UUID);

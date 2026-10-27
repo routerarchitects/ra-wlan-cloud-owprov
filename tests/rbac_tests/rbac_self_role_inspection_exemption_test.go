@@ -401,3 +401,335 @@ func TestSelfRoleInspectionExemption(t *testing.T) {
 	})
 }
 
+/*
+ * TestSelfRoleInspection_MixedPermissions_Regression
+ *
+ * REGRESSION TEST FOR REVIEW COMMENT:
+ *   "P2 — Self-role inspection fails when the requester has mixed ManagementRole permissions
+ *    Required change: For all non-root users, return the union of:
+ *      1. Management roles directly assigned to the requesting user.
+ *      2. Management roles visible through explicit managementRole:READ permission within applicable scope.
+ *    Deduplicate the results by role ID and apply all query filters, pagination, and countOnly consistently.
+ *    Required regression test: A user with an Installer role in Venue A and an Admin role in Venue B
+ *    must see both assigned roles, while seeing other users' roles only where explicitly authorized."
+ */
+func TestSelfRoleInspection_MixedPermissions_Regression(t *testing.T) {
+	rootToken, user1Token, user1Id, _, user2Id, entityId, _ := getSelfRoleTestTokensAndFixtures(t)
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+
+	// 1. Create two test venues under entity
+	createVenue := func(name string) (string, func()) {
+		payload := map[string]interface{}{
+			"name":        fmt.Sprintf("%s-%d", name, time.Now().UnixNano()),
+			"description": "Venue for mixed permissions regression test",
+			"entity":      entityId,
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		status, body, err := client.DoRequest("POST", "/venue/0", rootToken, payload)
+		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+			t.Logf("Notice: Could not create venue %s: status %d, err %v", name, status, err)
+			return "", func() {}
+		}
+		_ = json.Unmarshal(body, &created)
+		cleanup := func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/venue/%s", created.ID), rootToken, nil)
+		}
+		return created.ID, cleanup
+	}
+
+	venueA, cleanupVenueA := createVenue("venue-a-installer")
+	defer cleanupVenueA()
+	venueB, cleanupVenueB := createVenue("venue-b-admin")
+	defer cleanupVenueB()
+
+	// 2. Create Policy 1: Installer policy (inventory:READ, NO managementRole permissions)
+	installerPolicyPayload := map[string]interface{}{
+		"name":        fmt.Sprintf("installer-policy-%d", time.Now().UnixNano()),
+		"description": "Installer policy without managementRole permissions",
+		"entries": []map[string]interface{}{
+			{
+				"resources": []string{"inventory", "device"},
+				"access":    []string{"READ"},
+			},
+		},
+	}
+	var installerPolicy struct {
+		ID string `json:"id"`
+	}
+	p1Status, p1Body, p1Err := client.DoRequest("POST", "/managementPolicy/0", rootToken, installerPolicyPayload)
+	if p1Err == nil && (p1Status == http.StatusOK || p1Status == http.StatusCreated) {
+		_ = json.Unmarshal(p1Body, &installerPolicy)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", installerPolicy.ID), rootToken, nil)
+		}()
+	}
+
+	// 3. Create Policy 2: Admin policy (has explicit managementRole:READ)
+	adminPolicyPayload := map[string]interface{}{
+		"name":        fmt.Sprintf("venue-admin-policy-%d", time.Now().UnixNano()),
+		"description": "Admin policy with managementRole READ permissions",
+		"entries": []map[string]interface{}{
+			{
+				"resources": []string{"managementRole", "venue"},
+				"access":    []string{"READ"},
+			},
+		},
+	}
+	var adminPolicy struct {
+		ID string `json:"id"`
+	}
+	p2Status, p2Body, p2Err := client.DoRequest("POST", "/managementPolicy/0", rootToken, adminPolicyPayload)
+	if p2Err == nil && (p2Status == http.StatusOK || p2Status == http.StatusCreated) {
+		_ = json.Unmarshal(p2Body, &adminPolicy)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", adminPolicy.ID), rootToken, nil)
+		}()
+	}
+
+	if venueA == "" || venueB == "" || installerPolicy.ID == "" || adminPolicy.ID == "" {
+		t.Skip("Prerequisites for live mixed-permissions regression test could not be provisioned; skipping")
+	}
+
+	// 4. Create Role 1: User 1 in Venue A with Installer Policy (no managementRole:READ)
+	role1Payload := map[string]interface{}{
+		"name":             fmt.Sprintf("user1-venueA-installer-%d", time.Now().UnixNano()),
+		"description":      "Installer role in Venue A",
+		"entity":           entityId,
+		"venue":            venueA,
+		"managementPolicy": installerPolicy.ID,
+		"users":            []string{user1Id},
+	}
+	var role1 struct {
+		ID string `json:"id"`
+	}
+	r1Status, r1Body, r1Err := client.DoRequest("POST", "/managementRole/0", rootToken, role1Payload)
+	if r1Err == nil && (r1Status == http.StatusOK || r1Status == http.StatusCreated) {
+		_ = json.Unmarshal(r1Body, &role1)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", role1.ID), rootToken, nil)
+		}()
+	}
+
+	// 5. Create Role 2: User 1 in Venue B with Admin Policy (has managementRole:READ)
+	role2Payload := map[string]interface{}{
+		"name":             fmt.Sprintf("user1-venueB-admin-%d", time.Now().UnixNano()),
+		"description":      "Admin role in Venue B",
+		"entity":           entityId,
+		"venue":            venueB,
+		"managementPolicy": adminPolicy.ID,
+		"users":            []string{user1Id},
+	}
+	var role2 struct {
+		ID string `json:"id"`
+	}
+	r2Status, r2Body, r2Err := client.DoRequest("POST", "/managementRole/0", rootToken, role2Payload)
+	if r2Err == nil && (r2Status == http.StatusOK || r2Status == http.StatusCreated) {
+		_ = json.Unmarshal(r2Body, &role2)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", role2.ID), rootToken, nil)
+		}()
+	}
+
+	// 6. Create Role 3: User 2 (third party) in Venue A (User 1 has NO managementRole:READ in Venue A)
+	role3Payload := map[string]interface{}{
+		"name":             fmt.Sprintf("user2-venueA-installer-%d", time.Now().UnixNano()),
+		"description":      "User 2 role in Venue A",
+		"entity":           entityId,
+		"venue":            venueA,
+		"managementPolicy": installerPolicy.ID,
+		"users":            []string{user2Id},
+	}
+	var role3 struct {
+		ID string `json:"id"`
+	}
+	r3Status, r3Body, r3Err := client.DoRequest("POST", "/managementRole/0", rootToken, role3Payload)
+	if r3Err == nil && (r3Status == http.StatusOK || r3Status == http.StatusCreated) {
+		_ = json.Unmarshal(r3Body, &role3)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", role3.ID), rootToken, nil)
+		}()
+	}
+
+	// 7. Create Role 4: User 2 (third party) in Venue B (User 1 HAS managementRole:READ in Venue B)
+	role4Payload := map[string]interface{}{
+		"name":             fmt.Sprintf("user2-venueB-installer-%d", time.Now().UnixNano()),
+		"description":      "User 2 role in Venue B",
+		"entity":           entityId,
+		"venue":            venueB,
+		"managementPolicy": installerPolicy.ID,
+		"users":            []string{user2Id},
+	}
+	var role4 struct {
+		ID string `json:"id"`
+	}
+	r4Status, r4Body, r4Err := client.DoRequest("POST", "/managementRole/0", rootToken, role4Payload)
+	if r4Err == nil && (r4Status == http.StatusOK || r4Status == http.StatusCreated) {
+		_ = json.Unmarshal(r4Body, &role4)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", role4.ID), rootToken, nil)
+		}()
+	}
+
+	// =========================================================================
+	// Scenario 1: User 1 lists all roles: must see both own roles (Role 1 & 2)
+	// and Role 4 (authorized in Venue B), but NEVER Role 3 (unauthorized in Venue A)
+	// =========================================================================
+	t.Run("Regression: Mixed user sees both assigned roles and only authorized scope roles", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", "/managementRole", user1Token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID    string   `json:"id"`
+				Venue string   `json:"venue"`
+				Users []string `json:"users"`
+			} `json:"roles"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse JSON response: %v", err)
+		}
+
+		foundRole1 := false
+		foundRole2 := false
+		foundRole4 := false
+		foundRole3 := false
+
+		for _, r := range resp.Roles {
+			if r.ID == role1.ID {
+				foundRole1 = true
+			}
+			if r.ID == role2.ID {
+				foundRole2 = true
+			}
+			if r.ID == role4.ID {
+				foundRole4 = true
+			}
+			if r.ID == role3.ID {
+				foundRole3 = true
+			}
+		}
+
+		if !foundRole1 {
+			t.Errorf("Violation: User 1 cannot see their own Installer role in Venue A (%s)", role1.ID)
+		}
+		if !foundRole2 {
+			t.Errorf("Violation: User 1 cannot see their own Admin role in Venue B (%s)", role2.ID)
+		}
+		if !foundRole4 {
+			t.Errorf("Violation: User 1 cannot see authorized other user's role in Venue B (%s)", role4.ID)
+		}
+		if foundRole3 {
+			t.Errorf("Security Violation: User 1 was leaked unauthorized other user's role in Venue A (%s)!", role3.ID)
+		}
+	})
+
+	// =========================================================================
+	// Scenario 2: Filtering by Venue A (?venue=VenueA) returns own Installer role
+	// but excludes other users' roles in Venue A
+	// =========================================================================
+	t.Run("Regression: Filtering by Venue A returns own role but excludes other users", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", venueA), user1Token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?venue=VenueA failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		_ = json.Unmarshal(body, &resp)
+
+		foundRole1 := false
+		foundRole3 := false
+		for _, r := range resp.Roles {
+			if r.ID == role1.ID {
+				foundRole1 = true
+			}
+			if r.ID == role3.ID {
+				foundRole3 = true
+			}
+		}
+
+		if !foundRole1 {
+			t.Errorf("Expected to see own Role 1 in Venue A, but was omitted")
+		}
+		if foundRole3 {
+			t.Errorf("Security Violation: User 2's role in Venue A leaked under ?venue filter!")
+		}
+	})
+
+	// =========================================================================
+	// Scenario 3: Querying other user (?user=User2) returns role in Venue B but not Venue A
+	// =========================================================================
+	t.Run("Regression: Querying other user returns roles in Venue B but not Venue A", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/managementRole?user=%s", user2Id), user1Token, nil)
+		if err != nil {
+			t.Fatalf("GET /managementRole?user=user2 failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp struct {
+			Roles []struct {
+				ID string `json:"id"`
+			} `json:"roles"`
+		}
+		_ = json.Unmarshal(body, &resp)
+
+		foundRole4 := false
+		foundRole3 := false
+		for _, r := range resp.Roles {
+			if r.ID == role4.ID {
+				foundRole4 = true
+			}
+			if r.ID == role3.ID {
+				foundRole3 = true
+			}
+		}
+
+		if !foundRole4 {
+			t.Errorf("Expected to see User 2's role in authorized Venue B (%s)", role4.ID)
+		}
+		if foundRole3 {
+			t.Errorf("Security Violation: User 2's role in unauthorized Venue A (%s) was returned!", role3.ID)
+		}
+	})
+
+	// =========================================================================
+	// Scenario 4: Direct fetch by ID: User 1 can fetch other user's role in Venue B (200)
+	// but direct fetch of other user's role in Venue A is denied (403)
+	// =========================================================================
+	t.Run("Regression: Direct ID fetch of other user role in Venue B (200) vs Venue A (403)", func(t *testing.T) {
+		// Venue B: User 1 has managementRole:READ -> 200 OK
+		statusB, bodyB, errB := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", role4.ID), user1Token, nil)
+		if errB != nil {
+			t.Fatalf("GET /managementRole/{role4} failed: %v", errB)
+		}
+		if statusB != http.StatusOK {
+			t.Errorf("Expected 200 OK for other user's role in authorized Venue B, got %d. Body: %s", statusB, string(bodyB))
+		}
+
+		// Venue A: User 1 does NOT have managementRole:READ -> 403 Forbidden
+		statusA, bodyA, errA := client.DoRequest("GET", fmt.Sprintf("/managementRole/%s", role3.ID), user1Token, nil)
+		if errA != nil {
+			t.Fatalf("GET /managementRole/{role3} failed: %v", errA)
+		}
+		if statusA != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for other user's role in unauthorized Venue A, got %d. Body: %s", statusA, string(bodyA))
+		}
+	})
+}
+
+
