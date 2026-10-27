@@ -740,6 +740,90 @@ go test -v . -run "TestVariableAccessAuthorization/Edge:_Supplying_both_entity_a
 
 ---
 
+### **14. Configurations and Variables List Scoping (`GET /configurations`, `GET /variables`)**
+
+#### **14.1 Configurations List Root Access Bypass (Positive)**
+- **Test Function**: `TestConfigurationsList_RootBypass`
+- **Description**: Verifies ROOT users and internal microservices bypass scoping and receive the complete global list.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+TOKEN_ROOT="Bearer <root_token>" go test -v . -run TestConfigurationsList_RootBypass
+```
+
+#### **14.2 Configurations List Entity Scoped Admin & Cross-Tenant Isolation (Positive & Negative)**
+- **Test Function**: `TestConfigurationsList_EntityScopedAdmin`
+- **Description**: Verifies Admin on Operator A Entity receives configurations in Operator A (and child venues) and verifies zero leakage from Operator B.
+- **Expected Output**: **`200 OK` (0 Operator B configs)**
+- **Command**:
+```bash
+TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" OPERATOR_B_ENTITY_UUID="<entity_b_uuid>" go test -v . -run TestConfigurationsList_EntityScopedAdmin
+```
+
+#### **14.3 Venue-Scoped Role Excludes Parent Entity (Positive & Negative)**
+- **Test Function**: `TestConfigurationsList_VenueScopedRole_ExcludesParentEntity`
+- **Description**: Verifies user assigned to Venue A receives only Venue A configurations and is denied access to parent Entity A configurations.
+- **Expected Output**: **`200 OK` (Venue A configs only)**
+- **Command**:
+```bash
+TOKEN_VENUE_A="Bearer <venue_a_token>" VENUE_A_UUID="<venue_a_uuid>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" go test -v . -run TestConfigurationsList_VenueScopedRole_ExcludesParentEntity
+```
+
+#### **14.4 Missing configuration:GET Permission (Negative)**
+- **Test Function**: `TestConfigurationsList_NoPermissions`
+- **Description**: Verifies users with policies lacking `configuration:GET` receive an empty list `{"configurations": []}`.
+- **Expected Output**: **`200 OK` (empty array)**
+- **Command**:
+```bash
+TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestConfigurationsList_NoPermissions
+```
+
+#### **14.5 Cross-Tenant Query Parameter Tampering Blocked (Negative)**
+- **Test Function**: `TestConfigurationsList_CrossTenantQueryParam_Negative`
+- **Description**: Verifies that passing `?entity=EntityB` or `?venue=VenueB` with an Entity A token returns `403 Forbidden` (`ACCESS_DENIED`).
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" OPERATOR_B_ENTITY_UUID="<entity_b_uuid>" VENUE_B_UUID="<venue_b_uuid>" go test -v . -run TestConfigurationsList_CrossTenantQueryParam_Negative
+```
+
+#### **14.6 Configurations List Count Only (Positive & Negative)**
+- **Test Function**: `TestConfigurationsList_CountOnly`
+- **Description**: Verifies `?countOnly=true` returns accurate scoped counts for permitted users and `{"count": 0}` for unpermitted users.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestConfigurationsList_CountOnly
+```
+
+#### **14.7 Configurations List Select Scoped (Positive & Negative)**
+- **Test Function**: `TestConfigurationsList_SelectScoped`
+- **Description**: Validates that when `?select=` is provided, explicit entity/venue filters are strictly enforced on selected records and `countOnly` returns matching count.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" go test -v . -run TestConfigurationsList_SelectScoped
+```
+
+#### **14.8 Variables List Scoping (Positive & Negative)**
+- **Test Functions**:
+  - `TestVariablesList_RootBypass`
+  - `TestVariablesList_EntityScopedAdmin`
+  - `TestVariablesList_VenueScopedRole_ExcludesParentEntity`
+  - `TestVariablesList_NoPermissions`
+  - `TestVariablesList_CrossTenantQueryParam_Negative`
+  - `TestVariablesList_CountOnly`
+  - `TestVariablesList_Unauthenticated`
+  - `TestVariablesList_SelectScoped`
+- **Description**: Verifies that `GET /api/v1/variables` enforces the exact same multi-tenant RBAC inheritance, isolation, query parameter validation (403 Forbidden on out-of-scope parameters), and select scoping.
+- **Expected Output**: **`200 OK` / `403 Forbidden`**
+- **Command**:
+```bash
+TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TOKEN_ROOT="Bearer <root_token>" TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestVariablesList
+```
+
+---
+
 ## Run All Tests Simultaneously
 
 To run all RBAC tests in one single command:

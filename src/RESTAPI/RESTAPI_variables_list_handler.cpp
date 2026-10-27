@@ -3,62 +3,29 @@
 //
 
 #include "RESTAPI_variables_list_handler.h"
+
 #include "RESTAPI/RESTAPI_db_helpers.h"
+#include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
 #include "framework/utils.h"
-#include <algorithm>
-#include <set>
 
 namespace OpenWifi {
 
 	void RESTAPI_variables_list_handler::DoGet() {
-		std::string entityParam;
-		if (HasParameter("entity", entityParam) && !entityParam.empty()) {
-			if (!Utils::ValidUUID(entityParam)) {
-				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-			}
-		}
-
-		std::string venueParam;
-		if (HasParameter("venue", venueParam) && !venueParam.empty()) {
-			if (!Utils::ValidUUID(venueParam)) {
-				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
-			}
-		}
-
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
-		// If caller is ROOT, preserve standard full-listing behavior
-		if (isRoot) {
-			if (!QB_.Select.empty()) {
-				ProvObjects::VariableBlockList ResultList;
-				for (const auto &id : SelectedRecords()) {
-					ProvObjects::VariableBlock record;
-					if (DB_.GetRecord("id", id, record)) {
-						if (!entityParam.empty() && record.entity != entityParam) {
-							continue;
-						}
-						if (!venueParam.empty() && record.venue != venueParam) {
-							continue;
-						}
-						ResultList.variableBlocks.push_back(record);
-					}
-				}
-				if (QB_.CountOnly) {
-					return ReturnCountOnly(ResultList.variableBlocks.size());
-				}
-				return MakeJSONObjectArray("variableBlocks", ResultList.variableBlocks, *this);
-			}
+		// 1. Root users and internal microservice requests (Internal_ == true) bypass scoping
+		if (isRoot || Internal_) {
 			return ListHandler<VariablesDB>("variableBlocks", DB_, *this);
 		}
 
-		// Non-ROOT: Gather allowed entities and venues where caller holds configuration:READ
+		// 2. Non-root users: resolve all roles and policies
+		std::vector<ProvObjects::ManagementRole> Roles;
 		std::set<std::string> AllowedEntities;
 		std::set<std::string> AllowedVenues;
 		std::set<std::string> DeniedVenues;
-		std::vector<ProvObjects::ManagementRole> RequesterRoles;
 
-		auto policyAllowsConfigurationGet = [&](const ProvObjects::ManagementRole &role) -> bool {
+		auto RoleAllowsVariablesRead = [&](const ProvObjects::ManagementRole &role) -> bool {
 			ProvObjects::ManagementPolicy Policy;
 			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
 				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
@@ -66,198 +33,193 @@ namespace OpenWifi {
 				}
 				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
 			}
-			return PolicyAllows(Policy, "configuration", Poco::Net::HTTPRequest::HTTP_GET);
+			return PolicyAllows(Policy, "variables", Poco::Net::HTTPRequest::HTTP_GET);
 		};
 
-		if (FindAllUserRoles(UserInfo_.userinfo.id, RequesterRoles)) {
-			for (const auto &role : RequesterRoles) {
+		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
+			// 1. Process venue-specific roles:
+			// If role specifies a venue (even if entity is also populated),
+			// only collect the venue (and its descendant venues) — NEVER the entity.
+			for (const auto &role : Roles) {
 				if (!role.venue.empty()) {
-					if (policyAllowsConfigurationGet(role)) {
+					if (RoleAllowsVariablesRead(role)) {
 						AllowedVenues.insert(role.venue);
+						GetDescendantVenues(role.venue, AllowedVenues);
 					} else {
 						DeniedVenues.insert(role.venue);
 					}
-				} else if (!role.entity.empty()) {
-					if (policyAllowsConfigurationGet(role)) {
-						std::set<std::string> descendantEntities;
-						RESTAPIHandler::GetDescendantEntities(role.entity, descendantEntities);
-						for (const auto &eId : descendantEntities) {
-							AllowedEntities.insert(eId);
-							ProvObjects::Entity E;
-							if (StorageService()->EntityDB().GetRecord("id", eId, E)) {
-								for (const auto &vId : E.venues) {
-									RESTAPIHandler::GetDescendantVenues(vId, AllowedVenues);
-								}
+				}
+			}
+
+			// 2. Process entity-only roles:
+			// If venue is missing, collect the entity AND all of its venues having entityId as entity.
+			for (const auto &role : Roles) {
+				if (role.venue.empty() && !role.entity.empty()) {
+					if (RoleAllowsVariablesRead(role)) {
+						AllowedEntities.insert(role.entity);
+
+						// Collect venues from Entity record
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								AllowedVenues.insert(vId);
+								GetDescendantVenues(vId, AllowedVenues);
 							}
+						}
+
+						// Also collect any venue from VenueDB where entity == role.entity (paginated to fetch all records)
+						uint64_t venueOffset = 0;
+						const uint64_t venueBatchSize = 500;
+						while (true) {
+							VenueDB::RecordVec pageVenues;
+							if (!StorageService()->VenueDB().GetRecords(venueOffset, venueBatchSize, pageVenues, " entity='" + ORM::Escape(role.entity) + "'")) {
+								break;
+							}
+							for (const auto &v : pageVenues) {
+								AllowedVenues.insert(v.info.id);
+								GetDescendantVenues(v.info.id, AllowedVenues);
+							}
+							if (pageVenues.size() < venueBatchSize) {
+								break;
+							}
+							venueOffset += venueBatchSize;
 						}
 					}
 				}
 			}
+
+			// 3. Shadowing: venue-level deny takes precedence over entity-level allow
 			for (const auto &vId : DeniedVenues) {
 				AllowedVenues.erase(vId);
 			}
 		}
 
-		auto isVariableAuthorized = [&](const ProvObjects::VariableBlock &varBlock) -> bool {
-			if (!varBlock.venue.empty()) {
-				if (DeniedVenues.count(varBlock.venue)) {
-					return false;
-				}
-				if (AllowedVenues.count(varBlock.venue)) {
-					return true;
-				}
-				// If not found in AllowedVenues, check parent entity of venue
-				ProvObjects::Venue ven;
-				if (StorageService()->VenueDB().GetRecord("id", varBlock.venue, ven)) {
-					if (!ven.entity.empty() && AllowedEntities.count(ven.entity)) {
-						return true;
-					}
-				}
-				return false;
+		// 3. If the user has no roles granting variables:GET on any scope, return empty
+		if (AllowedEntities.empty() && AllowedVenues.empty()) {
+			VariablesDB::RecordVec Entries;
+			if (QB_.CountOnly)
+				return ReturnCountOnly(0);
+			return MakeJSONObjectArray("variableBlocks", Entries, *this);
+		}
+
+		// Helper to build SQL IN clause
+		auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
+			if (ids.empty())
+				return "";
+			std::string res = field + " IN (";
+			bool first = true;
+			for (const auto &id : ids) {
+				if (!first)
+					res += ",";
+				res += "'" + ORM::Escape(id) + "'";
+				first = false;
 			}
-			if (!varBlock.entity.empty()) {
-				return AllowedEntities.count(varBlock.entity) > 0;
-			}
-			return false;
+			res += ")";
+			return res;
 		};
 
-		// Case 1: Multi-ID selection (?select=id1,id2,id3...)
+		std::string rawEntClause = makeInClause("entity", AllowedEntities);
+		std::string entClause;
+		if (!rawEntClause.empty()) {
+			entClause = "((venue IS NULL OR venue='') AND " + rawEntClause + ")";
+		}
+		std::string venClause = makeInClause("venue", AllowedVenues);
+		std::string ScopeWhere;
+		if (!entClause.empty() && !venClause.empty()) {
+			ScopeWhere = "(" + entClause + " OR " + venClause + ")";
+		} else if (!entClause.empty()) {
+			ScopeWhere = entClause;
+		} else if (!venClause.empty()) {
+			ScopeWhere = venClause;
+		}
+
+		if (!DeniedVenues.empty()) {
+			std::string deniedVenClause = makeInClause("venue", DeniedVenues);
+			if (!deniedVenClause.empty()) {
+				ScopeWhere = "(" + ScopeWhere + ") AND (venue IS NULL OR venue='' OR NOT " + deniedVenClause + ")";
+			}
+		}
+
+		// 4. Handle query parameters if provided (?entity=... and/or ?venue=...)
+		auto EntityParam = GetParameter("entity", "");
+		auto VenueParam = GetParameter("venue", "");
+		std::vector<std::string> ParamFilters;
+
+		if (!EntityParam.empty()) {
+			// If requested entity is outside permitted scopes, return 403 Forbidden
+			if (!AllowedEntities.count(EntityParam)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+			ParamFilters.push_back("entity='" + ORM::Escape(EntityParam) + "'");
+		}
+
+		if (!VenueParam.empty()) {
+			// If requested venue is outside permitted scopes or denied, return 403 Forbidden
+			if (!AllowedVenues.count(VenueParam) || DeniedVenues.count(VenueParam)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+			ParamFilters.push_back("venue='" + ORM::Escape(VenueParam) + "'");
+		}
+
+		// 5. Combine parameter filter with overall permitted scope
+		std::string ParamWhere;
+		if (ParamFilters.size() == 2) {
+			ParamWhere = "(" + ParamFilters[0] + " AND " + ParamFilters[1] + ")";
+		} else if (ParamFilters.size() == 1) {
+			ParamWhere = ParamFilters[0];
+		}
+
+		std::string FinalWhere;
+		if (!ParamWhere.empty() && !ScopeWhere.empty()) {
+			FinalWhere = "(" + ParamWhere + ") AND " + ScopeWhere;
+		} else if (!ParamWhere.empty()) {
+			FinalWhere = ParamWhere;
+		} else {
+			FinalWhere = ScopeWhere;
+		}
+
+		// 6. Handle select queries / countOnly / paginated list
 		if (!QB_.Select.empty()) {
-			ProvObjects::VariableBlockList ResultList;
-			for (const auto &id : SelectedRecords()) {
-				ProvObjects::VariableBlock record;
-				if (!DB_.GetRecord("id", id, record)) {
-					continue;
+			VariablesDB::RecordVec SelectedEntries;
+			for (const auto &id : QB_.Select) {
+				ProvObjects::VariableBlock Var;
+				if (DB_.GetRecord("id", id, Var)) {
+					// 1. If explicit ?entity= was specified, record must match it
+					if (!EntityParam.empty() && Var.entity != EntityParam) {
+						continue;
+					}
+					// 2. If explicit ?venue= was specified, record must match it
+					if (!VenueParam.empty() && Var.venue != VenueParam) {
+						continue;
+					}
+					// 3. Explicit venue denials take precedence and shadow entity permissions
+					if (!Var.venue.empty() && DeniedVenues.count(Var.venue)) {
+						continue;
+					}
+					// 4. Must belong to permitted entity or venue scopes:
+					// Venue-scoped variables require venue in AllowedVenues.
+					// Entity-scoped variables (empty venue) require entity in AllowedEntities.
+					bool venueAllowed = !Var.venue.empty() && AllowedVenues.count(Var.venue);
+					bool entityAllowed = Var.venue.empty() && !Var.entity.empty() && AllowedEntities.count(Var.entity);
+					if (entityAllowed || venueAllowed) {
+						SelectedEntries.push_back(Var);
+					}
 				}
-
-				if (!entityParam.empty() && record.entity != entityParam) {
-					continue;
-				}
-				if (!venueParam.empty() && record.venue != venueParam) {
-					continue;
-				}
-
-				// Skip variable if caller lacks configuration GET on its scope
-				if (!isVariableAuthorized(record)) {
-					continue;
-				}
-
-				ResultList.variableBlocks.push_back(record);
 			}
-
 			if (QB_.CountOnly) {
-				return ReturnCountOnly(ResultList.variableBlocks.size());
+				return ReturnCountOnly(SelectedEntries.size());
 			}
-
-			return MakeJSONObjectArray("variableBlocks", ResultList.variableBlocks, *this);
+			return MakeJSONObjectArray("variableBlocks", SelectedEntries, *this);
 		}
-
-		// Case 2: General / Unfiltered listing or ?entity= / ?venue= filter
-		std::vector<ProvObjects::VariableBlock> FinalVariables;
-		std::set<std::string> SeenIds;
-
-		if (!AllowedEntities.empty() || !AllowedVenues.empty()) {
-			std::string Where;
-			if (!entityParam.empty()) {
-				if (AllowedEntities.count(entityParam) == 0) {
-					// Requested entity is not within caller's allowed entities
-					return MakeJSONObjectArray("variableBlocks", FinalVariables, *this);
-				}
-				Where = "entity='" + ORM::Escape(entityParam) + "'";
-			} else if (!venueParam.empty()) {
-				bool venueAllowed = (AllowedVenues.count(venueParam) > 0 && DeniedVenues.count(venueParam) == 0);
-				if (!venueAllowed) {
-					ProvObjects::Venue vRec;
-					if (StorageService()->VenueDB().GetRecord("id", venueParam, vRec) && !vRec.entity.empty()) {
-						if (AllowedEntities.count(vRec.entity) > 0) {
-							venueAllowed = true;
-						}
-					}
-				}
-				if (!venueAllowed) {
-					return MakeJSONObjectArray("variableBlocks", FinalVariables, *this);
-				}
-				Where = "venue='" + ORM::Escape(venueParam) + "'";
-			} else {
-				// No specific scope parameter: gather all variables where caller has permission
-				auto makeInClause = [](const std::string &field, const std::set<std::string> &ids) -> std::string {
-					if (ids.empty()) return "";
-					std::string res = field + " IN (";
-					bool first = true;
-					for (const auto &id : ids) {
-						if (!first) res += ",";
-						res += "'" + ORM::Escape(id) + "'";
-						first = false;
-					}
-					res += ")";
-					return res;
-				};
-
-				std::string entityClause = makeInClause("entity", AllowedEntities);
-				std::string venueClause = makeInClause("venue", AllowedVenues);
-				std::string rbacClause;
-				if (!entityClause.empty() && !venueClause.empty()) {
-					rbacClause = "(" + entityClause + " OR " + venueClause + ")";
-				} else if (!entityClause.empty()) {
-					rbacClause = entityClause;
-				} else if (!venueClause.empty()) {
-					rbacClause = venueClause;
-				}
-
-				if (!rbacClause.empty()) {
-					Where = rbacClause;
-				}
-
-				if (!DeniedVenues.empty()) {
-					std::string deniedClause = "venue NOT IN (";
-					bool first = true;
-					for (const auto &id : DeniedVenues) {
-						if (!first) deniedClause += ",";
-						deniedClause += "'" + ORM::Escape(id) + "'";
-						first = false;
-					}
-					deniedClause += ")";
-					if (!Where.empty()) {
-						Where += " AND ";
-					}
-					Where += deniedClause;
-				}
-			}
-
-			auto lambda = [&](const ProvObjects::VariableBlock &varBlock) {
-				if (isVariableAuthorized(varBlock)) {
-					if (SeenIds.insert(varBlock.info.id).second) {
-						FinalVariables.push_back(varBlock);
-					}
-				}
-				return true;
-			};
-			DB_.Iterate(lambda, Where);
-		}
-
-		// Stable deterministic ordering by name, then id
-		std::sort(FinalVariables.begin(), FinalVariables.end(),
-				  [](const ProvObjects::VariableBlock &a, const ProvObjects::VariableBlock &b) {
-					  if (a.info.name != b.info.name) {
-						  return a.info.name < b.info.name;
-					  }
-					  return a.info.id < b.info.id;
-				  });
 
 		if (QB_.CountOnly) {
-			return ReturnCountOnly(FinalVariables.size());
+			auto C = DB_.Count(FinalWhere);
+			return ReturnCountOnly(C);
 		}
 
-		std::vector<ProvObjects::VariableBlock> PaginatedVariables;
-		if (QB_.Offset < FinalVariables.size()) {
-			auto start = FinalVariables.begin() + QB_.Offset;
-			auto end = (QB_.Limit > 0 && QB_.Offset + QB_.Limit < FinalVariables.size())
-						   ? start + QB_.Limit
-						   : FinalVariables.end();
-			PaginatedVariables.assign(start, end);
-		}
-
-		return MakeJSONObjectArray("variableBlocks", PaginatedVariables, *this);
+		VariablesDB::RecordVec Entries;
+		DB_.GetRecords(QB_.Offset, QB_.Limit, Entries, FinalWhere);
+		return MakeJSONObjectArray("variableBlocks", Entries, *this);
 	}
 
 } // namespace OpenWifi
