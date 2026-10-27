@@ -545,8 +545,9 @@ static void test_zombie_sweep_pruning() {
 	svc.BusMessageReceived("service_events",
 		MakePayload("keep-alive", instActive, "owfms", endpoint, "https://owfms.example.com:16004"));
 
-	TEST_ASSERT(svc.GetServiceInstances("owfms").size() == 1, "Stale instance pruned after 120s timeout");
-	TEST_ASSERT(svc.GetServiceInstances("owfms").find(instActive) != svc.GetServiceInstances("owfms").end(), "Active instance retained");
+	auto instancesFms = svc.GetServiceInstances("owfms");
+	TEST_ASSERT(instancesFms.size() == 1, "Stale instance pruned after 120s timeout");
+	TEST_ASSERT(instancesFms.find(instActive) != instancesFms.end(), "Active instance retained");
 	TEST_ASSERT(!svc.GetServices("owfms").empty(), "Route active for surviving instance");
 
 	// Self-event also triggers stale cleanup
@@ -563,8 +564,8 @@ static void test_zombie_sweep_pruning() {
 	std::cout << "  PASS: test_zombie_sweep_pruning" << std::endl;
 }
 
-// Test 14: Empty or invalid endpoint URIs are rejected without creating empty registry groups
-static void test_empty_or_invalid_endpoint_uri_rejected_no_empty_group() {
+// Test 14: Empty endpoint fields are rejected without creating empty registry groups
+static void test_empty_endpoint_fields_rejected_no_empty_group() {
 	TestMicroService svc;
 
 	// 1. JOIN with empty private endpoint
@@ -603,7 +604,7 @@ static void test_empty_or_invalid_endpoint_uri_rejected_no_empty_group() {
 	reg = svc.GetServiceRegistry();
 	TEST_ASSERT(reg.find("owsubsystem3") == reg.end(), "Empty public endpoint must be rejected; no empty group created");
 
-	std::cout << "  PASS: test_empty_or_invalid_endpoint_uri_rejected_no_empty_group" << std::endl;
+	std::cout << "  PASS: test_empty_endpoint_fields_rejected_no_empty_group" << std::endl;
 }
 
 // Test 15: Clean LEAVE removal and re-join lifecycle
@@ -633,13 +634,14 @@ static void test_leave_and_rejoin_lifecycle() {
 	svc.BusMessageReceived("service_events",
 		MakePayload("join", instB, "owsec", endpoint, "https://owsec.example.com:16001", validKey, "1.0.0"));
 
-	TEST_ASSERT(svc.GetServiceInstances("owsec").size() == 1, "New process incarnation UUID-B registered");
-	TEST_ASSERT(svc.GetServiceInstances("owsec").find(instB) != svc.GetServiceInstances("owsec").end(), "UUID-B is active");
+	auto instancesSec = svc.GetServiceInstances("owsec");
+	TEST_ASSERT(instancesSec.size() == 1, "New process incarnation UUID-B registered");
+	TEST_ASSERT(instancesSec.find(instB) != instancesSec.end(), "UUID-B is active");
 
 	std::cout << "  PASS: test_leave_and_rejoin_lifecycle" << std::endl;
 }
 
-// Test 16: Logical endpoint resolution operates in O(1) without scanning all replicas
+// Test 16: Logical endpoint resolution performs deduplicated lookup across registered replicas
 static void test_logical_endpoints_efficient_lookup() {
 	TestMicroService svc;
 
@@ -655,13 +657,13 @@ static void test_logical_endpoints_efficient_lookup() {
 
 	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 100, "100 replicas tracked in registry");
 
-	// Logical resolution returns exactly 1 deduplicated route in O(1)
+	// Logical resolution returns exactly 1 deduplicated route
 	auto routes = svc.GetServices("owgw");
 	TEST_ASSERT(routes.size() == 1, "Exactly 1 deduplicated logical endpoint returned");
 	TEST_ASSERT(routes[0].PrivateEndPoint == sharedEndpoint, "Endpoint URI matches shared private URI");
 	TEST_ASSERT(routes[0].AccessKey == sharedKey, "Access key matches shared key");
 
-	// Private endpoint key lookup finds key in O(1) across service types
+	// Private endpoint key lookup finds key across service types
 	auto optKey = svc.GetPrivateEndPointServiceKey(sharedEndpoint);
 	TEST_ASSERT(optKey.has_value(), "Private endpoint key found");
 	TEST_ASSERT(optKey->AccessKey == sharedKey, "Key matches in registry");
@@ -980,7 +982,8 @@ static void test_backward_clock_adjustment_safety() {
 	std::cout << "  PASS: test_backward_clock_adjustment_safety" << std::endl;
 }
 
-// Test 22: GetServices() preserves distinct service types even if they share the same private endpoint
+// Test 22: GetServices() preserves distinct service types even if they share the same private endpoint.
+// Note: Distinct service types sharing an endpoint is unsupported in production topology; this test verifies in-memory type-partitioned map isolation.
 static void test_get_services_preserves_distinct_types_sharing_endpoint() {
 	TestMicroService svc;
 
@@ -1241,6 +1244,127 @@ static void test_uuid_in_id_field_lifecycle() {
 	std::cout << "  PASS: test_uuid_in_id_field_lifecycle" << std::endl;
 }
 
+// Test 26: Production wire format (numeric id + separate UUID instanceId) full JOIN -> KEEP_ALIVE -> LEAVE lifecycle
+static void test_production_dual_identity_wire_format_lifecycle() {
+	TestMicroService svc;
+
+	uint64_t sharedNumericId = 1787837847084271463ULL;
+	std::string instA = "owgw-1-c1f7b9f3-80b6-45ef-89a1-cb90453531b2";
+	std::string instB = "owgw-2-d2e8ca04-91c7-46fa-92b2-dc01564642c3";
+	std::string sharedEndpoint = "https://owgw-internal:17004";
+	std::string sharedKey = "shared-owgw-prod-key";
+
+	// 1. Replica A JOINs with numeric id and separate UUID instanceId
+	Poco::JSON::Object joinA;
+	joinA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::ID, sharedNumericId);
+	joinA.set("instanceId", instA);
+	joinA.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, sharedEndpoint);
+	joinA.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	joinA.set(KafkaTopics::ServiceEvents::Fields::KEY, sharedKey);
+	joinA.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssJoinA;
+	Poco::JSON::Stringifier::stringify(joinA, ssJoinA);
+	svc.BusMessageReceived("service_events", ssJoinA.str());
+
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Replica A registered");
+	TEST_ASSERT(instances.find(instA) != instances.end(), "Replica A keyed by canonical instanceId");
+	TEST_ASSERT(instances[instA].InstanceId == instA, "InstanceId preserved");
+	TEST_ASSERT(instances[instA].Id == sharedNumericId, "Numeric ID preserved in metadata");
+
+	// 2. Replica B JOINs with SAME numeric id and distinct UUID instanceId, sharing endpoint & key
+	Poco::JSON::Object joinB;
+	joinB.set(KafkaTopics::ServiceEvents::Fields::EVENT, "join");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::ID, sharedNumericId);
+	joinB.set("instanceId", instB);
+	joinB.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, sharedEndpoint);
+	joinB.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	joinB.set(KafkaTopics::ServiceEvents::Fields::KEY, sharedKey);
+	joinB.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssJoinB;
+	Poco::JSON::Stringifier::stringify(joinB, ssJoinB);
+	svc.BusMessageReceived("service_events", ssJoinB.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 2, "Both replicas registered despite identical numeric ID");
+	TEST_ASSERT(instances.find(instA) != instances.end(), "Replica A preserved");
+	TEST_ASSERT(instances.find(instB) != instances.end(), "Replica B registered");
+	TEST_ASSERT(instances[instB].Id == sharedNumericId, "Numeric ID preserved for Replica B");
+
+	auto routes = svc.GetServices("owgw");
+	TEST_ASSERT(routes.size() == 1, "Deduplicated route available for shared endpoint");
+	TEST_ASSERT(routes[0].AccessKey == sharedKey, "Access key matches shared production key");
+
+	// 3. KEEP_ALIVE for Replica A (backdate timestamp to verify refresh while Replica B remains unaffected)
+	uint64_t oldTimeA = Utils::Now() - 30;
+	uint64_t originalTimeB = instances.at(instB).LastUpdate;
+	svc.SetInstanceLastUpdateForTest("owgw", instA, oldTimeA);
+
+	Poco::JSON::Object kaA;
+	kaA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "keep-alive");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::ID, sharedNumericId);
+	kaA.set("instanceId", instA);
+	kaA.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, sharedEndpoint);
+	kaA.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	kaA.set(KafkaTopics::ServiceEvents::Fields::KEY, sharedKey);
+	kaA.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssKaA;
+	Poco::JSON::Stringifier::stringify(kaA, ssKaA);
+	svc.BusMessageReceived("service_events", ssKaA.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 2, "Both replicas active after KEEP_ALIVE");
+	TEST_ASSERT(instances.at(instA).LastUpdate > oldTimeA, "Replica A LastUpdate refreshed");
+	TEST_ASSERT(instances.at(instB).LastUpdate == originalTimeB, "Replica B LastUpdate unaffected");
+
+	// 4. LEAVE for Replica A -> only Replica A removed, Replica B preserved, route preserved
+	Poco::JSON::Object leaveA;
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::EVENT, "leave");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::ID, sharedNumericId);
+	leaveA.set("instanceId", instA);
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, sharedEndpoint);
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::KEY, sharedKey);
+	leaveA.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssLeaveA;
+	Poco::JSON::Stringifier::stringify(leaveA, ssLeaveA);
+	svc.BusMessageReceived("service_events", ssLeaveA.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Only Replica A removed on LEAVE");
+	TEST_ASSERT(instances.find(instA) == instances.end(), "Replica A no longer in registry");
+	TEST_ASSERT(instances.find(instB) != instances.end(), "Replica B remains active");
+
+	routes = svc.GetServices("owgw");
+	TEST_ASSERT(routes.size() == 1, "Shared route preserved by surviving Replica B");
+
+	// 5. LEAVE for Replica B -> registry and routes cleanly cleared
+	Poco::JSON::Object leaveB;
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::EVENT, "leave");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::ID, sharedNumericId);
+	leaveB.set("instanceId", instB);
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owgw");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, sharedEndpoint);
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, "https://owgw.example.com:17004");
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::KEY, sharedKey);
+	leaveB.set(KafkaTopics::ServiceEvents::Fields::VRSN, "1.0.0");
+	std::stringstream ssLeaveB;
+	Poco::JSON::Stringifier::stringify(leaveB, ssLeaveB);
+	svc.BusMessageReceived("service_events", ssLeaveB.str());
+
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.empty(), "Registry empty after all replicas leave");
+	routes = svc.GetServices("owgw");
+	TEST_ASSERT(routes.empty(), "All routes removed");
+
+	std::cout << "  PASS: test_production_dual_identity_wire_format_lifecycle" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -1257,7 +1381,7 @@ int main() {
 	test_empty_instance_id_rejected_preserves_replicas();
 	test_uuid_id_and_numeric_id_no_exceptions();
 	test_zombie_sweep_pruning();
-	test_empty_or_invalid_endpoint_uri_rejected_no_empty_group();
+	test_empty_endpoint_fields_rejected_no_empty_group();
 	test_leave_and_rejoin_lifecycle();
 	test_logical_endpoints_efficient_lookup();
 	test_peer_discovery_consumer_preserves_shared_route_on_replica_leave();
@@ -1269,6 +1393,7 @@ int main() {
 	test_malformed_event_does_not_bypass_stale_cleanup();
 	test_legacy_peers_distinct_endpoints_same_numeric_id();
 	test_uuid_in_id_field_lifecycle();
+	test_production_dual_identity_wire_format_lifecycle();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;
