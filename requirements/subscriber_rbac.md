@@ -142,15 +142,14 @@ When an authorized endpoint does not contain a target resource ID in its URI pat
 #### 4.3.2 Case B — Endpoints With Target Resource ID
 When an authorized endpoint contains an explicit target resource ID in its URI path (e.g., `/api/v1/subscriberDevice/{id}` or `/api/v1/venue/{id}`):
 1. The target resource ID MUST be treated strictly as an object locator, NOT an authorization assertion.
-2. **Ownership Scoping and Redundant Query Avoidance**:
-   - To eliminate duplicate database queries between authorization and handler execution:
-     a) Implementations SHOULD execute ownership-scoped database queries (`WHERE id = :resourceId AND subscriberId = :CallerId`) rather than executing separate unconstrained retrieval and check passes.
-     b) Where pre-loading is performed during `RoleIsAuthorized()`, the resolved entity MUST be passed/memoized within the request context so downstream business handlers do not reload the same resource.
-   - For mutations (`PUT`, `DELETE`), ownership MUST remain asserted at the point of database modification (e.g., atomic conditional update/delete `WHERE id = :resourceId AND subscriberId = :CallerId`), preventing execution against unassigned or reassigned resources.
-3. **Status Differentiation**:
-   - If an ownership-scoped query yields no match:
-     a) If the target resource ID does not exist in the database, the system MUST return `HTTP 404 Not Found`.
-     b) If the target resource ID exists but belongs to a different owner, the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
+2. **Single-Pass Loading and In-Memory Ownership Assertion**:
+   - The system MUST load the target resource by its identifier (`:resourceId`) in a single pass.
+   - Ownership and status differentiation MUST be evaluated in memory from the resolved record:
+     a) If the target resource does not exist in the database, the system MUST return `HTTP 404 Not Found`.
+     b) If the target resource exists but ownership fails (`Device.subscriberId != CallerId` or `Venue.subscriber != CallerId`), the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
+   - For authorized requests (`subscriberId == CallerId`), the pre-loaded entity MUST be passed/memoized within the request context so downstream business handlers do not reload the same resource from the database.
+3. **Point-of-Mutation Ownership Invariant**:
+   - For mutations (`PUT`, `DELETE`), ownership MUST remain asserted at the point of database modification (e.g., atomic conditional update/delete `WHERE id = :resourceId AND subscriberId = :CallerId`) to prevent execution against unassigned or concurrently reassigned resources.
 4. Resource ownership verification MUST be evaluated as an individual direct resource ownership check (`resource.subscriberId == CallerId` or `venue.subscriber == CallerId`); it MUST NOT be delegated to tenant or operator checks.
 
 ### 4.4 Collection Scoping and Bounded Retrieval
