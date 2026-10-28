@@ -54,10 +54,10 @@ namespace OpenWifi {
 		for (const auto &acc : entry.access) {
 			if (acc == "FULL" ||
 				acc == accessRequired ||
-				(accessRequired == "CREATE" && (acc == "MODIFY" || acc == "UPDATE" || acc == "READWRITE")) ||
-				(accessRequired == "UPDATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+				(accessRequired == "CREATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+				(accessRequired == "UPDATE" && (acc == "UPDATE" || acc == "MODIFY" || acc == "READWRITE")) ||
 				(accessRequired == "MODIFY" && (acc == "UPDATE" || acc == "READWRITE")) ||
-				(accessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY"))) {
+				(accessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY" || acc == "CREATE" || acc == "UPDATE" || acc == "DELETE"))) {
 				return true;
 			}
 		}
@@ -95,17 +95,57 @@ namespace OpenWifi {
 		}
 
 		std::vector<ProvObjects::ManagementPolicy> requesterPolicies;
-		for (const auto &role : Roles) {
-			std::set<std::string> AllowedEntities;
-			RESTAPIHandler::GetDescendantEntities(role.entity, AllowedEntities);
-			if (AllowedEntities.find(entityId) != AllowedEntities.end() && (role.venue == venueId || role.venue.empty())) {
-				ProvObjects::ManagementPolicy Policy;
-				if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
-					if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
-						AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
-						requesterPolicies.push_back(Policy);
+		if (!venueId.empty()) {
+			bool foundSpecificVenueRole = false;
+			for (const auto &role : Roles) {
+				if (role.venue == venueId) {
+					foundSpecificVenueRole = true;
+					ProvObjects::ManagementPolicy Policy;
+					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+							AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+						} else {
+							continue;
+						}
 					}
-				} else {
+					requesterPolicies.push_back(Policy);
+				}
+			}
+			if (!foundSpecificVenueRole) {
+				for (const auto &role : Roles) {
+					if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+						std::set<std::string> AllowedVenues;
+						ProvObjects::Entity EntRec;
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
+							for (const auto &vId : EntRec.venues) {
+								RESTAPIHandler::GetDescendantVenues(vId, AllowedVenues);
+							}
+						}
+						if (AllowedVenues.find(venueId) != AllowedVenues.end()) {
+							ProvObjects::ManagementPolicy Policy;
+							if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+								if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+									AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+								} else {
+									continue;
+								}
+							}
+							requesterPolicies.push_back(Policy);
+						}
+					}
+				}
+			}
+		} else {
+			for (const auto &role : Roles) {
+				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+					ProvObjects::ManagementPolicy Policy;
+					if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+						if (StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+							AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+						} else {
+							continue;
+						}
+					}
 					requesterPolicies.push_back(Policy);
 				}
 			}
@@ -135,6 +175,72 @@ namespace OpenWifi {
 		}
 
 		return true;
+	}
+
+	static bool RequesterCanCreateRoleOnScope(const std::string &userId,
+											 const std::string &entityId,
+											 const std::string &venueId) {
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (!AuthCache::GetInstance()->GetUserRoles(userId, Roles)) {
+			StorageService()->RolesDB().Iterate([&](const ProvObjects::ManagementRole &role) {
+				for (const auto &u : role.users) {
+					if (u == userId) {
+						Roles.push_back(role);
+						break;
+					}
+				}
+				return true;
+			});
+			if (!Roles.empty()) {
+				AuthCache::GetInstance()->SetUserRoles(userId, Roles);
+			}
+		}
+
+		auto roleAllowsRoleCreate = [](const ProvObjects::ManagementRole &role) -> bool {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			return PolicyGrants(Policy, "managementRole", "CREATE");
+		};
+
+		if (!venueId.empty()) {
+			// Exact venue role precedence: check if requester has a role on this exact venue
+			bool hasSpecificVenueRole = false;
+			for (const auto &role : Roles) {
+				if (role.venue == venueId) {
+					hasSpecificVenueRole = true;
+					if (roleAllowsRoleCreate(role)) {
+						return true;
+					}
+				}
+			}
+			if (hasSpecificVenueRole) {
+				// Specific venue role exists and did not grant managementRole:CREATE (shadows entity role)
+				return false;
+			}
+			// Fallback to parent entity role
+			for (const auto &role : Roles) {
+				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+					if (roleAllowsRoleCreate(role)) {
+						return true;
+					}
+				}
+			}
+			return false;
+		} else {
+			for (const auto &role : Roles) {
+				if (role.entity == entityId && (role.venue.empty() || role.venue == "")) {
+					if (roleAllowsRoleCreate(role)) {
+						return true;
+					}
+				}
+			}
+			return false;
+		}
 	}
 
 	static bool FindExactExistingRole(ManagementRoleDB &DB,
@@ -263,6 +369,12 @@ namespace OpenWifi {
 
 		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
 			for (const auto &venueId : Scopes) {
+				if (!RequesterCanCreateRoleOnScope(UserInfo_.userinfo.id, NewObject.entity, venueId)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+									  venueId.empty() ? "User lacks managementRole:CREATE authority on target entity."
+													  : Poco::format("User lacks managementRole:CREATE authority on target venue '%s'.", venueId));
+				}
+
 				std::string PrivilegeError;
 				if (!RequesterHasEqualOrStrongerPermission(UserInfo_.userinfo.id, NewObject.entity, venueId, TargetPolicy, PrivilegeError)) {
 					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters, PrivilegeError);

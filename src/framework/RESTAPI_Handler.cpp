@@ -227,17 +227,6 @@ namespace OpenWifi {
 			}
 		}
 
-		if (Id.empty()) {
-			auto selectParam = GetParameter("select", "");
-			if (!selectParam.empty()) {
-				auto commaPos = selectParam.find(',');
-				if (commaPos != std::string::npos) {
-					selectParam = selectParam.substr(0, commaPos);
-				}
-				Id = Poco::trim(selectParam);
-			}
-		}
-
 		const bool HasBoundObjectId =
 			!Id.empty() &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0));
@@ -627,17 +616,6 @@ namespace OpenWifi {
 			}
 		}
 
-		if (Id.empty()) {
-			auto selectParam = GetParameter("select", "");
-			if (!selectParam.empty()) {
-				auto commaPos = selectParam.find(',');
-				if (commaPos != std::string::npos) {
-					selectParam = selectParam.substr(0, commaPos);
-				}
-				Id = Poco::trim(selectParam);
-			}
-		}
-
 		if (!Id.empty() &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0))) {
 			return true;
@@ -698,9 +676,9 @@ namespace OpenWifi {
 
 			for (const auto &acc : entry.access) {
 				if (acc == "FULL" || acc == AccessRequired ||
-					(AccessRequired == "CREATE" && (acc == "MODIFY" || acc == "UPDATE" || acc == "READWRITE")) ||
-					(AccessRequired == "UPDATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
-					(AccessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY"))) {
+					(AccessRequired == "CREATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+					(AccessRequired == "UPDATE" && (acc == "UPDATE" || acc == "MODIFY" || acc == "READWRITE")) ||
+					(AccessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY" || acc == "CREATE" || acc == "UPDATE" || acc == "DELETE"))) {
 					return true;
 				}
 			}

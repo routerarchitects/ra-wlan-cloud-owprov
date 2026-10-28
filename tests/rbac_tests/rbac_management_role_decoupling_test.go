@@ -138,6 +138,34 @@ func TestManagementRoleDecoupling(t *testing.T) {
 		}
 	}()
 
+	// 4. Create a policy with ONLY managementRole:UPDATE (P1 regression check for Section 5.3)
+	roleUpdateOnlyPolicyPayload := map[string]interface{}{
+		"name":        fmt.Sprintf("policy-role-update-only-%d", time.Now().UnixNano()),
+		"description": "Policy granting only managementRole:UPDATE",
+		"entries": []map[string]interface{}{
+			{
+				"resources": []string{"managementRole"},
+				"access":    []string{"UPDATE"},
+			},
+			{
+				"resources": []string{"entity"},
+				"access":    []string{"READ"},
+			},
+		},
+	}
+	var roleUpdateOnlyPolicy struct {
+		ID string `json:"id"`
+	}
+	status, body, err = client.DoRequest("POST", "/managementPolicy/0", rootToken, roleUpdateOnlyPolicyPayload)
+	if err == nil && (status == http.StatusOK || status == http.StatusCreated) {
+		_ = json.Unmarshal(body, &roleUpdateOnlyPolicy)
+	}
+	defer func() {
+		if roleUpdateOnlyPolicy.ID != "" {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/managementPolicy/%s", roleUpdateOnlyPolicy.ID), rootToken, nil)
+		}
+	}()
+
 	// Helper to create a management role for the admin
 	createRoleForAdmin := func(entity string, venue string, policyId string) (string, func()) {
 		rolePayload := map[string]interface{}{
@@ -305,6 +333,75 @@ func TestManagementRoleDecoupling(t *testing.T) {
 			// BadRequest might occur if targetUser wasn't created by admin in test fixture,
 			// but Forbidden (403) must NOT occur because managementRole:CREATE is authorized!
 			t.Errorf("Unexpected status for authorized managementRole:CREATE, got %d. Body: %s", s, string(b))
+		}
+	})
+
+	// =========================================================================
+	// Scenario 6: Negative (P1 Regression) - managementRole:UPDATE does NOT grant managementRole:CREATE
+	// Section 5.3: UPDATE permission grants READ and UPDATE, but strictly DENIES CREATE
+	// =========================================================================
+	t.Run("Negative: managementRole:UPDATE is denied managementRole:CREATE (P1 Regression)", func(t *testing.T) {
+		if roleUpdateOnlyPolicy.ID == "" {
+			t.Skip("Role-update-only policy not created")
+		}
+		_, cleanupAdminRole := createRoleForAdmin(entityId, venueId, roleUpdateOnlyPolicy.ID)
+		defer cleanupAdminRole()
+
+		roleAssignPayload := map[string]interface{}{
+			"name":             fmt.Sprintf("illegal-role-%d", time.Now().UnixNano()),
+			"entity":           entityId,
+			"venue":            venueId,
+			"managementPolicy": roleUpdateOnlyPolicy.ID,
+			"users":            []string{targetUserId},
+		}
+
+		s, b, e := client.DoRequest("POST", "/managementRole/0", adminToken, roleAssignPayload)
+		if e != nil {
+			t.Fatalf("POST request failed: %v", e)
+		}
+
+		if s != http.StatusForbidden {
+			t.Errorf("Security defect! Expected 403 Forbidden for managementRole:UPDATE attempting managementRole:CREATE, got %d. Body: %s", s, string(b))
+		}
+	})
+
+	// =========================================================================
+	// Scenario 7: Positive - managementRole:UPDATE authorizes role listing (READ) per Section 5.3
+	// =========================================================================
+	t.Run("Positive: managementRole:UPDATE authorizes role listing (READ)", func(t *testing.T) {
+		if roleUpdateOnlyPolicy.ID == "" {
+			t.Skip("Role-update-only policy not created")
+		}
+		_, cleanupAdminRole := createRoleForAdmin(entityId, venueId, roleUpdateOnlyPolicy.ID)
+		defer cleanupAdminRole()
+
+		s, b, e := client.DoRequest("GET", "/managementRole", adminToken, nil)
+		if e != nil {
+			t.Fatalf("GET /managementRole failed: %v", e)
+		}
+
+		if s != http.StatusOK {
+			t.Errorf("Expected 200 OK for GET /managementRole with managementRole:UPDATE, got %d. Body: %s", s, string(b))
+		}
+	})
+
+	// =========================================================================
+	// Scenario 8: Edge Case - managementRole:UPDATE is denied DELETE
+	// =========================================================================
+	t.Run("Edge Case: managementRole:UPDATE is denied managementRole:DELETE", func(t *testing.T) {
+		if roleUpdateOnlyPolicy.ID == "" {
+			t.Skip("Role-update-only policy not created")
+		}
+		_, cleanupAdminRole := createRoleForAdmin(entityId, venueId, roleUpdateOnlyPolicy.ID)
+		defer cleanupAdminRole()
+
+		s, b, e := client.DoRequest("DELETE", fmt.Sprintf("/managementRole/%s", "dummy-role-id-to-delete"), adminToken, nil)
+		if e != nil {
+			t.Fatalf("DELETE request failed: %v", e)
+		}
+
+		if s != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for managementRole:UPDATE attempting DELETE, got %d. Body: %s", s, string(b))
 		}
 	})
 }

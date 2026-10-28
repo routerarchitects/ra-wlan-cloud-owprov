@@ -121,13 +121,13 @@ func TestConfigurationsList_EntityScopedAdmin(t *testing.T) {
  *
  * DESCRIPTION:
  *   Validates that when a role specifies a venue (even if entity is populated),
- *   the user is scoped strictly to that venue and its descendants, NEVER the parent entity.
+ *   the user is scoped strictly to that exact venue, NEVER the parent entity or descendant venues.
  *
  * SCENARIO:
  *   Caller with venue-specific token invokes GET /api/v1/configurations.
  *
  * EXPECTED OUTPUT:
- *   HTTP 200 OK. Returned configurations must match Venue A and NEVER Entity A or sibling venues.
+ *   HTTP 200 OK. Returned configurations must match Venue A and NEVER Entity A or sibling/descendant venues.
  */
 func TestConfigurationsList_VenueScopedRole_ExcludesParentEntity(t *testing.T) {
 	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
@@ -149,7 +149,7 @@ func TestConfigurationsList_VenueScopedRole_ExcludesParentEntity(t *testing.T) {
 		t.Fatalf("Failed to parse response: %v", err)
 	}
 
-	// Negative Verification: Must not contain entity-wide configs
+	// Negative Verification: Must not contain entity-wide configs or non-matching venues
 	for _, config := range resp.Configurations {
 		if config.Entity == entityA && config.Venue == "" {
 			t.Errorf("Scope violation! Venue-only user received parent entity config %s", config.ID)
@@ -158,6 +158,137 @@ func TestConfigurationsList_VenueScopedRole_ExcludesParentEntity(t *testing.T) {
 			t.Errorf("Scope violation! Venue user received config %s from unrelated venue %s", config.ID, config.Venue)
 		}
 	}
+}
+
+/*
+ * TestConfigurationsList_VenueScopedRole_ExactVenueOnly_P1Regression
+ *
+ * DESCRIPTION:
+ *   P1 Regression Test for Section 3.2 of requirements/rbac-requirement.md:
+ *   Venue-scoped roles cover strictly the exact venue, excluding parent, sibling,
+ *   and descendant/child venues.
+ *
+ * TEST MATRIX:
+ *   - Positive: Scoped user receives configurations strictly belonging to Venue A.
+ *   - Positive: Scoped user can explicitly query ?venue=<Venue A>.
+ *   - Negative: Scoped user does NOT receive configurations from child/descendant venues.
+ *   - Negative: Query parameter ?venue=<child_venue> returns 403 Forbidden.
+ *   - Negative: Query parameter ?venue=<sibling_venue> returns 403 Forbidden.
+ *   - Negative: Query parameter ?entity=<parent_entity> returns 403 Forbidden.
+ *   - Edge Case: ?countOnly=true on child venue returns 403 Forbidden (no information leakage).
+ *   - Edge Case: ?countOnly=true on exact venue returns 200 OK.
+ */
+func TestConfigurationsList_VenueScopedRole_ExactVenueOnly_P1Regression(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	tokenVenueA := getEnvOrDefault("TOKEN_VENUE_A", "Bearer user-venue-a-token")
+	venueA := getEnvOrDefault("VENUE_A_UUID", "venue-a-uuid")
+	venueChildA := getEnvOrDefault("VENUE_A_CHILD_UUID", getEnvOrDefault("CHILD_VENUE_A_UUID", getEnvOrDefault("VENUE_A1_UUID", "child-venue-a-uuid")))
+	venueSibling := getEnvOrDefault("VENUE_B_UUID", "venue-b-uuid")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+
+	t.Run("Positive: Venue A scoped user receives configurations strictly for exact Venue A", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", "/configurations", tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for venue-scoped user GET /configurations, got %d. Body: %s", status, string(body))
+		}
+
+		var resp ConfigurationListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		for _, config := range resp.Configurations {
+			if config.Venue != "" && config.Venue != venueA {
+				t.Errorf("P1 Defect! Venue A scoped user received configuration %s belonging to venue %s (expected exact venue %s)",
+					config.ID, config.Venue, venueA)
+			}
+		}
+	})
+
+	t.Run("Positive: Explicit query parameter ?venue=VenueA succeeds with 200 OK", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?venue=%s", venueA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for exact venue query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Venue A scoped user does not receive child venue configurations in unfiltered list", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", "/configurations", tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp ConfigurationListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		for _, config := range resp.Configurations {
+			if config.Venue == venueChildA && venueChildA != "" {
+				t.Errorf("P1 Defect! Venue A scoped user received configuration %s from descendant venue %s",
+					config.ID, venueChildA)
+			}
+		}
+	})
+
+	t.Run("Negative: Query parameter ?venue=<child_venue> is rejected with 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?venue=%s", venueChildA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("P1 Defect! Expected 403 Forbidden for descendant venue parameter query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Query parameter ?venue=<sibling_venue> is rejected with 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?venue=%s", venueSibling), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for sibling venue query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Query parameter ?entity=<parent_entity> is rejected with 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?entity=%s", entityA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for parent entity query by venue-scoped user, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Edge Case: ?countOnly=true on child venue returns 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?venue=%s&countOnly=true", venueChildA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for countOnly on unauthorized child venue, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Edge Case: ?countOnly=true on exact venue returns 200 OK", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/configurations?venue=%s&countOnly=true", venueA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for countOnly on exact authorized venue, got %d. Body: %s", status, string(body))
+		}
+	})
 }
 
 /*
@@ -382,6 +513,17 @@ func TestConfigurationsList_SelectScoped(t *testing.T) {
 			t.Fatalf("Failed to parse count response: %v", err)
 		}
 	})
+
+	t.Run("P2 Regression: Select query with unknown or invalid IDs does not return 403 Forbidden", func(t *testing.T) {
+		endpoint := fmt.Sprintf("/configurations?entity=%s&select=invalid-id-1,invalid-id-2", entityA)
+		status, body, err := client.DoRequest("GET", endpoint, tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for select with unknown IDs, got %d. Body: %s", status, string(body))
+		}
+	})
 }
 
 // ----------------------------------------------------------------------------
@@ -463,8 +605,8 @@ func TestVariablesList_EntityScopedAdmin(t *testing.T) {
  * TestVariablesList_VenueScopedRole_ExcludesParentEntity
  *
  * DESCRIPTION:
- *   Validates that a venue-scoped user only sees variables for that venue,
- *   never the parent entity.
+ *   Validates that when a role specifies a venue (even if entity is populated),
+ *   the user is scoped strictly to that exact venue, NEVER the parent entity or descendant venues.
  */
 func TestVariablesList_VenueScopedRole_ExcludesParentEntity(t *testing.T) {
 	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
@@ -494,6 +636,137 @@ func TestVariablesList_VenueScopedRole_ExcludesParentEntity(t *testing.T) {
 			t.Errorf("Scope violation! Venue user received variable %s from unrelated venue %s", variable.ID, variable.Venue)
 		}
 	}
+}
+
+/*
+ * TestVariablesList_VenueScopedRole_ExactVenueOnly_P1Regression
+ *
+ * DESCRIPTION:
+ *   P1 Regression Test for Section 3.2 of requirements/rbac-requirement.md:
+ *   Venue-scoped roles cover strictly the exact venue, excluding parent, sibling,
+ *   and descendant/child venues.
+ *
+ * TEST MATRIX:
+ *   - Positive: Scoped user receives variables strictly belonging to Venue A.
+ *   - Positive: Scoped user can explicitly query ?venue=<Venue A>.
+ *   - Negative: Scoped user does NOT receive variables from child/descendant venues.
+ *   - Negative: Query parameter ?venue=<child_venue> returns 403 Forbidden.
+ *   - Negative: Query parameter ?venue=<sibling_venue> returns 403 Forbidden.
+ *   - Negative: Query parameter ?entity=<parent_entity> returns 403 Forbidden.
+ *   - Edge Case: ?countOnly=true on child venue returns 403 Forbidden (no information leakage).
+ *   - Edge Case: ?countOnly=true on exact venue returns 200 OK.
+ */
+func TestVariablesList_VenueScopedRole_ExactVenueOnly_P1Regression(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	tokenVenueA := getEnvOrDefault("TOKEN_VENUE_A", "Bearer user-venue-a-token")
+	venueA := getEnvOrDefault("VENUE_A_UUID", "venue-a-uuid")
+	venueChildA := getEnvOrDefault("VENUE_A_CHILD_UUID", getEnvOrDefault("CHILD_VENUE_A_UUID", getEnvOrDefault("VENUE_A1_UUID", "child-venue-a-uuid")))
+	venueSibling := getEnvOrDefault("VENUE_B_UUID", "venue-b-uuid")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+
+	t.Run("Positive: Venue A scoped user receives variables strictly for exact Venue A", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", "/variables", tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for venue-scoped user GET /variables, got %d. Body: %s", status, string(body))
+		}
+
+		var resp VariableListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		for _, variable := range resp.VariableBlocks {
+			if variable.Venue != "" && variable.Venue != venueA {
+				t.Errorf("P1 Defect! Venue A scoped user received variable block %s belonging to venue %s (expected exact venue %s)",
+					variable.ID, variable.Venue, venueA)
+			}
+		}
+	})
+
+	t.Run("Positive: Explicit query parameter ?venue=VenueA succeeds with 200 OK", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?venue=%s", venueA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for exact venue query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Venue A scoped user does not receive child venue variables in unfiltered list", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", "/variables", tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK, got %d. Body: %s", status, string(body))
+		}
+
+		var resp VariableListResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		for _, variable := range resp.VariableBlocks {
+			if variable.Venue == venueChildA && venueChildA != "" {
+				t.Errorf("P1 Defect! Venue A scoped user received variable block %s from descendant venue %s",
+					variable.ID, venueChildA)
+			}
+		}
+	})
+
+	t.Run("Negative: Query parameter ?venue=<child_venue> is rejected with 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?venue=%s", venueChildA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("P1 Defect! Expected 403 Forbidden for descendant venue parameter query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Query parameter ?venue=<sibling_venue> is rejected with 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?venue=%s", venueSibling), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for sibling venue query, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Negative: Query parameter ?entity=<parent_entity> is rejected with 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?entity=%s", entityA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for parent entity query by venue-scoped user, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Edge Case: ?countOnly=true on child venue returns 403 Forbidden", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?venue=%s&countOnly=true", venueChildA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for countOnly on unauthorized child venue, got %d. Body: %s", status, string(body))
+		}
+	})
+
+	t.Run("Edge Case: ?countOnly=true on exact venue returns 200 OK", func(t *testing.T) {
+		status, body, err := client.DoRequest("GET", fmt.Sprintf("/variables?venue=%s&countOnly=true", venueA), tokenVenueA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for countOnly on exact authorized venue, got %d. Body: %s", status, string(body))
+		}
+	})
 }
 
 /*
@@ -706,6 +979,17 @@ func TestVariablesList_SelectScoped(t *testing.T) {
 		}
 		if err := json.Unmarshal(body, &resp); err != nil {
 			t.Fatalf("Failed to parse count response: %v", err)
+		}
+	})
+
+	t.Run("P2 Regression: Select query with unknown or invalid IDs does not return 403 Forbidden", func(t *testing.T) {
+		endpoint := fmt.Sprintf("/variables?entity=%s&select=invalid-id-1,invalid-id-2", entityA)
+		status, body, err := client.DoRequest("GET", endpoint, tokenAdminA, nil)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("Expected 200 OK for select with unknown IDs, got %d. Body: %s", status, string(body))
 		}
 	})
 }

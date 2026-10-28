@@ -39,12 +39,11 @@ namespace OpenWifi {
 		if (FindAllUserRoles(UserInfo_.userinfo.id, Roles)) {
 			// 1. Process venue-specific roles:
 			// If role specifies a venue (even if entity is also populated),
-			// only collect the venue (and its descendant venues) — NEVER the entity.
+			// only collect the exact venue — NEVER the entity, and NEVER descendant venues.
 			for (const auto &role : Roles) {
 				if (!role.venue.empty()) {
 					if (RoleAllowsVariablesRead(role)) {
 						AllowedVenues.insert(role.venue);
-						GetDescendantVenues(role.venue, AllowedVenues);
 					} else {
 						DeniedVenues.insert(role.venue);
 					}

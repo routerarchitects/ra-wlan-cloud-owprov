@@ -573,6 +573,33 @@ go test -v . -run TestManagementRoleDecoupling/can_GET_managementPolicy
 go test -v . -run TestManagementRoleDecoupling/Explicit_managementRole:FULL
 ```
 
+#### **10.6 `managementRole:UPDATE` Insufficient for `managementRole:CREATE` (Negative P1 Regression)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Negative: managementRole:UPDATE is denied managementRole:CREATE (P1 Regression)`) & `TestManagementRoleCreate_UpdatePermissionDoesNotGrantCreate_P1Regression`
+- **Description**: Verifies Section 5.3 Permission Semantics — holding `managementRole:UPDATE` grants READ and UPDATE, but strictly DENIES `managementRole:CREATE`.
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/managementRole:UPDATE_is_denied
+```
+
+#### **10.7 `managementRole:UPDATE` Authorizes Role Listing & Reading (Positive Section 5.3)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Positive: managementRole:UPDATE authorizes role listing (READ)`)
+- **Description**: Verifies Section 5.3 Permission Expansion — `managementRole:UPDATE` inherently expands to include `READ` permissions, authorizing `GET /api/v1/managementRole`.
+- **Expected Output**: **`200 OK`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/authorizes_role_listing
+```
+
+#### **10.8 `managementRole:UPDATE` Cannot Delete Roles (Edge Case)**
+- **Test Function**: `TestManagementRoleDecoupling` (Sub-test: `Edge Case: managementRole:UPDATE is denied managementRole:DELETE`)
+- **Description**: Verifies that `managementRole:UPDATE` cannot delete management roles (`DELETE /api/v1/managementRole/{id}`).
+- **Expected Output**: **`403 Forbidden`**
+- **Command**:
+```bash
+go test -v . -run TestManagementRoleDecoupling/denied_managementRole:DELETE
+```
+
 ---
 
 ### **11. Issue 5 (P2): Venue Deletion Structural Dependency Checks (`DELETE /venue/{id}`)**
@@ -760,13 +787,13 @@ TOKEN_ROOT="Bearer <root_token>" go test -v . -run TestConfigurationsList_RootBy
 TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" OPERATOR_B_ENTITY_UUID="<entity_b_uuid>" go test -v . -run TestConfigurationsList_EntityScopedAdmin
 ```
 
-#### **14.3 Venue-Scoped Role Excludes Parent Entity (Positive & Negative)**
-- **Test Function**: `TestConfigurationsList_VenueScopedRole_ExcludesParentEntity`
-- **Description**: Verifies user assigned to Venue A receives only Venue A configurations and is denied access to parent Entity A configurations.
-- **Expected Output**: **`200 OK` (Venue A configs only)**
+#### **14.3 Venue-Scoped Role Excludes Parent Entity & Descendant Venues (Positive, Negative & Edge)**
+- **Test Function**: `TestConfigurationsList_VenueScopedRole_ExcludesParentEntity` & `TestConfigurationsList_VenueScopedRole_ExactVenueOnly_P1Regression`
+- **Description**: Verifies user assigned to Venue A receives only Venue A configurations and is denied access to parent Entity A configurations, sibling venues, and descendant/child venues.
+- **Expected Output**: **`200 OK` (exact Venue A configs only) / `403 Forbidden` (on child or out-of-scope venues)**
 - **Command**:
 ```bash
-TOKEN_VENUE_A="Bearer <venue_a_token>" VENUE_A_UUID="<venue_a_uuid>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" go test -v . -run TestConfigurationsList_VenueScopedRole_ExcludesParentEntity
+TOKEN_VENUE_A="Bearer <venue_a_token>" VENUE_A_UUID="<venue_a_uuid>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" VENUE_A_CHILD_UUID="<child_venue_uuid>" go test -v . -run TestConfigurationsList_VenueScopedRole_ExactVenueOnly_P1Regression
 ```
 
 #### **14.4 Missing configuration:GET Permission (Negative)**
@@ -805,21 +832,62 @@ TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TOKEN_NO_ACCESS="Bearer <no_acce
 TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" OPERATOR_A_ENTITY_UUID="<entity_a_uuid>" go test -v . -run TestConfigurationsList_SelectScoped
 ```
 
-#### **14.8 Variables List Scoping (Positive & Negative)**
+#### **14.8 Variables List Scoping (Positive, Negative & Edge)**
 - **Test Functions**:
   - `TestVariablesList_RootBypass`
   - `TestVariablesList_EntityScopedAdmin`
   - `TestVariablesList_VenueScopedRole_ExcludesParentEntity`
+  - `TestVariablesList_VenueScopedRole_ExactVenueOnly_P1Regression`
   - `TestVariablesList_NoPermissions`
   - `TestVariablesList_CrossTenantQueryParam_Negative`
   - `TestVariablesList_CountOnly`
   - `TestVariablesList_Unauthenticated`
   - `TestVariablesList_SelectScoped`
-- **Description**: Verifies that `GET /api/v1/variables` enforces the exact same multi-tenant RBAC inheritance, isolation, query parameter validation (403 Forbidden on out-of-scope parameters), and select scoping.
+- **Description**: Verifies that `GET /api/v1/variables` enforces the exact same multi-tenant RBAC inheritance, isolation, descendant venue exclusion, query parameter validation (403 Forbidden on out-of-scope parameters), and select scoping.
 - **Expected Output**: **`200 OK` / `403 Forbidden`**
 - **Command**:
 ```bash
-TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" TOKEN_ROOT="Bearer <root_token>" TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestVariablesList
+TOKEN_VENUE_A="Bearer <venue_a_token>" VENUE_A_UUID="<venue_a_uuid>" VENUE_A_CHILD_UUID="<child_venue_uuid>" go test -v . -run TestVariablesList_VenueScopedRole_ExactVenueOnly_P1Regression
+```
+
+---
+
+### **15. Issue 7 (P1): V2 Management-Role Creation Exact Scope & Batch Delegation Enforcement (`POST /api/v2/managementRole/0`)**
+
+#### **15.1 Batch Venue Creation with Full Scope Authority (Positive)**
+- **Test Function**: `TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression` (Sub-test: `Positive: Authorized entity administrator can batch-create roles across owned venues`)
+- **Description**: Verifies an authorized administrator holding `managementRole:CREATE` across target venues can batch-assign roles via `venueIds: [...]`.
+- **Expected Output**: **`200 OK` / `201 Created`**
+- **Command**:
+```bash
+TOKEN_ROOT="Bearer <root_token>" go test -v . -run TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression/batch-create
+```
+
+#### **15.2 Batch Venue Creation Rejected when Target Venue Lacks Authority (Negative)**
+- **Test Function**: `TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression` (Sub-test: `Negative: Batch creation rejected when target venue lacks managementRole:CREATE authority`)
+- **Description**: Verifies that including an unauthorized venue in `venueIds` causes the entire batch creation to be rejected with 400 Bad Request / 403 Forbidden.
+- **Expected Output**: **`400 Bad Request` / `403 Forbidden`**
+- **Command**:
+```bash
+TOKEN_ADMIN_OPERATOR_A="Bearer <admin_a_token>" go test -v . -run TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression/lacks_managementRole:CREATE
+```
+
+#### **15.3 Single Target Venue Creation Rejected when Lacking Authority (Negative)**
+- **Test Function**: `TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression` (Sub-test: `Negative: User without managementRole:CREATE on single target venue is rejected`)
+- **Description**: Verifies a user without `managementRole:CREATE` cannot create a role on a target venue via V2.
+- **Expected Output**: **`400 Bad Request` / `403 Forbidden`**
+- **Command**:
+```bash
+TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression/single_target_venue
+```
+
+#### **15.4 Entity Role Creation Enforces managementRole:CREATE on Entity (Edge Case)**
+- **Test Function**: `TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression` (Sub-test: `Edge Case: Empty venueIds defaults to entity role and enforces managementRole:CREATE on entity`)
+- **Description**: Verifies that empty `venueIds: []` falls back to entity role creation and strictly validates `managementRole:CREATE` on the target entity.
+- **Expected Output**: **`400 Bad Request` / `403 Forbidden`**
+- **Command**:
+```bash
+TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestManagementRole_V2_ExactScopeAndBatchDelegation_P1Regression/Empty_venueIds
 ```
 
 ---
