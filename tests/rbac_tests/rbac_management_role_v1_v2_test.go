@@ -915,6 +915,12 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 	}
 
 	// b) Venue-specific role on fixtures.venueA1 with restricted policy (causing venue shadowing)
+	var createdShadowVenueRole struct {
+		ID string `json:"id"`
+	}
+	var createdVenueA1TestRole struct {
+		ID string `json:"id"`
+	}
 	if fixtures.venueA1 != "" {
 		shadowVenuePayload := map[string]interface{}{
 			"name":             fmt.Sprintf("shadow-venue-role-%d", time.Now().UnixNano()),
@@ -922,9 +928,6 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			"venue":            fixtures.venueA1,
 			"managementPolicy": restrictPolicyID,
 			"users":            []string{shadowedUserID},
-		}
-		var createdShadowVenueRole struct {
-			ID string `json:"id"`
 		}
 		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, shadowVenuePayload); err == nil && status == http.StatusOK {
 			_ = json.Unmarshal(body, &createdShadowVenueRole)
@@ -940,9 +943,6 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			"venue":            fixtures.venueA1,
 			"managementPolicy": fixtures.policyValid,
 			"users":            []string{fixtures.userValid},
-		}
-		var createdVenueA1TestRole struct {
-			ID string `json:"id"`
 		}
 		if status, body, err := client.DoRequest("POST", "/managementRole/0", fixtures.token, venueA1TestPayload); err == nil && status == http.StatusOK {
 			_ = json.Unmarshal(body, &createdVenueA1TestRole)
@@ -1444,9 +1444,13 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 			t.Fatalf("Failed to parse response: %v", err)
 		}
 		hasEntityRole := false
+		foundSelfShadowRole := false
 		for _, r := range resp.Roles {
-			if r.Venue == fixtures.venueA1 {
-				t.Errorf("Shadowed venue %s leaked in role listing", fixtures.venueA1)
+			if createdVenueA1TestRole.ID != "" && r.ID == createdVenueA1TestRole.ID {
+				t.Errorf("Security Violation: Third-party role %s in shadowed venue leaked to shadowed user", r.ID)
+			}
+			if createdShadowVenueRole.ID != "" && r.ID == createdShadowVenueRole.ID {
+				foundSelfShadowRole = true
 			}
 			if r.Entity == fixtures.entityA && r.Venue == "" {
 				hasEntityRole = true
@@ -1455,8 +1459,11 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		if !hasEntityRole && fixtures.entityA != "" {
 			t.Errorf("Entity-scoped role under %s was incorrectly excluded when user has shadowed denied venue %s", fixtures.entityA, fixtures.venueA1)
 		}
+		if !foundSelfShadowRole && createdShadowVenueRole.ID != "" {
+			t.Errorf("Self-Inspection Violation: Directly assigned role %s in venue %s was incorrectly excluded", createdShadowVenueRole.ID, fixtures.venueA1)
+		}
 
-		// 2. Explicit query for shadowed venue returns 200 OK with empty roles list
+		// 2. Explicit query for shadowed venue returns caller's own role but excludes third-party role
 		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s", fixtures.venueA1), tokenShadowedUser, nil)
 		if err != nil {
 			t.Fatalf("GET /managementRole?venue failed: %v", err)
@@ -1472,26 +1479,57 @@ func TestManagementRolePolicyQueryFilter(t *testing.T) {
 		if err := json.Unmarshal(body, &shadowedResp); err != nil {
 			t.Fatalf("Failed to parse response: %v", err)
 		}
-		if len(shadowedResp.Roles) != 0 {
-			t.Fatalf("Expected 0 roles for shadowed venue query, got %d", len(shadowedResp.Roles))
+		foundOwnInVenueQuery := false
+		for _, r := range shadowedResp.Roles {
+			if createdVenueA1TestRole.ID != "" && r.ID == createdVenueA1TestRole.ID {
+				t.Errorf("Security Violation: Third-party role %s leaked under ?venue query for shadowed venue", r.ID)
+			}
+			if createdShadowVenueRole.ID != "" && r.ID == createdShadowVenueRole.ID {
+				foundOwnInVenueQuery = true
+			}
+		}
+		if !foundOwnInVenueQuery && createdShadowVenueRole.ID != "" {
+			t.Errorf("Expected caller's own role %s to be returned when filtering ?venue=%s", createdShadowVenueRole.ID, fixtures.venueA1)
 		}
 
-		// 3. Verify countOnly=true returns 200 OK with count=0 for shadowed venue
-		status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&countOnly=true", fixtures.venueA1), tokenShadowedUser, nil)
-		if err != nil {
-			t.Fatalf("GET /managementRole?venue&countOnly failed: %v", err)
-		}
-		if status != http.StatusOK {
-			t.Fatalf("Expected 200 OK for countOnly shadowed venue, got %d. Body: %s", status, string(body))
-		}
-		var countShadowedResp struct {
-			Count int `json:"count"`
-		}
-		if err := json.Unmarshal(body, &countShadowedResp); err != nil {
-			t.Fatalf("Failed to parse count response: %v", err)
-		}
-		if countShadowedResp.Count != 0 {
-			t.Fatalf("Expected count=0 for countOnly shadowed venue, got %d", countShadowedResp.Count)
+		// 3. Querying another user's roles in shadowed venue returns 0 roles
+		if fixtures.userValid != "" {
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&user=%s", fixtures.venueA1, fixtures.userValid), tokenShadowedUser, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?venue&user failed: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK for shadowed venue other-user query, got %d. Body: %s", status, string(body))
+			}
+			var otherUserResp struct {
+				Roles []struct {
+					ID string `json:"id"`
+				} `json:"roles"`
+			}
+			if err := json.Unmarshal(body, &otherUserResp); err != nil {
+				t.Fatalf("Failed to parse other-user response: %v", err)
+			}
+			if len(otherUserResp.Roles) != 0 {
+				t.Errorf("Security Violation: Shadowed user can see other user's roles in denied venue: %v", otherUserResp.Roles)
+			}
+
+			// Verify countOnly=true returns 0 for other user in shadowed venue
+			status, body, err = client.DoRequest("GET", fmt.Sprintf("/managementRole?venue=%s&user=%s&countOnly=true", fixtures.venueA1, fixtures.userValid), tokenShadowedUser, nil)
+			if err != nil {
+				t.Fatalf("GET /managementRole?venue&user&countOnly failed: %v", err)
+			}
+			if status != http.StatusOK {
+				t.Fatalf("Expected 200 OK for other-user countOnly, got %d. Body: %s", status, string(body))
+			}
+			var countOtherResp struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &countOtherResp); err != nil {
+				t.Fatalf("Failed to parse count response: %v", err)
+			}
+			if countOtherResp.Count != 0 {
+				t.Errorf("Expected count=0 for other user in shadowed venue, got %d", countOtherResp.Count)
+			}
 		}
 	})
 

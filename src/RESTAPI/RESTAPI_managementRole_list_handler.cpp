@@ -78,14 +78,6 @@ namespace OpenWifi {
 					AllowedVenues.erase(vId);
 				}
 			}
-
-			if (!venueParam.empty() && DeniedVenues.count(venueParam)) {
-				if (QB_.CountOnly) {
-					return ReturnCountOnly(0);
-				}
-				ProvObjects::ManagementRoleVec EmptyRoles;
-				return MakeJSONObjectArray("roles", EmptyRoles, *this);
-			}
 		}
 
 		if (!QB_.Select.empty()) {
@@ -151,9 +143,6 @@ namespace OpenWifi {
 					continue;
 				}
 				if (!venueParam.empty() && role.venue != venueParam) {
-					continue;
-				}
-				if (!role.venue.empty() && DeniedVenues.count(role.venue)) {
 					continue;
 				}
 				if (!userParam.empty()) {
