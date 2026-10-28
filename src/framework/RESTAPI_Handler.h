@@ -753,6 +753,9 @@ namespace OpenWifi {
 		const std::string &Requester() const { return REST_Requester_; }
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method,
 								  std::string &TargetEntity, std::string &TargetVenue);
+		bool IsScopeAuthorized(const std::string &TargetEntity, const std::string &TargetVenue,
+							   const std::string &Resource, const std::string &Method,
+							   std::string *Reason = nullptr);
 		bool HasScopeConstraint(const std::string &Resource, const std::string &Method);
 		bool PolicyAllows(const ProvObjects::ManagementPolicy &Policy, const std::string &Resource,
 						  const std::string &Method);

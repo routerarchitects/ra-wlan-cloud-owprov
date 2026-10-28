@@ -122,6 +122,9 @@ namespace OpenWifi {
 		if (RawObject->has("variables"))
 			Existing.variables = NewObj.variables;
 
+		std::string previous_entity = Existing.entity;
+		std::string previous_venue = Existing.venue;
+
 		std::string FromPolicy, ToPolicy;
 		if (!CreateMove(RawObject, "managementPolicy", &VariablesDB::RecordName::managementPolicy,
 						Existing, FromPolicy, ToPolicy, StorageService()->PolicyDB()))
@@ -136,6 +139,43 @@ namespace OpenWifi {
 		if (!CreateMove(RawObject, "venue", &VariablesDB::RecordName::venue, Existing, FromVenue,
 						ToVenue, StorageService()->VenueDB()))
 			return BadRequest(RESTAPI::Errors::VenueMustExist);
+
+		if (RawObject->has("venue") && RawObject->has("entity") && !ToVenue.empty() && !ToEntity.empty()) {
+			return BadRequest(RESTAPI::Errors::NotBoth);
+		}
+
+		if (RawObject->has("venue") && !ToVenue.empty() && !Existing.entity.empty() && !RawObject->has("entity")) {
+			FromEntity = Existing.entity;
+			ToEntity.clear();
+			Existing.entity.clear();
+		} else if (RawObject->has("entity") && !ToEntity.empty() && !Existing.venue.empty() && !RawObject->has("venue")) {
+			FromVenue = Existing.venue;
+			ToVenue.clear();
+			Existing.venue.clear();
+		}
+
+		const bool isTransferring = (Existing.venue != previous_venue) || (Existing.entity != previous_entity);
+
+		if (isTransferring && UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			if (Existing.venue.empty() && Existing.entity.empty()) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+
+			if (!Existing.venue.empty()) {
+				ProvObjects::Venue destVenueRecord;
+				if (!StorageService()->VenueDB().GetRecord("id", Existing.venue, destVenueRecord)) {
+					return BadRequest(RESTAPI::Errors::VenueMustExist);
+				}
+				std::string destEntity = destVenueRecord.entity;
+				if (!IsScopeAuthorized(destEntity, Existing.venue, "configuration", Poco::Net::HTTPRequest::HTTP_PUT)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+			} else if (!Existing.entity.empty()) {
+				if (!IsScopeAuthorized(Existing.entity, "", "configuration", Poco::Net::HTTPRequest::HTTP_PUT)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+			}
+		}
 
 		if (DB_.UpdateRecord("id", UUID, Existing)) {
 			MoveUsage(StorageService()->PolicyDB(), DB_, FromPolicy, ToPolicy, Existing.info.id);

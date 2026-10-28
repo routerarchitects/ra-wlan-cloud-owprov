@@ -85,9 +85,25 @@ namespace OpenWifi {
 			return NotFound();
 		}
 
-		if (!Existing.children.empty() || !Existing.devices.empty()) {
-			return BadRequest(RESTAPI::Errors::StillInUse);
+		std::vector<std::string> BlockingReasons;
+		if (!Existing.children.empty()) {
+			BlockingReasons.push_back(fmt::format("{} child venue(s)", Existing.children.size()));
 		}
+		if (!Existing.devices.empty()) {
+			BlockingReasons.push_back(fmt::format("{} device(s)", Existing.devices.size()));
+		}
+		if (!Existing.contacts.empty()) {
+			BlockingReasons.push_back(fmt::format("{} contact(s)", Existing.contacts.size()));
+		}
+		if (!Existing.location.empty()) {
+			BlockingReasons.push_back("attached location");
+		}
+
+		if (!BlockingReasons.empty()) {
+			std::string Details = "Cannot delete venue while dependencies exist: " + MakeList(BlockingReasons);
+			return BadRequest(RESTAPI::Errors::StillInUse, Details);
+		}
+
 		if (!Existing.subscriber.empty()) {
 			return BadRequest(RESTAPI::Errors::VenueDeleteRequiresSubscriberApi);
 		}
@@ -113,14 +129,8 @@ namespace OpenWifi {
 		if (!Existing.entity.empty())
 			StorageService()->EntityDB().DeleteVenue("id", Existing.entity, UUID);
 
-		ManagementRoleDB::RecordVec MatchingVenueRoles;
 		std::string WhereVenueRoles = "venue='" + ORM::Escape(UUID) + "'";
-		if (StorageService()->RolesDB().GetRecords(0, 10000, MatchingVenueRoles, WhereVenueRoles)) {
-			for (const auto &Role : MatchingVenueRoles) {
-				StorageService()->RolesDB().DeleteRecord("id", Role.info.id);
-				MoveUsage(StorageService()->PolicyDB(), StorageService()->RolesDB(), Role.managementPolicy, "", Role.info.id);
-			}
-		}
+		StorageService()->RolesDB().DeleteRecords(WhereVenueRoles);
 		AuthCache::GetInstance()->Clear();
 
 		DB_.DeleteRecord("id", UUID);

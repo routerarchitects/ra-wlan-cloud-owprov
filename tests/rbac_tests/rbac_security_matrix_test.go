@@ -143,3 +143,47 @@ func TestVenueDelete_VenueWithDevicesReturnsStillInUse(t *testing.T) {
 		t.Errorf("Expected 400/409/403 StillInUse error when deleting venue with active dependencies, got %d. Body: %s", status, string(body))
 	}
 }
+
+// ----------------------------------------------------------------------------
+// 4. MANAGEMENT ROLE CREATE PERMISSION (Section 5.3 P1 Regression)
+// ----------------------------------------------------------------------------
+
+/*
+ * TestManagementRoleCreate_UpdatePermissionDoesNotGrantCreate_P1Regression
+ *
+ * DESCRIPTION:
+ *   Validates Section 5.3 Permission Semantics:
+ *   UPDATE permission grants READ and UPDATE, but strictly DENIES CREATE operations.
+ *   An administrator whose policy grants only managementRole:UPDATE MUST NOT be permitted
+ *   to create new management roles (POST /api/v1/managementRole/0).
+ *
+ * SCENARIO:
+ *   Caller with managementRole:UPDATE attempts POST /api/v1/managementRole/0.
+ *
+ * EXPECTED OUTPUT:
+ *   HTTP 403 Access Denied / Forbidden.
+ */
+func TestManagementRoleCreate_UpdatePermissionDoesNotGrantCreate_P1Regression(t *testing.T) {
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+
+	tokenRoleUpdateOnly := getEnvOrDefault("TOKEN_ROLE_UPDATE_ONLY", getEnvOrDefault("TOKEN_NO_ACCESS", "Bearer user-role-update-only-token"))
+	targetUserA := getEnvOrDefault("TARGET_USER_A", "user-a-uuid")
+	entityA := getEnvOrDefault("OPERATOR_A_ENTITY_UUID", "7fa1a180-c93c-4b3b-a3ac-b3fbbf0fa097")
+	weakPolicy := getEnvOrDefault("POLICY_WEAK_ID", "94bb61a3-aa3e-49aa-9704-cc254fec4482")
+
+	payload := map[string]interface{}{
+		"name":             "attempted-role-by-updater",
+		"users":            []string{targetUserA},
+		"entity":           entityA,
+		"managementPolicy": weakPolicy,
+	}
+
+	status, body, err := client.DoRequest("POST", "/managementRole/0", tokenRoleUpdateOnly, payload)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+
+	if status != http.StatusForbidden {
+		t.Errorf("Security defect! Expected 403 Forbidden for user with only managementRole:UPDATE attempting POST /managementRole/0, got %d. Body: %s", status, string(body))
+	}
+}

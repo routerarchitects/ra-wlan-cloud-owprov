@@ -957,12 +957,12 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location"};
+			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole"};
 			E1.access = {"FULL"}; P.entries.push_back(E1);
 
 			PolicyDB().CreateRecord(P);
 		} else {
-			EnsureResourceInPolicy("Admin", {"contact", "location"}, "FULL");
+			EnsureResourceInPolicy("Admin", {"contact", "location", "managementRole"}, "FULL");
 		}
 		if (!PolicyDB().Exists("name", "CSR")) {
 			ProvObjects::ManagementPolicy P;
@@ -972,12 +972,12 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "configuration", "inventory", "contact", "location"};
+			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole"};
 			E1.access = {"READ"}; P.entries.push_back(E1);
 
 			PolicyDB().CreateRecord(P);
 		} else {
-			EnsureResourceInPolicy("CSR", {"contact", "location"}, "READ");
+			EnsureResourceInPolicy("CSR", {"contact", "location", "operator", "subscriber", "managementRole"}, "READ");
 		}
 		if (!PolicyDB().Exists("name", "NOC")) {
 			ProvObjects::ManagementPolicy P;
@@ -987,13 +987,13 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "contact", "location"}; E1.access = {"READ"}; P.entries.push_back(E1);
+			E1.resources = {"entity", "venue", "operator", "subscriber", "contact", "location", "managementRole"}; E1.access = {"READ"}; P.entries.push_back(E1);
 			ProvObjects::ManagementPolicyEntry E2;
 			E2.resources = {"configuration", "inventory"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
 
 			PolicyDB().CreateRecord(P);
 		} else {
-			EnsureResourceInPolicy("NOC", {"contact", "location"}, "READ");
+			EnsureResourceInPolicy("NOC", {"contact", "location", "operator", "subscriber", "managementRole"}, "READ");
 		}
 		if (!PolicyDB().Exists("name", "Installer")) {
 			ProvObjects::ManagementPolicy P;
@@ -1003,13 +1003,13 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"venue", "configuration", "contact", "location"}; E1.access = {"READ"}; P.entries.push_back(E1);
+			E1.resources = {"entity", "venue", "configuration", "contact", "location"}; E1.access = {"READ"}; P.entries.push_back(E1);
 			ProvObjects::ManagementPolicyEntry E2;
 			E2.resources = {"inventory"}; E2.access = {"READ", "UPDATE"}; P.entries.push_back(E2);
 
 			PolicyDB().CreateRecord(P);
 		} else {
-			EnsureResourceInPolicy("Installer", {"contact", "location"}, "READ");
+			EnsureResourceInPolicy("Installer", {"entity", "contact", "location"}, "READ");
 		}
 	}
 } // namespace OpenWifi

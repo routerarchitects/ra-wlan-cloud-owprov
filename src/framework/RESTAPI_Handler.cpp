@@ -94,6 +94,58 @@ namespace OpenWifi {
 
 		Logger_.information(fmt::format("AUTH_DEBUG: Resolved TargetEntity='{}' TargetVenue='{}'", TargetEntity, TargetVenue));
 
+		// Self-Role Inspection Exemption (Section 6.4):
+		// Any authenticated user is inherently authorized to inspect their own assigned Management Roles.
+		if (Resource == "managementRole" && Method == Poco::Net::HTTPRequest::HTTP_GET) {
+			auto itRole = Bindings_.find("id");
+			if (itRole != Bindings_.end() && !itRole->second.empty()) {
+				ProvObjects::ManagementRole R;
+				if (StorageService()->RolesDB().GetRecord("id", itRole->second, R)) {
+					if (std::find(R.users.begin(), R.users.end(), UserInfo_.userinfo.id) != R.users.end()) {
+						Logger_.information(fmt::format("AUTH_DEBUG: Granted self-inspection exemption for role '{}'", R.info.id));
+						return true;
+					}
+				}
+			}
+		}
+
+		if (IsScopeAuthorized(TargetEntity, TargetVenue, Resource, Method, &Reason)) {
+			return true;
+		}
+
+		if (Reason.empty()) {
+			Reason = "No authorized role matches the required scope and permission.";
+		}
+		Logger_.information(fmt::format("AUTH_DEBUG: Denied for Path='{}'. Reason='{}'", Path, Reason));
+		return false;
+	}
+
+	bool RESTAPIHandler::IsScopeAuthorized(const std::string &TargetEntity,
+										   const std::string &TargetVenue,
+										   const std::string &Resource,
+										   const std::string &Method,
+										   std::string *Reason) {
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
+			return true;
+		}
+
+		std::vector<ProvObjects::ManagementRole> Roles;
+		FindAllUserRoles(UserInfo_.userinfo.id, Roles);
+
+		auto CheckRolePolicy = [&](const ProvObjects::ManagementRole &role) -> bool {
+			ProvObjects::ManagementPolicy Policy;
+			if (!AuthCache::GetInstance()->GetPolicy(role.managementPolicy, Policy)) {
+				if (!StorageService()->PolicyDB().GetRecord("id", role.managementPolicy, Policy)) {
+					Logger_.information(fmt::format("AUTH_DEBUG: Policy ID '{}' not found in DB", role.managementPolicy));
+					return false;
+				}
+				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
+			}
+			bool res = PolicyAllows(Policy, Resource, Method);
+			Logger_.information(fmt::format("AUTH_DEBUG: PolicyAllows(policy='{}', resource='{}', method='{}') -> {}", Policy.info.id, Resource, Method, res));
+			return res;
+		};
+
 		if (!TargetVenue.empty()) {
 			bool foundSpecificVenueRole = false;
 			for (const auto &role : Roles) {
@@ -105,7 +157,9 @@ namespace OpenWifi {
 				}
 			}
 			if (foundSpecificVenueRole) {
-				Reason = "Specific venue role policy denied access.";
+				if (Reason) {
+					*Reason = "Specific venue role policy denied access.";
+				}
 				Logger_.information(fmt::format("AUTH_DEBUG: Denied by specific venue role policy"));
 				return false;
 			}
@@ -138,8 +192,9 @@ namespace OpenWifi {
 			}
 		}
 
-		Reason = "No authorized role matches the required scope and permission.";
-		Logger_.information(fmt::format("AUTH_DEBUG: Denied for Path='{}'. Reason='{}'", Path, Reason));
+		if (Reason) {
+			*Reason = "No authorized role matches the required scope and permission.";
+		}
 		return false;
 	}
 
@@ -173,8 +228,8 @@ namespace OpenWifi {
 		}
 
 		const bool HasBoundObjectId =
-			!Id.empty() && Id != "0" &&
-			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0);
+			!Id.empty() &&
+			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0));
 
 		Logger_.information(fmt::format("RESOLVE_DEBUG: Path='{}' Method='{}' Id='{}' HasBoundObjectId={}", Path, Method, Id, HasBoundObjectId));
 		for (const auto &[bKey, bVal] : Bindings_) {
@@ -315,11 +370,17 @@ namespace OpenWifi {
 					return true;
 				}
 				return false;
-			} else if (Path.find("/api/v1/variables") != std::string::npos) {
+			} else if (Path.find("/api/v1/variable") != std::string::npos) {
 				ProvObjects::VariableBlock V;
 				if (StorageService()->VariablesDB().GetRecord("id", Id, V)) {
 					TargetEntity = V.entity;
 					TargetVenue = V.venue;
+					if (TargetEntity.empty() && !TargetVenue.empty()) {
+						ProvObjects::Venue Ven;
+						if (StorageService()->VenueDB().GetRecord("id", TargetVenue, Ven)) {
+							TargetEntity = Ven.entity;
+						}
+					}
 					return true;
 				}
 				return false;
@@ -417,6 +478,15 @@ namespace OpenWifi {
 		// SOURCE 3: Request body (entity / venue / operator / parent fields).
 		// Only consulted when params yielded nothing.
 		// ----------------------------------------------------------------
+		// When creating an operator (POST /api/v1/operator/0), its companion entity is always
+		// attached directly to the Root Entity (EntityDB::RootUUID()). Target scope is therefore Root Entity.
+		// Handle this before checking CandidateOperator so a new registrationId is not looked up in DB.
+		if (Path.find("/api/v1/operator") != std::string::npos && Method == Poco::Net::HTTPRequest::HTTP_POST) {
+			TargetEntity = EntityDB::RootUUID();
+			TargetVenue = "";
+			return true;
+		}
+
 		if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_) {
 			if (ParsedBody_->has("entity"))
 				CandidateEntity = ParsedBody_->get("entity").toString();
@@ -521,7 +591,7 @@ namespace OpenWifi {
 			(Resource == "entity" || Resource == "venue" || Resource == "inventory" ||
 			 Resource == "configuration" || Resource == "managementRole" ||
 			 Resource == "contact" || Resource == "location" || Resource == "managementPolicy" ||
-			 Resource == "map" || Resource == "variables" || Resource == "serviceClass" ||
+			 Resource == "map" || Resource == "variables" || Resource == "variable" || Resource == "serviceClass" ||
 			 Resource == "operator" || Resource == "overrides" || Resource == "subscriber" ||
 			 Resource == "subscriberDevice" || Resource == "op_contact" ||
 			 Resource == "op_location");
@@ -546,8 +616,12 @@ namespace OpenWifi {
 			}
 		}
 
-		if (!Id.empty() && Id != "0" &&
-			!(Method == Poco::Net::HTTPRequest::HTTP_POST && Poco::icompare(Id, "new") == 0)) {
+		if (!Id.empty() &&
+			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0))) {
+			return true;
+		}
+
+		if (Resource == "operator" && Method == Poco::Net::HTTPRequest::HTTP_POST) {
 			return true;
 		}
 
@@ -586,8 +660,8 @@ namespace OpenWifi {
 			bool ResourceMatches = false;
 			for (const auto &res : entry.resources) {
 				if (Poco::icompare(res, Resource) == 0 || res == "*" ||
-					((Resource == "managementRole" || Resource == "managementPolicy") &&
-					 (Poco::icompare(res, "entity") == 0 || Poco::icompare(res, "operator") == 0)) ||
+					((Resource == "variable" || Resource == "variables") && Poco::icompare(res, "configuration") == 0) ||
+					(Resource == "map" && (Poco::icompare(res, "venue") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
 					(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
 					(Resource == "overrides" && Poco::icompare(res, "inventory") == 0) ||
@@ -602,9 +676,9 @@ namespace OpenWifi {
 
 			for (const auto &acc : entry.access) {
 				if (acc == "FULL" || acc == AccessRequired ||
-					(AccessRequired == "CREATE" && (acc == "MODIFY" || acc == "UPDATE" || acc == "READWRITE")) ||
-					(AccessRequired == "UPDATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
-					(AccessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY"))) {
+					(AccessRequired == "CREATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+					(AccessRequired == "UPDATE" && (acc == "UPDATE" || acc == "MODIFY" || acc == "READWRITE")) ||
+					(AccessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY" || acc == "CREATE" || acc == "UPDATE" || acc == "DELETE"))) {
 					return true;
 				}
 			}
@@ -764,8 +838,8 @@ namespace OpenWifi {
 			return "location";
 		if (Path.find("/api/v1/map") != std::string::npos)
 			return "map";
-		if (Path.find("/api/v1/variables") != std::string::npos)
-			return "variables";
+		if (Path.find("/api/v1/variable") != std::string::npos)
+			return "variable";
 		if (Path.find("/api/v1/radiusEndpoint") != std::string::npos ||
 			Path.find("/api/v1/RADIUSEndPoints") != std::string::npos)
 			return "radiusEndpoint";

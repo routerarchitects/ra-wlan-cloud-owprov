@@ -25,7 +25,7 @@ namespace OpenWifi {
 		}
 
 		if (requesterRole != SecurityObjects::ROOT) {
-			if (TargetUser.createdBy != requesterUserId && TargetUser.id != requesterUserId) {
+			if (TargetUser.id == requesterUserId || TargetUser.createdBy != requesterUserId) {
 				ErrorDescription = "You are not authorized to assign or modify roles for users you did not create.";
 				return false;
 			}
@@ -109,10 +109,10 @@ namespace OpenWifi {
 		for (const auto &acc : entry.access) {
 			if (acc == "FULL" ||
 				acc == accessRequired ||
-				(accessRequired == "CREATE" && (acc == "MODIFY" || acc == "UPDATE" || acc == "READWRITE")) ||
-				(accessRequired == "UPDATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+				(accessRequired == "CREATE" && (acc == "MODIFY" || acc == "READWRITE")) ||
+				(accessRequired == "UPDATE" && (acc == "UPDATE" || acc == "MODIFY" || acc == "READWRITE")) ||
 				(accessRequired == "MODIFY" && (acc == "UPDATE" || acc == "READWRITE")) ||
-				(accessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY"))) {
+				(accessRequired == "READ" && (acc == "READWRITE" || acc == "MODIFY" || acc == "CREATE" || acc == "UPDATE" || acc == "DELETE"))) {
 				return true;
 			}
 		}
