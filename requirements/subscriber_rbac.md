@@ -137,8 +137,7 @@ The system MUST distinguish between endpoints with and without explicit target r
 #### 4.3.1 Case A — Endpoints Without Target Resource ID
 When an authorized endpoint does not contain a target resource ID in its URI path (e.g., `GET /api/v1/subscriber`, `PUT /api/v1/subscriber`, bare `DELETE /api/v1/subscriber`, and `GET /api/v1/subscriberDevice`):
 1. The system MUST bind the operational scope directly and implicitly to `CallerId = UserInfo_.userinfo.id`.
-2. The system MUST NOT require the client to supply an external `subscriberId` parameter merely to assert identity.
-3. The system MUST NOT perform a separate identity assertion check comparing client-supplied identity against `CallerId`.
+2. The system MUST NOT require a client-supplied `subscriberId` merely to establish identity. If `subscriberId` is supplied, the common Section 4.6 consistency rule applies.
 
 #### 4.3.2 Case B — Endpoints With Target Resource ID
 When an authorized endpoint contains an explicit target resource ID in its URI path (e.g., `/api/v1/subscriberDevice/{id}` or `/api/v1/venue/{id}`):
@@ -613,8 +612,7 @@ Test suites MUST provide comprehensive verification across all authorization bou
 3. **Cohesive Scope Delivery**: The complete subscriber authorization pipeline across all three active resources (`Subscriber`, `SubscriberDevice`, `Venue`) MUST function end-to-end to satisfy Issue #90.
 4. **Administrative Query Avoidance**: Evaluating the subscriber authorization branch prior to administrative role resolution MUST avoid executing unnecessary administrative `ManagementRole` database queries for subscriber requests.
 5. **Concurrency / TOCTOU**: Race-condition and TOCTOU hardening are intentionally deferred to a follow-up issue. This specification defines the authorization and ownership invariants only and does not require transaction/concurrency redesign as part of Issue #90.
-6. **Query Indexing Verification**: Queries filtering by `subscriberId` (such as `SubscriberDeviceDB` collection retrieval) and cross-table MAC lookups MUST verify execution plan efficiency (`EXPLAIN`) to ensure appropriate indexes (single or composite) are utilized rather than executing full table scans. In accordance with Non-Goal 6, existing indexes and query plans should be verified prior to introducing new schema migrations.
-7. **Single-Pass Resource Loading**: Implementations SHOULD eliminate duplicate database reads between authorization and business handlers by employing ownership-scoped queries or request-context entity forwarding.
+6. **Query Performance Verification**: The implementation MUST verify that the subscriber-device collection query uses an appropriate existing index on `subscriberId`, or an appropriate composite index based on the actual filtering/sorting pattern. Issue #90 does not require creation of a new index or database migration unless verification demonstrates that the existing schema cannot support the required query efficiently.
 
 ---
 
