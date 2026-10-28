@@ -143,14 +143,18 @@ When an authorized endpoint does not contain a target resource ID in its URI pat
 #### 4.3.2 Case B — Endpoints With Target Resource ID
 When an authorized endpoint contains an explicit target resource ID in its URI path (e.g., `/api/v1/subscriberDevice/{id}` or `/api/v1/venue/{id}`):
 1. The target resource ID MUST be treated strictly as an object locator, NOT an authorization assertion.
-2. The system MUST load the target resource record from the database and assert that the record is owned directly by the caller:
-   - For `SubscriberDevice`: `Device.subscriberId == CallerId`
-   - For `Venue`: `Venue.subscriber == CallerId`
-3. If the record does not exist, the system MUST return `HTTP 404 Not Found`.
-4. If the record exists but the ownership assertion fails (`Device.subscriberId != CallerId` or `Venue.subscriber != CallerId`), the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
-5. Resource ownership verification MUST be evaluated as an individual direct resource ownership check (`resource.subscriberId == CallerId` or `venue.subscriber == CallerId`); it MUST NOT be delegated to tenant or operator checks.
+2. **Ownership Scoping and Redundant Query Avoidance**:
+   - To eliminate duplicate database queries between authorization and handler execution:
+     a) Implementations SHOULD execute ownership-scoped database queries (`WHERE id = :resourceId AND subscriberId = :CallerId`) rather than executing separate unconstrained retrieval and check passes.
+     b) Where pre-loading is performed during `RoleIsAuthorized()`, the resolved entity MUST be passed/memoized within the request context so downstream business handlers do not reload the same resource.
+   - For mutations (`PUT`, `DELETE`), ownership MUST remain asserted at the point of database modification (e.g., atomic conditional update/delete `WHERE id = :resourceId AND subscriberId = :CallerId`), preventing execution against unassigned or reassigned resources.
+3. **Status Differentiation**:
+   - If an ownership-scoped query yields no match:
+     a) If the target resource ID does not exist in the database, the system MUST return `HTTP 404 Not Found`.
+     b) If the target resource ID exists but belongs to a different owner, the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
+4. Resource ownership verification MUST be evaluated as an individual direct resource ownership check (`resource.subscriberId == CallerId` or `venue.subscriber == CallerId`); it MUST NOT be delegated to tenant or operator checks.
 
-### 4.4 Collection Scoping
+### 4.4 Collection Scoping and Bounded Retrieval
 
 1. **Unconditional Query Constraint**: For subscriber collection requests (`GET /api/v1/subscriberDevice`), the system MUST constrain the underlying database query strictly to:
    ```sql
@@ -158,6 +162,8 @@ When an authorized endpoint contains an explicit target resource ID in its URI p
    ```
 2. **Zero Operator Fallback**: If the query returns zero records, or if request query parameters are omitted, the query MUST NOT broaden or fall back to operator-wide, entity-wide, or venue-wide visibility.
 3. **Filter Override**: Any client-supplied query parameters attempting to specify a different `subscriberId`, `operatorId`, or `entityId` MUST NOT expand collection visibility beyond `CallerId`.
+4. **Bounded Result Sizes**: The collection API MUST enforce bounded result sets to prevent unbounded database reads and excessive response serialization. If the client omits pagination parameters, a safe default limit (e.g., 20 or 50) MUST be applied, and client-requested limits MUST be clamped to a platform maximum bound (e.g., 100).
+5. **Scoping Invariant Across Pagination**: Pagination (`limit`, `offset`), filtering, and sorting parameters MUST operate strictly within the `subscriberId = :CallerId` predicate. Client parameters MUST NOT be permitted to loosen or bypass the subscriber ownership boundary.
 
 ### 4.5 Fail-Closed Authorization
 
@@ -240,7 +246,11 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
    - The request specifies query parameter `operation=updateMac`.
    - The caller owns the record (`SE.userId == CallerId`).
 2. **Operation Guard**: Any operation other than `updateMac` (e.g., `emailVerified`, empty operation, or arbitrary string) MUST be rejected with `HTTP 403 ACCESS_DENIED`.
-3. **MAC Address Validation**: The system MUST verify that the requested new MAC address is currently unassigned across `SubscriberDeviceDB`, `InventoryDB`, and `SignupDB`. If the MAC address is currently assigned or invalid, the request MUST be rejected.
+3. **MAC Normalization, Latency, and Concurrency**:
+   - The system MUST normalize the candidate MAC address into canonical lowercase 12-character hexadecimal format (via `Utils::NormalizeMac()`) before validation, uniqueness evaluation, or database lookup.
+   - The system MUST verify that the normalized MAC address is unassigned across `SubscriberDeviceDB`, `InventoryDB`, and `SignupDB`. If the address is assigned, malformed, or invalid, the request MUST be rejected.
+   - Uniqueness checks SHOULD evaluate indexed tables first (short-circuiting immediately upon collision) to minimize multi-table latency.
+   - Uniqueness MUST be preserved against concurrent claim requests; conflicting assignments MUST fail closed.
 
 #### 5.1.4 DELETE `/api/v1/subscriber` (Bare Path)
 1. The system MUST authorize self-deletion strictly on the bare URI path `/api/v1/subscriber` without path parameters.
@@ -603,6 +613,8 @@ Test suites MUST provide comprehensive verification across all authorization bou
 3. **Cohesive Scope Delivery**: The complete subscriber authorization pipeline across all three active resources (`Subscriber`, `SubscriberDevice`, `Venue`) MUST function end-to-end to satisfy Issue #90.
 4. **Administrative Query Avoidance**: Evaluating the subscriber authorization branch prior to administrative role resolution MUST avoid executing unnecessary administrative `ManagementRole` database queries for subscriber requests.
 5. **Concurrency / TOCTOU**: Race-condition and TOCTOU hardening are intentionally deferred to a follow-up issue. This specification defines the authorization and ownership invariants only and does not require transaction/concurrency redesign as part of Issue #90.
+6. **Query Indexing Verification**: Queries filtering by `subscriberId` (such as `SubscriberDeviceDB` collection retrieval) and cross-table MAC lookups MUST verify execution plan efficiency (`EXPLAIN`) to ensure appropriate indexes (single or composite) are utilized rather than executing full table scans. In accordance with Non-Goal 6, existing indexes and query plans should be verified prior to introducing new schema migrations.
+7. **Single-Pass Resource Loading**: Implementations SHOULD eliminate duplicate database reads between authorization and business handlers by employing ownership-scoped queries or request-context entity forwarding.
 
 ---
 
