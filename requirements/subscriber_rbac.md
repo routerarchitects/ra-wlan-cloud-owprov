@@ -109,13 +109,14 @@ Authorization MUST fail closed at the earliest failing stage. A request MUST NOT
 3. **No Synthetic Role Injection**: The system MUST NOT synthesize `ManagementRole` objects or insert artificial subscriber roles into `FindAllUserRoles()`.
 4. **Mandatory Identity Context**: If `UserInfo_.userinfo.id` is null, empty, or unresolvable, the system MUST terminate authorization immediately and return `HTTP 403 ACCESS_DENIED`.
 5. **No Ambient Identity**: An unauthenticated or anonymous request MUST NOT be evaluated under the subscriber authorization pipeline.
+6. **Principal Classification Gate**: The subscriber authorization pipeline MUST be selected only when the validated authentication context explicitly classifies the caller as a subscriber principal (`UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER`). A nonempty `UserInfo_.userinfo.id` alone MUST NOT classify the caller as a subscriber. Administrative principals (`ROOT`, `Admin`, `CSR`, `Installer`, `NOC`, `Accounting`) MUST NOT enter the subscriber pipeline and MUST proceed to administrative RBAC. Unrecognized or unknown principal types MUST fail closed with `HTTP 403 ACCESS_DENIED`.
 
 ### 4.2 Subscriber Capability
 
 1. **Static In-Code Policy**: Subscriber authorization policy is a static in-code policy and MUST NOT depend on administrative `RolesDB` or `PolicyDB` resolution.
 2. **Dedicated and Explicit**: The subscriber policy MUST be dedicated to subscriber self-service authorization, explicit, and fail-closed.
 3. **No Management Role Dependency**: Subscriber policy MUST NOT be derived from `ManagementRole` records, MUST NOT require `FindAllUserRoles()`, and MUST NOT introduce synthetic management roles into administrative storage.
-4. **Evaluation Precedence**: Subscriber authorization MUST be evaluated before administrative RBAC resolution, `ManagementRole` queries, and staff/operator shortcuts.
+4. **Evaluation Precedence & Principal Gating**: When `RoleIsAuthorized()` evaluates a request, the subscriber authorization branch MUST be entered exclusively when principal classification confirms `userRole == SUBSCRIBER`. Administrative principals MUST continue directly to administrative RBAC resolution, preventing administrative users from being restricted by subscriber policies.
 5. **Zero Method Aliasing**: The system MUST enforce exact-match HTTP method authorization.
    - An explicit grant for `GET` MUST NOT authorize `POST`, `PUT`, or `DELETE`.
    - An explicit grant for `PUT` MUST NOT authorize `POST` or `DELETE`.
@@ -165,10 +166,10 @@ When an authorized endpoint contains an explicit target resource ID in its URI p
 
 ### 4.5 Fail-Closed Authorization
 
-1. **Evaluation Order**: The subscriber authorization pipeline MUST be evaluated in `RESTAPIHandler::RoleIsAuthorized()` BEFORE `FindAllUserRoles()`, BEFORE administrative `ManagementRole` database queries, and BEFORE staff/operator global GET shortcuts.
+1. **Evaluation Order**: The subscriber authorization pipeline MUST be evaluated in `RESTAPIHandler::RoleIsAuthorized()` BEFORE `FindAllUserRoles()`, BEFORE administrative `ManagementRole` database queries, and BEFORE staff/operator global GET shortcuts, conditioned strictly upon subscriber principal classification (`userRole == SUBSCRIBER`).
 2. **Authorization Rejection Precedence**: If a subscriber request fails authorization conditions—including capability checks, unauthorized method/path operations, missing or unresolvable identity context, foreign resource ownership, or attempts to modify administrative fields—the request MUST fail closed immediately with `HTTP 403 ACCESS_DENIED`.
 3. **Invalid Request and Schema Precedence**: If an authorized subscriber request contains malformed request syntax, unknown top-level mutation fields, unknown nested configuration keys, or unsupported nested configuration structures, the request MUST fail closed with `HTTP 400 Bad Request` in accordance with Section 9.
-4. **No Administrative Fallthrough**: A rejected or unmatched subscriber request MUST NOT fall through to administrative RBAC evaluation.
+4. **No Cross-Pipeline Fallthrough**: A rejected or unmatched subscriber request MUST NOT fall through to administrative RBAC evaluation. Conversely, administrative principals accessing subscriber-capable endpoints (e.g., `GET /api/v1/subscriberDevice` or `DELETE /api/v1/subscriber/{id}`) MUST NOT enter the subscriber authorization pipeline and MUST evaluate strictly under administrative RBAC.
 5. **Path and Operation Boundary**:
    - When a requested path or operation is syntactically recognized but represents an action or path variant the subscriber is not permitted to invoke (such as `DELETE /api/v1/subscriber/{id}`, `POST /api/v1/venue`, or `POST /api/v1/subscriberDevice/{non-zero-id}`), authorization MUST fail closed with `HTTP 403 ACCESS_DENIED`.
    - When the request structure or path parameter itself is malformed or cannot be interpreted as a valid request representation by the parsing layer, the request MUST fail closed with `HTTP 400 Bad Request`.
@@ -294,14 +295,16 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
    - Serial number MUST satisfy syntax validation (`ValidSerialNumber`).
    - `deviceGroup` MUST be specified and MUST be `"ap"` or `"olg"`.
    - A subscriber MUST NOT own more than one active OLG gateway.
+5. **Configuration Record Initialization**: Any configuration record created for a claimed subscriber device in `ConfigurationDB` MUST explicitly set `cfg.subscriber = CallerId` and `cfg.subscriberOnly = true`. Subscriber devices MUST NOT reference unowned or shared administrative configurations.
 
 #### 5.2.4 PUT `/api/v1/subscriberDevice/{id}` (Mutation)
 1. The system MUST load the target device and verify ownership: `device.subscriberId == CallerId`. Ownership mismatch MUST return `HTTP 403 ACCESS_DENIED`.
 2. Device ownership alone DOES NOT authorize arbitrary modification. The request MUST satisfy the mutation allowlists defined in Section 6.2 and Section 6.3.
-3. **Internal Configuration Encapsulation**: Any internal configuration record updated or created in `ConfigurationDB` as a result of the device mutation MUST satisfy:
-   - `cfg.subscriber == CallerId`
-   - `cfg.subscriberOnly == true`
-4. **Administrative Template Protection**: Any attempt to bind the device to or mutate a shared administrative configuration template (`venue != ""` or `entity != ""` or `cfg.subscriber != CallerId`) MUST be rejected with `HTTP 403 ACCESS_DENIED`.
+3. **Subscriber Configuration Ownership Invariant**:
+   - Subscriber devices MUST reference only subscriber-specific configuration records. Shared administrative configurations MUST NOT be associated with subscriber devices.
+   - For any configuration associated with a subscriber device, `cfg.subscriber` MUST equal `CallerId`, and `cfg.subscriberOnly` MUST be `true`.
+   - Subscriber-initiated configuration mutations MUST reject any configuration that violates these ownership conditions with `HTTP 403 ACCESS_DENIED`.
+   - No shared-template cloning or copy-on-write (CoW) behavior is required or permitted.
 
 #### 5.2.5 DELETE `/api/v1/subscriberDevice/{id}` (Unclaiming & Removal)
 1. The system MUST load the target device and verify ownership: `device.subscriberId == CallerId`. Ownership mismatch MUST return `HTTP 403 ACCESS_DENIED`.
@@ -441,7 +444,7 @@ Subscriber-Scoped Handler & Business Operation
    - `RolesDB`
    - `PolicyDB`
 2. **No Synthetic Role Records**: The system MUST NOT insert synthetic subscriber management roles into `RolesDB` or `PolicyDB`.
-3. **Execution Precedence**: The dedicated subscriber authorization branch MUST be evaluated in `RoleIsAuthorized()` BEFORE administrative RBAC checks, preventing subscriber tokens from accidentally matching administrative bypass rules or staff global GET shortcuts.
+3. **Execution Precedence & Principal Separation**: The dedicated subscriber authorization branch MUST be evaluated in `RoleIsAuthorized()` BEFORE administrative RBAC checks, but MUST be gated strictly on subscriber principal classification (`UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER`). This prevents subscriber tokens from matching administrative bypass rules while ensuring administrative identities accessing subscriber endpoints are evaluated under administrative RBAC without being misclassified or restricted as subscribers.
 4. **Preservation of Administrative Hierarchy**: Non-subscriber actors (`ROOT`, `Admin`, `CSR`, `Installer`, `NOC`, `Accounting`) MUST continue to be authorized through existing hierarchical `ManagementRole` and `PolicyDB` rules without alteration.
 
 ---
@@ -525,7 +528,7 @@ Enforced for:
 - **AC-DEV-9**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` attempting to mutate administrative fields (`deviceType`, `managementPolicy`, `subscriberId`, `operatorId`, `realMacAddress`) receives `HTTP 403 ACCESS_DENIED`.
 - **AC-DEV-10**: A nested Wi-Fi configuration update containing valid `ssid`, `passphrase`, or `encryption` in a client SSID block succeeds.
 - **AC-DEV-11**: A nested Wi-Fi configuration update targeting non-wireless interfaces, referencing `network: "management"`, or specifying unknown keys receives `HTTP 400 Bad Request`.
-- **AC-DEV-12**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` attempting to bind to or alter a shared administrative configuration template receives `HTTP 403 ACCESS_DENIED`.
+- **AC-DEV-12**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` attempting to associate with or mutate a configuration where `cfg.subscriber != CallerId` or `cfg.subscriberOnly != true` receives `HTTP 403 ACCESS_DENIED`.
 - **AC-DEV-13**: An authenticated subscriber calling `DELETE /api/v1/subscriberDevice/{id}` on an owned device successfully unclaims the device; calling on a foreign device receives `HTTP 403 ACCESS_DENIED`.
 
 ### 11.3 Venues
@@ -544,6 +547,7 @@ Enforced for:
 
 ### 11.6 Administrative RBAC Preservation
 - **AC-ADM-1**: Administrative requests (`ROOT`, `Admin`, `CSR`, `Installer`) continue to evaluate through hierarchical `ManagementRole` and `PolicyDB` rules without deviation or regression.
+- **AC-ADM-2**: An authenticated administrative user accessing subscriber-capable endpoints (such as `GET /api/v1/subscriberDevice` or `DELETE /api/v1/subscriber/{id}`) is not classified as a subscriber and evaluates exclusively through administrative RBAC.
 
 ---
 
