@@ -34,6 +34,7 @@
 #define private public
 #define protected public
 #include "framework/MicroService.h"
+#include "framework/KafkaManager.h"
 #undef private
 #undef protected
 #include "framework/OpenWifiTypes.h"
@@ -41,6 +42,9 @@
 #include "framework/RESTAPI_Handler.h"
 #include "framework/utils.h"
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
+#include "Poco/Net/ServerSocket.h"
+#include "Poco/Net/StreamSocket.h"
+#include "Poco/Net/SocketAddress.h"
 
 #define TEST_ASSERT(cond, msg)                                                                   \
 	do {                                                                                         \
@@ -87,6 +91,179 @@ namespace OpenWifi {
 		}
 	} // namespace SecurityObjects
 
+	// Lightweight in-process RESP Redis fixture for exercising production
+	// ServiceRegistry::LoadAll and MicroService::BootstrapFromRedisSnapshot
+	class MockRedisServer {
+	  public:
+		explicit MockRedisServer(const std::vector<Types::MicroServiceMeta> &Entries = {})
+			: Running_(true), Socket_(Poco::Net::SocketAddress("127.0.0.1", 0)) {
+			for (const auto &meta : Entries) {
+				auto key = ServiceRegistry::MakeKey(meta.Type, meta.InstanceId);
+				Store_[key] = ServiceRegistry::Serialize(meta);
+			}
+			Port_ = Socket_.address().port();
+			Socket_.setReceiveTimeout(Poco::Timespan(100 * 1000));
+			Worker_ = std::thread([this]() { Run(); });
+		}
+
+		~MockRedisServer() {
+			Stop();
+		}
+
+		void Stop() {
+			if (Running_.exchange(false)) {
+				try {
+					Socket_.close();
+				} catch (...) {}
+				if (Worker_.joinable()) {
+					Worker_.join();
+				}
+			}
+		}
+
+		[[nodiscard]] uint16_t Port() const { return Port_; }
+
+		void Set(const std::string &key, const std::string &val) {
+			std::lock_guard G(Mutex_);
+			Store_[key] = val;
+		}
+
+		void SetMeta(const Types::MicroServiceMeta &meta) {
+			std::lock_guard G(Mutex_);
+			Store_[ServiceRegistry::MakeKey(meta.Type, meta.InstanceId)] = ServiceRegistry::Serialize(meta);
+		}
+
+	  private:
+		std::atomic_bool Running_;
+		Poco::Net::ServerSocket Socket_;
+		uint16_t Port_ = 0;
+		std::mutex Mutex_;
+		std::map<std::string, std::string> Store_;
+		std::thread Worker_;
+
+		static bool SendAll(Poco::Net::StreamSocket &sock, const std::string &data) {
+			int total = 0;
+			int len = static_cast<int>(data.size());
+			while (total < len) {
+				int n = sock.sendBytes(data.data() + total, len - total);
+				if (n <= 0) return false;
+				total += n;
+			}
+			return true;
+		}
+
+		static bool ParseOneCommand(std::string &buffer, std::vector<std::string> &args) {
+			if (buffer.empty()) return false;
+			if (buffer[0] != '*') return false;
+			auto pos = buffer.find("\r\n");
+			if (pos == std::string::npos) return false;
+			int numArgs = 0;
+			try {
+				numArgs = std::stoi(buffer.substr(1, pos - 1));
+			} catch (...) {
+				return false;
+			}
+			std::size_t cur = pos + 2;
+			std::vector<std::string> parsed;
+			for (int i = 0; i < numArgs; ++i) {
+				if (cur >= buffer.size() || buffer[cur] != '$') return false;
+				auto nextCrlf = buffer.find("\r\n", cur);
+				if (nextCrlf == std::string::npos) return false;
+				int len = 0;
+				try {
+					len = std::stoi(buffer.substr(cur + 1, nextCrlf - cur - 1));
+				} catch (...) {
+					return false;
+				}
+				cur = nextCrlf + 2;
+				if (cur + len + 2 > buffer.size()) return false;
+				parsed.push_back(buffer.substr(cur, len));
+				cur += len + 2;
+			}
+			buffer.erase(0, cur);
+			args = std::move(parsed);
+			return true;
+		}
+
+		void Run() {
+			while (Running_) {
+				try {
+					if (!Socket_.poll(Poco::Timespan(50 * 1000), Poco::Net::Socket::SELECT_READ)) {
+						continue;
+					}
+					Poco::Net::StreamSocket client = Socket_.acceptConnection();
+					client.setReceiveTimeout(Poco::Timespan(500 * 1000));
+					client.setSendTimeout(Poco::Timespan(500 * 1000));
+
+					std::string buffer;
+					char readBuf[4096];
+
+					while (Running_) {
+						try {
+							if (!client.poll(Poco::Timespan(50 * 1000), Poco::Net::Socket::SELECT_READ)) {
+								continue;
+							}
+							int n = client.receiveBytes(readBuf, sizeof(readBuf));
+							if (n <= 0) break;
+							buffer.append(readBuf, n);
+
+							std::vector<std::string> args;
+							while (ParseOneCommand(buffer, args)) {
+								if (args.empty()) continue;
+								std::string cmd = Poco::toUpper(args[0]);
+								if (cmd == "SCAN") {
+									std::lock_guard G(Mutex_);
+									std::vector<std::string> keys;
+									for (const auto &[k, _] : Store_) {
+										keys.push_back(k);
+									}
+									std::string resp = "*2\r\n$1\r\n0\r\n*" + std::to_string(keys.size()) + "\r\n";
+									for (const auto &k : keys) {
+										resp += "$" + std::to_string(k.size()) + "\r\n" + k + "\r\n";
+									}
+									if (!SendAll(client, resp)) break;
+								} else if (cmd == "GET") {
+									std::lock_guard G(Mutex_);
+									std::string key = (args.size() > 1) ? args[1] : "";
+									auto it = Store_.find(key);
+									if (it != Store_.end()) {
+										std::string resp = "$" + std::to_string(it->second.size()) + "\r\n" + it->second + "\r\n";
+										if (!SendAll(client, resp)) break;
+									} else {
+										std::string resp = "$-1\r\n";
+										if (!SendAll(client, resp)) break;
+									}
+								} else if (cmd == "SET") {
+									std::lock_guard G(Mutex_);
+									if (args.size() > 2) {
+										Store_[args[1]] = args[2];
+									}
+									std::string resp = "+OK\r\n";
+									if (!SendAll(client, resp)) break;
+								} else if (cmd == "DEL") {
+									std::lock_guard G(Mutex_);
+									if (args.size() > 1) {
+										Store_.erase(args[1]);
+									}
+									std::string resp = ":1\r\n";
+									if (!SendAll(client, resp)) break;
+								} else {
+									// AUTH, SELECT, PING, etc.
+									std::string resp = "+OK\r\n";
+									if (!SendAll(client, resp)) break;
+								}
+							}
+						} catch (...) {
+							break;
+						}
+					}
+				} catch (...) {
+					// Socket closed or accept timeout
+				}
+			}
+		}
+	};
+
 	// Test harness class exposing protected/internal state for verification
 	class TestMicroService : public MicroService {
 	  public:
@@ -117,27 +294,16 @@ namespace OpenWifi {
 			}
 		}
 
-		void SimulateRedisBootstrap(const std::vector<Types::MicroServiceMeta> &Entries) {
-			std::unique_lock G(InfraMutex_);
-			auto now = Utils::Now();
-			for (auto &meta : Entries) {
-				if (meta.LastUpdate == 0) {
-					continue;
-				}
-				if (DepartedDuringBootstrap_.count(meta.InstanceId) > 0) {
-					continue;
-				}
-				auto &typeServices = Services_[meta.Type];
-				auto it = typeServices.find(meta.InstanceId);
-				if (it == typeServices.end()) {
-					auto seeded = meta;
-					seeded.LastUpdate = now;
-					typeServices[meta.InstanceId] = std::move(seeded);
-				}
-			}
-			DepartedDuringBootstrap_.clear();
-			BootstrapInProgress_ = false;
-			RedisBootstrapDone_ = true;
+		void SetConfig(const std::string &Key, const std::string &Val) {
+			config().setString(Key, Val);
+		}
+
+		void SetConfigInt(const std::string &Key, int Val) {
+			config().setInt(Key, Val);
+		}
+
+		void SetConfigBool(const std::string &Key, bool Val) {
+			config().setBool(Key, Val);
 		}
 
 		void SetBootstrapInProgress(bool inProgress) {
@@ -1595,7 +1761,11 @@ static void test_redis_bootstrap_snapshot_seeding() {
 		.LastUpdate = now - 1
 	});
 
-	svc.SimulateRedisBootstrap(snapshot);
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	svc.BootstrapFromRedisSnapshot();
 
 	// Verify instances seeded
 	auto gwInstances = svc.GetServiceInstances("owgw");
@@ -1661,7 +1831,13 @@ static void test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored() {
 		.LastUpdate = 0
 	});
 
-	svc.SimulateRedisBootstrap(snapshot);
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	auto before = Utils::Now();
+	svc.BootstrapFromRedisSnapshot();
+	auto after = Utils::Now();
 
 	auto instances = svc.GetServiceInstances("owgw");
 	TEST_ASSERT(instances.size() == 2, "Both sync and skewed entries seeded, zero-ts ignored");
@@ -1670,7 +1846,9 @@ static void test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored() {
 	TEST_ASSERT(instances.find("owgw-zero-ts") == instances.end(), "Zero-ts entry ignored");
 
 	// Verify that seeded entry was assigned local 'now' timestamp, not the remote skewed timestamp
-	TEST_ASSERT(instances["owgw-skewed-behind"].LastUpdate == now, "Assigned local 'now' timestamp for local cleanup");
+	TEST_ASSERT(instances["owgw-skewed-behind"].LastUpdate >= before &&
+	            instances["owgw-skewed-behind"].LastUpdate <= after,
+	            "Assigned local 'now' timestamp for local cleanup");
 
 	std::cout << "  PASS: test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored" << std::endl;
 }
@@ -1716,8 +1894,12 @@ static void test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrecti
 		.LastUpdate = now - 1
 	});
 
-	// Apply snapshot merge
-	svc.SimulateRedisBootstrap(snapshot);
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	// Apply snapshot merge using production BootstrapFromRedisSnapshot
+	svc.BootstrapFromRedisSnapshot();
 
 	// 4. Verify departing instance was NOT resurrected, but surviving instance was added
 	auto instances = svc.GetServiceInstances("owgw");
@@ -1762,7 +1944,11 @@ static void test_redis_bootstrap_race_newer_kafka_event_preserved() {
 		.LastUpdate = now + 50
 	});
 
-	svc.SimulateRedisBootstrap(snapshot);
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	svc.BootstrapFromRedisSnapshot();
 
 	// 3. Verify snapshot did NOT overwrite live Kafka data despite clock skew
 	instances = svc.GetServiceInstances("owgw");
@@ -1790,7 +1976,11 @@ static void test_redis_bootstrap_kafka_events_continue_after_bootstrap() {
 		.Version = "1.0.0",
 		.LastUpdate = now - 5
 	});
-	svc.SimulateRedisBootstrap(snapshot);
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	svc.BootstrapFromRedisSnapshot();
 	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 1, "Seeded with 1 replica");
 
 	// 2. Kafka JOIN adds owgw-2 sharing the same endpoint
@@ -1892,25 +2082,84 @@ static void test_redis_overlapping_restarts_isolated_keys() {
 
 // Test 36: Bootstrap wait loop terminates immediately upon shutdown cancellation signal
 static void test_redis_bootstrap_shutdown_cancellation() {
-	TestMicroService svc("owprov");
+	// 1. Pre-set shutdown signal aborts ScheduleRedisBootstrap immediately without entering wait loop
+	{
+		TestMicroService svc("owprov");
+		svc.BootstrapShutdown_ = true;
+		auto start = std::chrono::steady_clock::now();
+		svc.ScheduleRedisBootstrap();
+		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
 
-	// Pre-set shutdown signal aborts ScheduleRedisBootstrap immediately without hanging
-	svc.BootstrapShutdown_ = true;
-	auto start = std::chrono::steady_clock::now();
-	svc.ScheduleRedisBootstrap();
-	auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-		std::chrono::steady_clock::now() - start).count();
+		TEST_ASSERT(elapsedMs < 100, "ScheduleRedisBootstrap with BootstrapShutdown_ must return immediately");
+		TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after cancelled bootstrap");
+		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when cancelled, preserving ability to bootstrap later");
+	}
 
-	TEST_ASSERT(elapsedMs < 100, "ScheduleRedisBootstrap with BootstrapShutdown_ must return immediately");
-	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after cancelled bootstrap");
-	TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when cancelled, preserving ability to bootstrap later");
+	// 2. StopSubSystemServers signals BootstrapShutdown_ and joins active in-flight BootstrapThread_ safely
+	{
+		TestMicroService svc("owprov");
+		std::atomic_bool workerStarted = false;
+		std::atomic_bool shutdownObserved = false;
 
-	// StopSubSystemServers must set BootstrapShutdown_ and join BootstrapThread_ safely
-	svc.BootstrapShutdown_ = false;
-	svc.BootstrapInProgress_ = false;
-	svc.StopSubSystemServers();
-	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after StopSubSystemServers");
-	TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be reset after StopSubSystemServers");
+		svc.BootstrapInProgress_ = true;
+		svc.BootstrapThread_ = std::thread([&]() {
+			workerStarted = true;
+			while (!svc.BootstrapShutdown_) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			shutdownObserved = true;
+		});
+
+		while (!workerStarted) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+
+		auto start = std::chrono::steady_clock::now();
+		svc.StopSubSystemServers();
+		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
+
+		TEST_ASSERT(!svc.BootstrapThread_.joinable(), "BootstrapThread_ must be joined by StopSubSystemServers");
+		TEST_ASSERT(shutdownObserved, "Active bootstrap worker observed BootstrapShutdown_ signal");
+		TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after StopSubSystemServers");
+		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be reset after StopSubSystemServers");
+		TEST_ASSERT(elapsedMs < 1000, "StopSubSystemServers must join thread cleanly without hanging");
+	}
+
+	// 3. Mid-wait cancellation in ScheduleRedisBootstrap aborts wait loop immediately
+	{
+		TestMicroService svc("owprov");
+		svc.SetConfigBool("openwifi.kafka.enable", true);
+		svc.SetConfigInt("openwifi.service.bootstrap.kafka_wait_ms", 5000);
+
+		KafkaManager()->KafkaEnabled_ = true;
+		KafkaManager()->BroadcastConsumer().Running_ = true;
+		KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+		auto start = std::chrono::steady_clock::now();
+		std::thread bg([&]() {
+			svc.ScheduleRedisBootstrap();
+		});
+
+		// Let it enter the wait loop, then signal shutdown mid-wait
+		std::this_thread::sleep_for(std::chrono::milliseconds(40));
+		svc.BootstrapShutdown_ = true;
+
+		if (bg.joinable()) {
+			bg.join();
+		}
+		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
+
+		KafkaManager()->KafkaEnabled_ = false;
+		KafkaManager()->BroadcastConsumer().Running_ = false;
+		KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+		TEST_ASSERT(elapsedMs < 1000, "Mid-wait shutdown signal must abort 5s wait loop immediately");
+		TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after aborted bootstrap");
+		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when aborted mid-wait");
+	}
 
 	std::cout << "  PASS: test_redis_bootstrap_shutdown_cancellation" << std::endl;
 }
@@ -1918,6 +2167,32 @@ static void test_redis_bootstrap_shutdown_cancellation() {
 // Test 37: Kafka partition assignment timeout does not block bootstrap; proceeds to load Redis
 static void test_redis_bootstrap_kafka_timeout_fallback_to_redis() {
 	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Prepare Redis snapshot in MockRedisServer
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-fallback-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-fb",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	// 2. Enable Kafka with unassigned BroadcastConsumer and short wait timeout (100ms)
+	svc.SetConfigBool("openwifi.kafka.enable", true);
+	svc.SetConfigInt("openwifi.service.bootstrap.kafka_wait_ms", 100);
+
+	KafkaManager()->KafkaEnabled_ = true;
+	KafkaManager()->BroadcastConsumer().Running_ = true;
+	KafkaManager()->BroadcastConsumer().Assigned_ = false;
 
 	svc.BootstrapShutdown_ = false;
 	svc.BootstrapInProgress_ = false;
@@ -1928,12 +2203,65 @@ static void test_redis_bootstrap_kafka_timeout_fallback_to_redis() {
 	auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::steady_clock::now() - start).count();
 
-	// Must finish quickly and not hang indefinitely
-	TEST_ASSERT(elapsedMs < 1000, "ScheduleRedisBootstrap must not block indefinitely");
+	// Reset KafkaManager state
+	KafkaManager()->KafkaEnabled_ = false;
+	KafkaManager()->BroadcastConsumer().Running_ = false;
+	KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+	// Must wait approximately 100ms for Kafka partition assignment before timing out and falling back
+	TEST_ASSERT(elapsedMs >= 80, "Must wait for Kafka partition assignment timeout (>= 80ms)");
+	TEST_ASSERT(elapsedMs < 1000, "ScheduleRedisBootstrap must not block indefinitely (< 1000ms)");
 	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after completion");
 	TEST_ASSERT(svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be marked true after fallback");
 
+	// Verify snapshot from MockRedisServer was loaded into registry after fallback
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Snapshot instance loaded into registry after fallback");
+	TEST_ASSERT(instances.find("owgw-fallback-1") != instances.end(), "owgw-fallback-1 present");
+
 	std::cout << "  PASS: test_redis_bootstrap_kafka_timeout_fallback_to_redis" << std::endl;
+}
+
+// Test 38: Unreachable Redis does not disrupt Kafka event generation or throw
+static void test_redis_failure_isolation_preserves_kafka_events() {
+	TestMicroService svc("owprov");
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", 59999); // Unreachable port
+	svc.SetConfigInt("openwifi.redis.timeout", 50);
+
+	// 1. RefreshRedisRegistration must handle Redis connection failure gracefully without throwing
+	try {
+		svc.RefreshRedisRegistration();
+	} catch (...) {
+		TEST_ASSERT(false, "RefreshRedisRegistration must not throw on Redis connection failure");
+	}
+
+	// 2. Kafka JOIN event payload can still be generated cleanly
+	std::string joinMsg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN);
+	TEST_ASSERT(!joinMsg.empty(), "EVENT_JOIN message generated successfully");
+	TEST_ASSERT(joinMsg.find("join") != std::string::npos, "EVENT_JOIN contains 'join' event");
+	TEST_ASSERT(joinMsg.find(svc.InstanceId()) != std::string::npos, "EVENT_JOIN contains local InstanceId");
+
+	// 3. Kafka KEEP_ALIVE event payload can still be generated cleanly
+	std::string keepaliveMsg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE);
+	TEST_ASSERT(!keepaliveMsg.empty(), "EVENT_KEEP_ALIVE message generated successfully");
+	TEST_ASSERT(keepaliveMsg.find("keep-alive") != std::string::npos, "EVENT_KEEP_ALIVE contains 'keep-alive' event");
+	TEST_ASSERT(keepaliveMsg.find(svc.InstanceId()) != std::string::npos, "EVENT_KEEP_ALIVE contains local InstanceId");
+
+	// 4. DeleteRedisRegistration must handle Redis connection failure gracefully without throwing
+	try {
+		svc.DeleteRedisRegistration();
+	} catch (...) {
+		TEST_ASSERT(false, "DeleteRedisRegistration must not throw on Redis connection failure");
+	}
+
+	// 5. Kafka LEAVE event payload can still be generated cleanly
+	std::string leaveMsg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_LEAVE);
+	TEST_ASSERT(!leaveMsg.empty(), "EVENT_LEAVE message generated successfully");
+	TEST_ASSERT(leaveMsg.find("leave") != std::string::npos, "EVENT_LEAVE contains 'leave' event");
+	TEST_ASSERT(leaveMsg.find(svc.InstanceId()) != std::string::npos, "EVENT_LEAVE contains local InstanceId");
+
+	std::cout << "  PASS: test_redis_failure_isolation_preserves_kafka_events" << std::endl;
 }
 
 int main() {
@@ -1976,7 +2304,9 @@ int main() {
 	test_redis_overlapping_restarts_isolated_keys();
 	test_redis_bootstrap_shutdown_cancellation();
 	test_redis_bootstrap_kafka_timeout_fallback_to_redis();
+	test_redis_failure_isolation_preserves_kafka_events();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;
 }
+
