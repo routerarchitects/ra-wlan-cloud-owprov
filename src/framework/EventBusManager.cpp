@@ -12,6 +12,7 @@ namespace OpenWifi {
 	void EventBusManager::run() {
 		Running_ = true;
 		Utils::SetThreadName("fmwk:EventMgr");
+		MicroServiceRefreshRedisRegistration();
 		auto Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN));
 		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(), Msg,
 									false);
@@ -19,10 +20,12 @@ namespace OpenWifi {
 			if(!Poco::Thread::trySleep((unsigned long)MicroServiceDaemonBusTimer())) {
                 break;
             }
+			MicroServiceRefreshRedisRegistration();
 			Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE));
 			KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(),
 										Msg, false);
 		}
+		MicroServiceDeleteRedisRegistration();
 		Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_LEAVE));
 		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(), Msg,
 									false);

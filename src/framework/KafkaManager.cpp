@@ -226,9 +226,22 @@ namespace OpenWifi {
 			std::lock_guard Lock(ConsumerMutex_);
 			if (!Running_ && !Worker_.isRunning()) return;
 			Running_ = false;
+			Assigned_ = false;
 			TopicCV_.notify_all();
 		}
 		if (Worker_.isRunning()) Worker_.join();
+	}
+
+	bool KafkaConsumer::WaitForPartitionAssignment(uint64_t TimeoutMs) const {
+		auto start = std::chrono::steady_clock::now();
+		while (Running_ && !Assigned_) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			if (std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now() - start).count() > static_cast<int64_t>(TimeoutMs)) {
+				break;
+			}
+		}
+		return Assigned_;
 	}
 
 	inline void KafkaConsumer::run() {
@@ -246,6 +259,7 @@ namespace OpenWifi {
 				std::lock_guard Lock(Self.ConsumerMutex_);
 				Self.Consumer_.reset();
 				Self.Running_ = false;
+				Self.Assigned_ = false;
 				Self.TopicCV_.notify_all();
 			}
 		} Guard{*this};
@@ -282,11 +296,13 @@ namespace OpenWifi {
 			LocalConsumer->set_assignment_callback([&](cppkafka::TopicPartitionList &parts) {
 				if (!parts.empty()) {
 					poco_information(Logger_, fmt::format("Partition assigned: {}...", parts.front().get_partition()));
+					Assigned_ = true;
 				}
 			});
 			LocalConsumer->set_revocation_callback([&](const cppkafka::TopicPartitionList &parts) {
 				if (!parts.empty()) {
 					poco_information(Logger_, fmt::format("Partition revocation: {}...", parts.front().get_partition()));
+					Assigned_ = false;
 				}
 			});
 

@@ -52,7 +52,8 @@ else()
     find_package(CppKafka REQUIRED)
     find_package(PostgreSQL REQUIRED)
     find_package(MySQL REQUIRED)
-    find_package(Poco REQUIRED COMPONENTS JSON Crypto JWT Net Util NetSSL Data DataSQLite DataPostgreSQL DataMySQL)
+    find_package(Poco REQUIRED COMPONENTS JSON Crypto JWT Net Util NetSSL Data DataSQLite DataPostgreSQL DataMySQL Redis)
+    add_definitions(-DUSE_POCO_REDIS=1)
 endif()
 
 include_directories(/usr/local/include  /usr/local/opt/openssl/include src include/kafka /usr/local/opt/mysql-client/include)
@@ -82,6 +83,8 @@ add_executable(owprov
         src/framework/utils.h
         src/framework/utils.cpp
         src/framework/AppServiceRegistry.h
+        src/framework/ServiceRegistry.h
+        src/framework/ServiceRegistry.cpp
         src/framework/SubSystemServer.cpp
         src/framework/SubSystemServer.h
         src/framework/RESTAPI_utils.h
@@ -322,6 +325,7 @@ add_executable(service_discovery_test
         tests/framework_tests/ServiceDiscovery_test.cpp
         src/framework/MicroService.cpp
         src/framework/MicroServiceFuncs.cpp
+        src/framework/ServiceRegistry.cpp
         src/framework/SubSystemServer.cpp
         src/framework/utils.cpp
         src/framework/RESTAPI_IntServer.cpp

@@ -28,6 +28,7 @@
 #include "framework/RESTAPI_GenericServerAccounting.h"
 #include "framework/RESTAPI_Handler.h"
 #include "framework/utils.h"
+#include "framework/ServiceRegistry.h"
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
 
 #define private public
@@ -114,6 +115,47 @@ namespace OpenWifi {
 					itInst->second.LastUpdate = ts;
 				}
 			}
+		}
+
+		void SimulateRedisBootstrap(const std::vector<Types::MicroServiceMeta> &Entries) {
+			std::unique_lock G(InfraMutex_);
+			auto now = Utils::Now();
+			for (auto &meta : Entries) {
+				if (meta.LastUpdate == 0) {
+					continue;
+				}
+				if (DepartedDuringBootstrap_.count(meta.InstanceId) > 0) {
+					continue;
+				}
+				auto &typeServices = Services_[meta.Type];
+				auto it = typeServices.find(meta.InstanceId);
+				if (it == typeServices.end()) {
+					auto seeded = meta;
+					seeded.LastUpdate = now;
+					typeServices[meta.InstanceId] = std::move(seeded);
+				}
+			}
+			DepartedDuringBootstrap_.clear();
+			BootstrapInProgress_ = false;
+			RedisBootstrapDone_ = true;
+		}
+
+		void SetBootstrapInProgress(bool inProgress) {
+			std::unique_lock G(InfraMutex_);
+			BootstrapInProgress_ = inProgress;
+			if (inProgress) {
+				DepartedDuringBootstrap_.clear();
+			}
+		}
+
+		bool IsBootstrapInProgress() {
+			std::unique_lock G(InfraMutex_);
+			return BootstrapInProgress_;
+		}
+
+		std::unordered_set<std::string> GetDepartedDuringBootstrap() {
+			std::unique_lock G(InfraMutex_);
+			return DepartedDuringBootstrap_;
 		}
 	};
 
@@ -1370,6 +1412,530 @@ static void test_production_dual_identity_wire_format_lifecycle() {
 	std::cout << "  PASS: test_production_dual_identity_wire_format_lifecycle" << std::endl;
 }
 
+// Test 27: Redis service-registry key generation and parsing helpers
+static void test_redis_service_registry_key_helpers() {
+	// Standard canonical format: service-registry:{service_type}:{instance_id}
+	auto key = ServiceRegistry::MakeKey("owprov", "owprov-1-uuid-1234");
+	TEST_ASSERT(key == "service-registry:owprov:owprov-1-uuid-1234", "MakeKey produces expected format");
+
+	// Key generation normalizes service type to lowercase
+	auto keyUpper = ServiceRegistry::MakeKey("OWGW", "owgw-inst-A");
+	TEST_ASSERT(keyUpper == "service-registry:owgw:owgw-inst-A", "MakeKey normalizes uppercase type to lowercase");
+
+	// Parsing valid key
+	auto parsed = ServiceRegistry::ParseKey("service-registry:owsec:owsec-rep-1");
+	TEST_ASSERT(parsed.has_value(), "ParseKey succeeds for valid key");
+	TEST_ASSERT(parsed->first == "owsec", "Parsed service type is owsec");
+	TEST_ASSERT(parsed->second == "owsec-rep-1", "Parsed instance ID is owsec-rep-1");
+
+	// Parsing valid key with uppercase type normalizes to lowercase
+	auto parsedUpper = ServiceRegistry::ParseKey("service-registry:OWFMS:owfms-rep-2");
+	TEST_ASSERT(parsedUpper.has_value(), "ParseKey succeeds for uppercase type");
+	TEST_ASSERT(parsedUpper->first == "owfms", "Parsed service type normalized to lowercase");
+
+	// Invalid prefix
+	auto badPrefix = ServiceRegistry::ParseKey("other-prefix:owprov:inst-1");
+	TEST_ASSERT(!badPrefix.has_value(), "ParseKey rejects wrong prefix");
+
+	// Missing colon separator
+	auto noColon = ServiceRegistry::ParseKey("service-registry:owprov");
+	TEST_ASSERT(!noColon.has_value(), "ParseKey rejects key without instance separator");
+
+	// Empty instance ID
+	auto emptyId = ServiceRegistry::ParseKey("service-registry:owprov:");
+	TEST_ASSERT(!emptyId.has_value(), "ParseKey rejects empty instance ID");
+
+	// Empty service type
+	auto emptyType = ServiceRegistry::ParseKey("service-registry::inst-1");
+	TEST_ASSERT(!emptyType.has_value(), "ParseKey rejects empty service type");
+
+	// Empty string
+	auto emptyStr = ServiceRegistry::ParseKey("");
+	TEST_ASSERT(!emptyStr.has_value(), "ParseKey rejects empty string");
+
+	std::cout << "  PASS: test_redis_service_registry_key_helpers" << std::endl;
+}
+
+// Test 28: Redis serialization and deserialization of MicroServiceMeta
+static void test_redis_service_registry_serialization_deserialization() {
+	Types::MicroServiceMeta meta;
+	meta.InstanceId = "owprov-inst-uuid-1234";
+	meta.Id = 42; // Numeric legacy ID
+	meta.Type = "OWPROV";
+	meta.PrivateEndPoint = "https://owprov-internal:17005";
+	meta.PublicEndPoint = "https://owprov.example.com:16005";
+	meta.AccessKey = "access-key-hash-xyz";
+	meta.Version = "2.5.0";
+	meta.LastUpdate = Utils::Now();
+
+	// Serialize
+	auto jsonStr = ServiceRegistry::Serialize(meta);
+	TEST_ASSERT(!jsonStr.empty(), "Serialize produces non-empty JSON");
+
+	// Deserialize
+	auto restored = ServiceRegistry::Deserialize(jsonStr);
+	TEST_ASSERT(restored.has_value(), "Deserialize succeeds");
+	TEST_ASSERT(restored->InstanceId == "owprov-inst-uuid-1234", "InstanceId preserved");
+	TEST_ASSERT(restored->Type == "owprov", "Type normalized to lowercase");
+	TEST_ASSERT(restored->PrivateEndPoint == "https://owprov-internal:17005", "PrivateEndPoint preserved");
+	TEST_ASSERT(restored->PublicEndPoint == "https://owprov.example.com:16005", "PublicEndPoint preserved");
+	TEST_ASSERT(restored->AccessKey == "access-key-hash-xyz", "AccessKey preserved");
+	TEST_ASSERT(restored->Version == "2.5.0", "Version preserved");
+	TEST_ASSERT(restored->LastUpdate == meta.LastUpdate, "LastUpdate timestamp preserved");
+
+	// Deserialization with missing required fields
+	Poco::JSON::Object missingId;
+	missingId.set("type", "owgw");
+	missingId.set("privateEndPoint", "https://owgw:17004");
+	std::ostringstream ss1;
+	Poco::JSON::Stringifier::stringify(missingId, ss1);
+	auto bad1 = ServiceRegistry::Deserialize(ss1.str());
+	TEST_ASSERT(!bad1.has_value(), "Deserialize rejects entry without instanceId");
+
+	Poco::JSON::Object missingType;
+	missingType.set("instanceId", "inst-1");
+	missingType.set("privateEndPoint", "https://owgw:17004");
+	std::ostringstream ss2;
+	Poco::JSON::Stringifier::stringify(missingType, ss2);
+	auto bad2 = ServiceRegistry::Deserialize(ss2.str());
+	TEST_ASSERT(!bad2.has_value(), "Deserialize rejects entry without type");
+
+	Poco::JSON::Object missingPrivate;
+	missingPrivate.set("instanceId", "inst-1");
+	missingPrivate.set("type", "owgw");
+	missingPrivate.set("publicEndPoint", "https://owgw:16004");
+	missingPrivate.set("accessKey", "key123");
+	missingPrivate.set("lastUpdate", 123456);
+	std::ostringstream ss3;
+	Poco::JSON::Stringifier::stringify(missingPrivate, ss3);
+	auto bad3 = ServiceRegistry::Deserialize(ss3.str());
+	TEST_ASSERT(!bad3.has_value(), "Deserialize rejects entry without privateEndPoint");
+
+	// Missing publicEndPoint
+	Poco::JSON::Object missingPublic;
+	missingPublic.set("instanceId", "inst-1");
+	missingPublic.set("type", "owgw");
+	missingPublic.set("privateEndPoint", "https://owgw:17004");
+	missingPublic.set("accessKey", "key123");
+	missingPublic.set("lastUpdate", 123456);
+	std::ostringstream ss4;
+	Poco::JSON::Stringifier::stringify(missingPublic, ss4);
+	auto bad4 = ServiceRegistry::Deserialize(ss4.str());
+	TEST_ASSERT(!bad4.has_value(), "Deserialize rejects entry without publicEndPoint");
+
+	// Missing accessKey
+	Poco::JSON::Object missingKey;
+	missingKey.set("instanceId", "inst-1");
+	missingKey.set("type", "owgw");
+	missingKey.set("privateEndPoint", "https://owgw:17004");
+	missingKey.set("publicEndPoint", "https://owgw:16004");
+	missingKey.set("lastUpdate", 123456);
+	std::ostringstream ss5;
+	Poco::JSON::Stringifier::stringify(missingKey, ss5);
+	auto bad5 = ServiceRegistry::Deserialize(ss5.str());
+	TEST_ASSERT(!bad5.has_value(), "Deserialize rejects entry without accessKey");
+
+	// Negative lastUpdate
+	Poco::JSON::Object negativeTs;
+	negativeTs.set("instanceId", "inst-1");
+	negativeTs.set("type", "owgw");
+	negativeTs.set("privateEndPoint", "https://owgw:17004");
+	negativeTs.set("publicEndPoint", "https://owgw:16004");
+	negativeTs.set("accessKey", "key123");
+	negativeTs.set("lastUpdate", -1);
+	std::ostringstream ss6;
+	Poco::JSON::Stringifier::stringify(negativeTs, ss6);
+	auto bad6 = ServiceRegistry::Deserialize(ss6.str());
+	TEST_ASSERT(!bad6.has_value(), "Deserialize rejects entry with negative lastUpdate");
+
+	// Empty or malformed input
+	TEST_ASSERT(!ServiceRegistry::Deserialize("").has_value(), "Deserialize rejects empty string");
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{malformed-json").has_value(), "Deserialize rejects malformed JSON");
+
+	std::cout << "  PASS: test_redis_service_registry_serialization_deserialization" << std::endl;
+}
+
+// Test 29: Redis snapshot bootstrap seeds multiple replicas and deduplicates routes
+static void test_redis_bootstrap_snapshot_seeding() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// Snapshot contains:
+	// - 2 replicas of owgw sharing https://owgw-internal:17004
+	// - 1 replica of owsec at https://owsec-internal:16001
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-replica-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+	snapshot.push_back({
+		.InstanceId = "owgw-replica-2",
+		.Id = 2,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 3
+	});
+	snapshot.push_back({
+		.InstanceId = "owsec-replica-1",
+		.Id = 10,
+		.Type = "owsec",
+		.PrivateEndPoint = "https://owsec-internal:16001",
+		.PublicEndPoint = "https://owsec.example.com:16001",
+		.AccessKey = "key-sec",
+		.Version = "1.1.0",
+		.LastUpdate = now - 1
+	});
+
+	svc.SimulateRedisBootstrap(snapshot);
+
+	// Verify instances seeded
+	auto gwInstances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(gwInstances.size() == 2, "2 owgw replicas seeded from snapshot");
+	TEST_ASSERT(gwInstances.find("owgw-replica-1") != gwInstances.end(), "Replica 1 present");
+	TEST_ASSERT(gwInstances.find("owgw-replica-2") != gwInstances.end(), "Replica 2 present");
+
+	// Verify logical endpoint deduplication
+	auto gwRoutes = svc.GetServices("owgw");
+	TEST_ASSERT(gwRoutes.size() == 1, "Logical route deduplicated to 1 endpoint");
+	TEST_ASSERT(gwRoutes[0].PrivateEndPoint == "https://owgw-internal:17004", "owgw route correct");
+
+	auto secInstances = svc.GetServiceInstances("owsec");
+	TEST_ASSERT(secInstances.size() == 1, "1 owsec replica seeded");
+	auto secRoutes = svc.GetServices("owsec");
+	TEST_ASSERT(secRoutes.size() == 1, "owsec route present");
+	TEST_ASSERT(secRoutes[0].PrivateEndPoint == "https://owsec-internal:16001", "owsec route correct");
+
+	std::cout << "  PASS: test_redis_bootstrap_snapshot_seeding" << std::endl;
+}
+
+// Test 30: Clock skew tolerance and invalid snapshot entries during bootstrap
+// Remote timestamps with clock skew (e.g. >120s behind or in the future) are accepted
+// because Redis TTL enforces freshness; entries are assigned local timestamp 'now'.
+// Only entries with invalid timestamp (0) are ignored.
+static void test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	std::vector<Types::MicroServiceMeta> snapshot;
+	// Entry from peer with synchronized clock (5s ago)
+	snapshot.push_back({
+		.InstanceId = "owgw-sync",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-sync",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+	// Entry from peer whose clock is skewed 150s behind (would exceed 120s if compared against local clock)
+	// Must be accepted because it exists unexpired in Redis!
+	snapshot.push_back({
+		.InstanceId = "owgw-skewed-behind",
+		.Id = 2,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-skewed",
+		.Version = "1.0.0",
+		.LastUpdate = now - 150
+	});
+	// Invalid entry with 0 timestamp
+	snapshot.push_back({
+		.InstanceId = "owgw-zero-ts",
+		.Id = 3,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-zero",
+		.Version = "1.0.0",
+		.LastUpdate = 0
+	});
+
+	svc.SimulateRedisBootstrap(snapshot);
+
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 2, "Both sync and skewed entries seeded, zero-ts ignored");
+	TEST_ASSERT(instances.find("owgw-sync") != instances.end(), "Sync entry present");
+	TEST_ASSERT(instances.find("owgw-skewed-behind") != instances.end(), "Skewed entry accepted");
+	TEST_ASSERT(instances.find("owgw-zero-ts") == instances.end(), "Zero-ts entry ignored");
+
+	// Verify that seeded entry was assigned local 'now' timestamp, not the remote skewed timestamp
+	TEST_ASSERT(instances["owgw-skewed-behind"].LastUpdate == now, "Assigned local 'now' timestamp for local cleanup");
+
+	std::cout << "  PASS: test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored" << std::endl;
+}
+
+// Test 31: Concurrent Kafka LEAVE during bootstrap prevents stale snapshot resurrection
+static void test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrection() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Start bootstrap phase
+	svc.SetBootstrapInProgress(true);
+	TEST_ASSERT(svc.IsBootstrapInProgress(), "Bootstrap in progress flag set");
+
+	// 2. While bootstrap is running, a Kafka LEAVE message arrives for "owgw-departing-1"
+	auto leavePayload = MakePayload("leave", "owgw-departing-1", "owgw",
+	                                "https://owgw-internal:17004", "https://owgw.example.com:16004");
+	svc.BusMessageReceived("service_events", leavePayload);
+
+	// Verify tombstone was recorded in DepartedDuringBootstrap_
+	auto tombstones = svc.GetDepartedDuringBootstrap();
+	TEST_ASSERT(tombstones.count("owgw-departing-1") == 1, "Departing instance recorded in tombstone set");
+
+	// 3. The delayed Redis snapshot arrives containing the departing instance AND a healthy instance
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-departing-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 2
+	});
+	snapshot.push_back({
+		.InstanceId = "owgw-surviving-2",
+		.Id = 2,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 1
+	});
+
+	// Apply snapshot merge
+	svc.SimulateRedisBootstrap(snapshot);
+
+	// 4. Verify departing instance was NOT resurrected, but surviving instance was added
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.find("owgw-departing-1") == instances.end(), "Departed instance NOT resurrected by snapshot");
+	TEST_ASSERT(instances.find("owgw-surviving-2") != instances.end(), "Surviving instance present");
+	TEST_ASSERT(instances.size() == 1, "Only surviving instance in registry");
+
+	// Verify bootstrap state is cleaned up
+	TEST_ASSERT(!svc.IsBootstrapInProgress(), "Bootstrap in progress reset to false");
+	TEST_ASSERT(svc.GetDepartedDuringBootstrap().empty(), "Tombstone set cleared");
+
+	std::cout << "  PASS: test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrection" << std::endl;
+}
+
+// Test 32: Newer Kafka events arriving during bootstrap are not overwritten by older snapshot
+static void test_redis_bootstrap_race_newer_kafka_event_preserved() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Live Kafka JOIN arrives before snapshot completes: LastUpdate = now, Version = 2.0.0
+	auto joinPayload = MakePayload("join", "owgw-inst-1", "owgw",
+	                               "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                               "live-key", "2.0.0");
+	svc.BusMessageReceived("service_events", joinPayload);
+
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Instance registered via Kafka");
+	auto kafkaTs = instances["owgw-inst-1"].LastUpdate;
+	TEST_ASSERT(instances["owgw-inst-1"].Version == "2.0.0", "Version 2.0.0 from Kafka");
+
+	// 2. Snapshot has entry for the same instance with a FUTURE timestamp (clock skew):
+	// Even if snapshot has LastUpdate = now + 50, live Kafka state MUST NOT be overwritten!
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-inst-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "old-key",
+		.Version = "1.0.0",
+		.LastUpdate = now + 50
+	});
+
+	svc.SimulateRedisBootstrap(snapshot);
+
+	// 3. Verify snapshot did NOT overwrite live Kafka data despite clock skew
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances["owgw-inst-1"].Version == "2.0.0", "Newer version preserved from Kafka");
+	TEST_ASSERT(instances["owgw-inst-1"].LastUpdate == kafkaTs, "Live Kafka timestamp preserved");
+	TEST_ASSERT(instances["owgw-inst-1"].AccessKey == "live-key", "Live access key preserved");
+
+	std::cout << "  PASS: test_redis_bootstrap_race_newer_kafka_event_preserved" << std::endl;
+}
+
+// Test 33: Kafka JOIN, KEEP_ALIVE, and LEAVE continue functioning normally after bootstrap
+static void test_redis_bootstrap_kafka_events_continue_after_bootstrap() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Seed registry with owgw-1
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+	svc.SimulateRedisBootstrap(snapshot);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 1, "Seeded with 1 replica");
+
+	// 2. Kafka JOIN adds owgw-2 sharing the same endpoint
+	auto join2 = MakePayload("join", "owgw-2", "owgw",
+	                         "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                         "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", join2);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 2, "Kafka JOIN added second replica");
+	TEST_ASSERT(svc.GetServices("owgw").size() == 1, "Shared route preserved");
+
+	// 3. Kafka KEEP_ALIVE refreshes owgw-1
+	auto keepalive1 = MakePayload("keep-alive", "owgw-1", "owgw",
+	                              "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                              "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", keepalive1);
+	TEST_ASSERT(svc.GetServiceInstances("owgw")["owgw-1"].LastUpdate >= now - 1, "Timestamp refreshed");
+
+	// 4. Kafka LEAVE removes owgw-1; owgw-2 keeps route alive
+	auto leave1 = MakePayload("leave", "owgw-1", "owgw",
+	                          "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                          "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", leave1);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 1, "Only owgw-2 remains");
+	TEST_ASSERT(svc.GetServices("owgw").size() == 1, "Route still active via surviving replica");
+
+	// 5. Kafka LEAVE removes owgw-2; route cleanly removed
+	auto leave2 = MakePayload("leave", "owgw-2", "owgw",
+	                          "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                          "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", leave2);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").empty(), "Registry empty");
+	TEST_ASSERT(svc.GetServices("owgw").empty(), "Route cleanly removed");
+
+	std::cout << "  PASS: test_redis_bootstrap_kafka_events_continue_after_bootstrap" << std::endl;
+}
+
+// Test 34: Redis lifecycle operations degrade gracefully when Redis is disabled or unconfigured
+static void test_redis_lifecycle_methods_graceful_when_disabled_or_unavailable() {
+	TestMicroService svc("owprov");
+
+	// In test environment, Redis host is unconfigured or disabled.
+	// All operations must be safe no-ops and never throw.
+	try {
+		svc.BootstrapFromRedisSnapshot();
+		svc.RefreshRedisRegistration();
+		svc.DeleteRedisRegistration();
+	} catch (const std::exception &e) {
+		TEST_ASSERT(false, std::string("Redis lifecycle method threw exception: ") + e.what());
+	} catch (...) {
+		TEST_ASSERT(false, "Redis lifecycle method threw unknown exception");
+	}
+
+	// Direct ServiceRegistry calls with unreachable port should log warnings and return false / empty
+	bool writeRes = ServiceRegistry::WriteRegistration("127.0.0.1", 59999, "", 0, 50, {
+		.InstanceId = "test-inst",
+		.Id = 1,
+		.Type = "owprov",
+		.PrivateEndPoint = "https://localhost:17005",
+		.PublicEndPoint = "https://localhost:16005",
+		.AccessKey = "testkey",
+		.Version = "1.0.0",
+		.LastUpdate = Utils::Now()
+	}, 60);
+	TEST_ASSERT(!writeRes, "WriteRegistration returns false on unreachable Redis");
+
+	bool delRes = ServiceRegistry::DeleteRegistration("127.0.0.1", 59999, "", 0, 50, "owprov", "test-inst");
+	TEST_ASSERT(!delRes, "DeleteRegistration returns false on unreachable Redis");
+
+	auto loaded = ServiceRegistry::LoadAll("127.0.0.1", 59999, "", 0, 50);
+	TEST_ASSERT(loaded.empty(), "LoadAll returns empty vector on unreachable Redis");
+
+	std::atomic_bool cancelSignal = true;
+	auto cancelledLoad = ServiceRegistry::LoadAll("127.0.0.1", 59999, "", 0, 50, &cancelSignal);
+	TEST_ASSERT(cancelledLoad.empty(), "LoadAll with CancelSignal returns empty immediately");
+
+	std::cout << "  PASS: test_redis_lifecycle_methods_graceful_when_disabled_or_unavailable" << std::endl;
+}
+
+// Test 35: Overlapping rolling restarts produce distinct Redis keys and do not collide
+static void test_redis_overlapping_restarts_isolated_keys() {
+	std::string oldUuid = "aaaa-1111-uuid";
+	std::string newUuid = "bbbb-2222-uuid";
+
+	auto oldKey = ServiceRegistry::MakeKey("owprov", oldUuid);
+	auto newKey = ServiceRegistry::MakeKey("owprov", newUuid);
+
+	TEST_ASSERT(oldKey != newKey, "Overlapping replicas produce distinct Redis keys");
+	TEST_ASSERT(oldKey == "service-registry:owprov:aaaa-1111-uuid", "Old key format correct");
+	TEST_ASSERT(newKey == "service-registry:owprov:bbbb-2222-uuid", "New key format correct");
+
+	auto parsedOld = ServiceRegistry::ParseKey(oldKey);
+	auto parsedNew = ServiceRegistry::ParseKey(newKey);
+	TEST_ASSERT(parsedOld.has_value() && parsedNew.has_value(), "Both keys parse successfully");
+	TEST_ASSERT(parsedOld->second == oldUuid, "Old key instance ID matches");
+	TEST_ASSERT(parsedNew->second == newUuid, "New key instance ID matches");
+
+	std::cout << "  PASS: test_redis_overlapping_restarts_isolated_keys" << std::endl;
+}
+
+// Test 36: Bootstrap wait loop terminates immediately upon shutdown cancellation signal
+static void test_redis_bootstrap_shutdown_cancellation() {
+	TestMicroService svc("owprov");
+
+	// Pre-set shutdown signal aborts ScheduleRedisBootstrap immediately without hanging
+	svc.BootstrapShutdown_ = true;
+	auto start = std::chrono::steady_clock::now();
+	svc.ScheduleRedisBootstrap();
+	auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - start).count();
+
+	TEST_ASSERT(elapsedMs < 100, "ScheduleRedisBootstrap with BootstrapShutdown_ must return immediately");
+	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after cancelled bootstrap");
+	TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when cancelled, preserving ability to bootstrap later");
+
+	// StopSubSystemServers must set BootstrapShutdown_ and join BootstrapThread_ safely
+	svc.BootstrapShutdown_ = false;
+	svc.BootstrapInProgress_ = false;
+	svc.StopSubSystemServers();
+	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after StopSubSystemServers");
+	TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be reset after StopSubSystemServers");
+
+	std::cout << "  PASS: test_redis_bootstrap_shutdown_cancellation" << std::endl;
+}
+
+// Test 37: Kafka partition assignment timeout does not block bootstrap; proceeds to load Redis
+static void test_redis_bootstrap_kafka_timeout_fallback_to_redis() {
+	TestMicroService svc("owprov");
+
+	svc.BootstrapShutdown_ = false;
+	svc.BootstrapInProgress_ = false;
+	svc.RedisBootstrapDone_ = false;
+
+	auto start = std::chrono::steady_clock::now();
+	svc.ScheduleRedisBootstrap();
+	auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - start).count();
+
+	// Must finish quickly and not hang indefinitely
+	TEST_ASSERT(elapsedMs < 1000, "ScheduleRedisBootstrap must not block indefinitely");
+	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after completion");
+	TEST_ASSERT(svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be marked true after fallback");
+
+	std::cout << "  PASS: test_redis_bootstrap_kafka_timeout_fallback_to_redis" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -1399,6 +1965,17 @@ int main() {
 	test_legacy_peers_distinct_endpoints_same_numeric_id();
 	test_uuid_in_id_field_lifecycle();
 	test_production_dual_identity_wire_format_lifecycle();
+	test_redis_service_registry_key_helpers();
+	test_redis_service_registry_serialization_deserialization();
+	test_redis_bootstrap_snapshot_seeding();
+	test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored();
+	test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrection();
+	test_redis_bootstrap_race_newer_kafka_event_preserved();
+	test_redis_bootstrap_kafka_events_continue_after_bootstrap();
+	test_redis_lifecycle_methods_graceful_when_disabled_or_unavailable();
+	test_redis_overlapping_restarts_isolated_keys();
+	test_redis_bootstrap_shutdown_cancellation();
+	test_redis_bootstrap_kafka_timeout_fallback_to_redis();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;

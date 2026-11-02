@@ -150,4 +150,16 @@ namespace OpenWifi {
 		return MicroService::instance().InstanceId();
 	}
 
+	void MicroServiceRefreshRedisRegistration() {
+		MicroService::instance().RefreshRedisRegistration();
+	}
+
+	void MicroServiceDeleteRedisRegistration() {
+		MicroService::instance().DeleteRedisRegistration();
+	}
+
+	void MicroServiceBootstrapFromRedisSnapshot() {
+		MicroService::instance().BootstrapFromRedisSnapshot();
+	}
+
 } // namespace OpenWifi
