@@ -46,7 +46,7 @@ In-scope functional and security requirements comprise:
 - Scoping collection queries strictly to the authenticated subscriber (`WHERE subscriberId = CallerId`) with no operator-wide fallback.
 - Verifying direct resource ownership (`TargetResource.subscriberId == CallerId` or `venue.subscriber == CallerId`) whenever an endpoint targets a specific resource identifier.
 - Enforcing server-derived ownership on device creation, requiring the sentinel path `/api/v1/subscriberDevice/0`.
-- Enforcing strict top-level property allowlists and deep recursive uCentral Wi-Fi configuration allowlists.
+- Enforcing strict subscriber field boundaries, administrative field immutability, and authoritative uCentral device configuration validation.
 - Protecting internal configuration records, ensuring configurations mutated by subscribers are owned by the caller and cannot modify administrative templates or management networks.
 - Enforcing the architectural separation between unauthenticated internal registration (Flow A) and authenticated subscriber self-service (Flow B).
 - Enforcing semantic differentiation between authorization rejections (`HTTP 403 ACCESS_DENIED`) and request content/schema violations (`HTTP 400 Bad Request`).
@@ -147,11 +147,13 @@ When an authorized endpoint does not contain a target resource ID in its URI pat
 #### 4.3.2 Case B — Endpoints With Target Resource ID
 When an authorized endpoint contains an explicit target resource ID in its URI path (e.g., `/api/v1/subscriberDevice/{id}` or `/api/v1/venue/{id}`):
 1. The target resource ID MUST be treated strictly as an object locator, NOT an authorization assertion. For `subscriberDevice` endpoints, `:resourceId` MAY be either a canonical UUID or a valid hardware serial number, matching `LoadDeviceFromBinding()` resolution.
-2. **Single-Pass Loading and In-Memory Ownership Assertion**:
+2. **Single-Pass Loading, In-Memory Ownership Assertion, and Uniform 404 Masking**:
    - The system MUST load the target resource by its identifier (`:resourceId`, via UUID or hardware serial number for devices) in a single pass.
-   - Ownership and status differentiation MUST be evaluated in memory from the resolved record:
-     a) If the target resource does not exist in the database, the system MUST return `HTTP 404 Not Found`.
-     b) If the target resource exists but ownership fails (`Device.subscriberId != CallerId` or `Venue.subscriber != CallerId`), the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
+   - **Uniform 404 Masking for Existence-Oracle Prevention**:
+     - To prevent authenticated subscribers from enumerating, scanning, or probing valid device UUIDs, hardware serial numbers, or venue IDs across the platform, the system MUST return a uniform `HTTP 404 Not Found` whenever a target resource is inaccessible to the caller:
+       a) If the target resource does not exist in the database $\longrightarrow$ `HTTP 404 Not Found`.
+       b) If the target resource exists in the database but is owned by another subscriber or unassigned (`Device.subscriberId != CallerId` or `Venue.subscriber != CallerId`) $\longrightarrow$ `HTTP 404 Not Found`.
+     - **Internal Diagnostic Logging**: The system MUST retain distinct internal logging reasons (e.g., `AUTH_DEBUG: Denied - Foreign resource ownership` vs `AUTH_DEBUG: Denied - Resource not found in database`) for operational telemetry, audit trails, and troubleshooting, while ensuring the external HTTP response remains identical (`HTTP 404 Not Found`).
    - For authorized requests (`subscriberId == CallerId`), the pre-loaded entity MUST be passed/memoized within the request context so downstream business handlers do not reload the same resource from the database.
 3. **Point-of-Mutation Ownership Invariant**:
    - For mutations (`PUT`, `DELETE`), ownership MUST remain asserted at the point of database modification (e.g., atomic conditional update/delete `WHERE id = :resourceId AND subscriberId = :CallerId`) to prevent execution against unassigned or concurrently reassigned resources.
@@ -173,11 +175,11 @@ When an authorized endpoint contains an explicit target resource ID in its URI p
 ### 4.5 Fail-Closed Authorization
 
 1. **Evaluation Order**: The subscriber authorization pipeline MUST be evaluated in `RESTAPIHandler::RoleIsAuthorized()` BEFORE `FindAllUserRoles()`, BEFORE administrative `ManagementRole` database queries, and BEFORE staff/operator global GET shortcuts, conditioned strictly upon subscriber principal classification (`userRole == SUBSCRIBER`).
-2. **Authorization Rejection Precedence**: If a subscriber request fails authorization conditions—including capability checks, unauthorized method/path operations, missing or unresolvable identity context, foreign resource ownership, or attempts to modify administrative fields—the request MUST fail closed immediately with `HTTP 403 ACCESS_DENIED`.
-3. **Invalid Request and Schema Precedence**: If an authorized subscriber request contains malformed request syntax, unknown top-level mutation fields, unknown nested configuration keys, or unsupported nested configuration structures, the request MUST fail closed with `HTTP 400 Bad Request` in accordance with Section 9.
+2. **Authorization Rejection Precedence**: If a subscriber request fails authorization conditions—including capability checks, unauthorized method/path operations, missing or unresolvable identity context, or attempts to modify properties outside positive allowlists—the request MUST fail closed with `HTTP 403 ACCESS_DENIED` (with inaccessible foreign resources on target resource endpoints uniformly masked to `HTTP 404 Not Found` per Section 4.3.2).
+3. **Invalid Request and Schema Precedence**: If an authorized subscriber request contains malformed request syntax, unparseable JSON, or schema-violating configuration structures, the request MUST fail closed with `HTTP 400 Bad Request` in accordance with Section 9.
 4. **No Cross-Pipeline Fallthrough**: A rejected or unmatched subscriber request MUST NOT fall through to administrative RBAC evaluation. Conversely, administrative principals accessing subscriber-capable endpoints (e.g., `GET /api/v1/subscriberDevice` or `DELETE /api/v1/subscriber/{id}`) MUST NOT enter the subscriber authorization pipeline and MUST evaluate strictly under administrative RBAC.
 5. **Path and Operation Boundary**:
-   - When a requested path or operation is syntactically recognized but represents an action or path variant the subscriber is not permitted to invoke (such as `DELETE /api/v1/subscriber/{foreign_id}`, `POST /api/v1/venue`, or `POST /api/v1/subscriberDevice/{non-zero-id}`), authorization MUST fail closed with `HTTP 403 ACCESS_DENIED`.
+   - When a requested path or operation is syntactically recognized but represents an action or path variant the subscriber is not permitted to invoke (such as parameterized `DELETE /api/v1/subscriber/{id}`, `POST /api/v1/venue`, or `POST /api/v1/subscriberDevice/{non-zero-id}`), authorization MUST fail closed with `HTTP 403 ACCESS_DENIED`.
    - When the request structure or path parameter itself is malformed or cannot be interpreted as a valid request representation by the parsing layer, the request MUST fail closed with `HTTP 400 Bad Request`.
 
 ### 4.6 Client-Supplied Identity and Scope
@@ -209,14 +211,14 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
 | `GET` | `/api/v1/subscriber` | **Allow** | Scoped strictly to `CallerId`; prohibits `email`, `macAddress`, `listOnly`; subscriber-safe projection. |
 | `PUT` | `/api/v1/subscriber` | **Allow** | Scoped strictly to `CallerId`; permitted operation `updateMac` only; verifies MAC availability. |
 | `DELETE` | `/api/v1/subscriber` | **Allow** | Bare path; scoped to `CallerId`; requires active claimed device count == 0. |
-| `DELETE` | `/api/v1/subscriber/{id}` | **Conditional** | Permitted for subscriber self-deletion if `{id} == CallerId` (active device count == 0); `{id} != CallerId` rejected with `403`. Administrative principals evaluate via Admin RBAC. |
+| `DELETE` | `/api/v1/subscriber/{id}` | **Denied** | Administrative-only endpoint; subscribers MUST use bare `DELETE /api/v1/subscriber`. Any subscriber invocation returns `403 ACCESS_DENIED`. |
 | `GET` | `/api/v1/subscriberDevice` | **Allow** | Collection scoped strictly to `WHERE subscriberId = CallerId`; no operator fallback. |
-| `GET` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies target device ownership: `device.subscriberId == CallerId`. |
+| `GET` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies target device ownership (`device.subscriberId == CallerId`); uniform `404` on missing or foreign device. |
 | `POST` | `/api/v1/subscriberDevice/0` | **Allow** | Sentinel path `/0` only; forces `newDevice.subscriberId = CallerId`; verifies claim eligibility. |
-| `PUT` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies device ownership + top-level allowlist + nested Wi-Fi allowlist. |
-| `DELETE` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies device ownership (`device.subscriberId == CallerId`) + executes unclaim workflow. |
-| `GET` | `/api/v1/venue/{id}` | **Allow** | Verifies target venue ownership: `venue.subscriber == CallerId`. |
-| `PUT` | `/api/v1/venue/{id}` | **Allow** | Verifies venue ownership (`venue.subscriber == CallerId`) + permitted metadata allowlist. |
+| `PUT` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies device ownership (uniform `404` on missing/foreign) + positive allowlist + uCentral configuration validation. |
+| `DELETE` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies device ownership (uniform `404` on missing/foreign) + executes unclaim workflow. |
+| `GET` | `/api/v1/venue/{id}` | **Allow** | Verifies target venue ownership (`venue.subscriber == CallerId`); uniform `404` on missing or foreign venue. |
+| `PUT` | `/api/v1/venue/{id}` | **Allow** | Verifies venue ownership (uniform `404` on missing/foreign) + positive allowlist. |
 | `POST` | `/api/v1/venue` | **Denied** | Administrative-only endpoint; rejected fail-closed with `403 ACCESS_DENIED`. |
 | `DELETE` | `/api/v1/venue/{id}` | **Denied** | Administrative-only endpoint; rejected fail-closed with `403 ACCESS_DENIED`. |
 | `*` | `/api/v1/configuration*` | **Denied** | Standalone Configuration API is administrative-only; all methods return `403 ACCESS_DENIED`. |
@@ -240,8 +242,7 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
    If any of these prohibited parameters are present in a subscriber request, the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
 3. **`signupUUID` Parameter Handling**: If the client provides `?signupUUID=<id>`:
    - The system MUST load the corresponding `SignupEntry` (`SE`) from `SignupDB`.
-   - If the record does not exist, the system MUST return `HTTP 404 Not Found`.
-   - The system MUST assert that `SE.userId == CallerId`. If `SE.userId != CallerId`, the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
+   - If the record does not exist, or if `SE.userId != CallerId`, the system MUST return `HTTP 404 Not Found` (uniformly masked to prevent signup UUID existence probing, with internal logging of the diagnostic reason).
 4. **Default Identity Resolution**: When no query parameters are present, the system MUST resolve the profile strictly via trusted caller identity: `SignupDB.GetRecord("userId", CallerId, SE)`.
 5. **Subscriber-Safe Response Projection**: The system MUST filter the raw `SignupEntry` before returning the JSON payload, enforcing strict data confidentiality:
    - **Permitted Fields**: `id`, `userId`, `email`, `status`, `statusCode`, `macAddress`, `serialNumber`, `deviceID`, `registrationId`, `operatorId`, `submitted`, `completed`, `created`, `modified`.
@@ -274,11 +275,10 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
    - If active claimed devices remain associated with the subscriber, the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
    - If active claimed device count is zero, the system MUST execute subscriber self-deletion.
 
-#### 5.1.5 DELETE `/api/v1/subscriber/{id}` (Parameterized Path)
-1. When invoked by an authenticated subscriber principal, the system MUST enforce the consistent identity rule:
-   - If `{id} == CallerId`: The request is authorized as valid self-deletion and MUST enforce the Section 5.1.4 active claimed device constraint (rejecting with `HTTP 400 Bad Request` if active claimed devices remain).
-   - If `{id} != CallerId`: The request MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
-2. When invoked by an administrative principal (`ROOT`, `Admin`, `CSR`), the endpoint MUST evaluate strictly through administrative RBAC, authorizing deletion of arbitrary subscriber records according to administrative policy.
+#### 5.1.5 DELETE `/api/v1/subscriber/{id}` (Parameterized Path — Administrative Only)
+1. **Administrative Exclusivity**: The parameterized path `/api/v1/subscriber/{id}` is strictly an administrative endpoint.
+2. **Subscriber Denial**: Authenticated subscribers MUST use the bare URI path `/api/v1/subscriber` for self-deletion. Any attempt by an authenticated subscriber principal (`userRole == SUBSCRIBER`) to invoke `DELETE /api/v1/subscriber/{id}`—regardless of whether `{id}` matches `CallerId` or not—MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
+3. **Administrative RBAC Evaluation**: When invoked by an administrative principal (`ROOT`, `Admin`, `CSR`), the endpoint evaluates strictly through administrative RBAC, authorizing deletion of subscriber records according to administrative policy.
 
 ---
 
@@ -292,8 +292,8 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
 
 #### 5.2.2 GET `/api/v1/subscriberDevice/{id}` (Individual)
 1. The system MUST load the target device from `SubscriberDeviceDB` using `{id}` (resolving by internal UUID or hardware serial number).
-2. If the device does not exist, the system MUST return `HTTP 404 Not Found`.
-3. The system MUST verify that `device.subscriberId == CallerId`. If the device belongs to another subscriber or has no assigned subscriber, the system MUST return `HTTP 403 ACCESS_DENIED`.
+2. If the device does not exist, or if the device exists but does not belong to the caller (`device.subscriberId != CallerId` or unassigned), the system MUST return `HTTP 404 Not Found` in accordance with the Section 4.3.2 uniform masking rule, preventing hardware serial number and UUID existence enumeration.
+3. The server MUST record the distinct authorization failure reason internally for audit and diagnostic purposes.
 
 #### 5.2.3 POST `/api/v1/subscriberDevice/0` (Claiming & Creation)
 1. **Mandatory Sentinel Path**: The system MUST permit subscriber device creation exclusively on the sentinel path `/api/v1/subscriberDevice/0`.
@@ -315,9 +315,14 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
 5. **Configuration Record Initialization**: Any configuration record created for a claimed subscriber device in `ConfigurationDB` MUST explicitly set `cfg.subscriber = CallerId` and `cfg.subscriberOnly = true`. Subscriber devices MUST NOT reference unowned or shared administrative configurations.
 
 #### 5.2.4 PUT `/api/v1/subscriberDevice/{id}` (Mutation)
-1. The system MUST load the target device (resolving by UUID or hardware serial number) and verify device ownership: `device.subscriberId == CallerId`. Ownership mismatch MUST return `HTTP 403 ACCESS_DENIED`.
-2. Device ownership alone DOES NOT authorize arbitrary modification. The request MUST satisfy the pure positive allowlist defined in Section 6.2 and Section 6.3.
-3. **Configuration Ownership & Lazy Adoption Rule**:
+1. The system MUST load the target device (resolving by UUID or hardware serial number) and verify device ownership: `device.subscriberId == CallerId`. If the device does not exist, or if `device.subscriberId != CallerId`, the system MUST return `HTTP 404 Not Found` in accordance with the uniform masking rule (Section 4.3.2).
+2. Device ownership alone DOES NOT authorize arbitrary modification. The request MUST satisfy the field authorization and configuration schema requirements defined in Section 6.2 and Section 6.3.
+3. **Subscriber-Permitted Field Allowlist Enforcement**:
+   - The authorization engine MUST evaluate subscriber mutations strictly against the positive **Subscriber-Permitted Field Allowlist**:
+     `{ "name", "description", "configuration", "deviceConfiguration", "contact", "location" }`.
+   - The system MUST NOT evaluate or maintain denylists of forbidden properties in code.
+   - Any property present in the request payload that is not a member of the Subscriber-Permitted Field Allowlist MUST NOT be authorized for subscriber mutation and MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`. Administrative and hardware properties are strictly protected by virtue of their exclusion from this allowlist.
+4. **Configuration Ownership & Lazy Adoption Rule**:
    - Subscriber devices MUST reference subscriber-specific configuration records (`cfg`). Shared administrative templates MUST NOT be associated with subscriber devices.
    - When an authenticated subscriber updates an owned device (`device.subscriberId == CallerId`), configuration ownership MUST be verified and migrated according to the **Device-Authoritative Lazy Adoption Rule**:
      - **Case A (Already Owned):** If `cfg.subscriber == CallerId`, configuration ownership is satisfied and the mutation proceeds to payload validation.
@@ -327,9 +332,13 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
        - The system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED` (*"Configuration record belongs to another subscriber"*).
    - No shared-template cloning or copy-on-write (CoW) behavior is required or permitted.
    - **Migration Job**: A background database maintenance script SHOULD backfill `cfg.subscriber = sub_devices4.subscriberId` and `cfg.subscriberOnly = true` for all active records where `sub_devices4.configuration == cfg.id`.
+5. **Configuration Schema Validation & Atomic Application**:
+   - If the request includes a `configuration` payload, the system MUST validate the entire configuration block against the canonical uCentral schema for the target device group using `ValidateConfigBlock()`.
+   - If the configuration is malformed, partial, or violates the schema, the request MUST be rejected with `HTTP 400 Bad Request` (`ConfigBlockInvalid`), aborting the transaction without modifying `ConfigurationDB` or `SubscriberDeviceDB`.
+   - Upon successful validation, the configuration is persisted in `ConfigurationDB`, the subscriber device record is updated in `SubscriberDeviceDB`, inventory synchronization is performed via `CreateInventoryRecord()`, and the updated configuration is pushed to the device via `PushConfigurationToDevice(serialNumber)`.
 
 #### 5.2.5 DELETE `/api/v1/subscriberDevice/{id}` (Unclaiming & Removal)
-1. The system MUST load the target device (resolving by UUID or hardware serial number) and verify ownership: `device.subscriberId == CallerId`. Ownership mismatch MUST return `HTTP 403 ACCESS_DENIED`.
+1. The system MUST load the target device (resolving by UUID or hardware serial number) and verify ownership: `device.subscriberId == CallerId`. If the device does not exist, or if `device.subscriberId != CallerId`, the system MUST return `HTTP 404 Not Found` in accordance with the uniform masking rule (Section 4.3.2).
 2. Upon successful ownership verification, the system MUST execute the existing device unclaim and inventory disassociation workflow.
 
 ---
@@ -338,12 +347,11 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
 
 #### 5.3.1 GET `/api/v1/venue/{id}`
 1. The system MUST load the venue record from `VenueDB` using `{id}`.
-2. If the venue does not exist, the system MUST return `HTTP 404 Not Found`.
-3. The system MUST verify that `venue.subscriber == CallerId`. If the venue belongs to another subscriber or an administrative entity (`venue.subscriber != CallerId`), the system MUST return `HTTP 403 ACCESS_DENIED`.
+2. If the venue does not exist, or if `venue.subscriber != CallerId`, the system MUST return `HTTP 404 Not Found` in accordance with the Section 4.3.2 uniform masking rule, preventing venue existence enumeration.
 
 #### 5.3.2 PUT `/api/v1/venue/{id}`
-1. The system MUST load the venue record and assert `venue.subscriber == CallerId`. Ownership mismatch MUST return `HTTP 403 ACCESS_DENIED`.
-2. The system MUST enforce the venue field allowlist defined in Section 6.4.
+1. The system MUST load the venue record and assert `venue.subscriber == CallerId`. If the venue does not exist, or if `venue.subscriber != CallerId`, the system MUST return `HTTP 404 Not Found` in accordance with the Section 4.3.2 uniform masking rule.
+2. The system MUST enforce the venue positive field allowlist defined in Section 6.4.
 
 #### 5.3.3 POST `/api/v1/venue` and DELETE `/api/v1/venue/{id}`
 1. Venue creation and venue deletion MUST NOT be permitted as subscriber capabilities.
@@ -368,7 +376,7 @@ Resource Ownership
         +
 Permitted Operation
         +
-Permitted Field Allowlists
+Permitted Field Boundaries
         =
 Authorized Mutation
 ```
@@ -380,59 +388,56 @@ For `PUT /api/v1/subscriber` (Subscriber Self-Service):
 2. **Permitted Fields**: The request payload MUST contain only the new hardware `macAddress`.
 3. **Prohibited Operations**: Any subscriber request attempting other operations—including `emailVerified`, operator notes, billing tags, or status updates—MUST be rejected with `HTTP 403 ACCESS_DENIED`. (As defined in Section 5.1.3, `operation=emailVerified` is an internal microservice operation executed under Track 1 inter-service authentication).
 
-### 6.2 SubscriberDevice Pure Positive Allowlist
+### 6.2 SubscriberDevice Positive Field Allowlist
 
 For `PUT /api/v1/subscriberDevice/{id}`:
 
-1. **Pure Positive Validation Model (Zero-Trust Whitelist Only)**:
-   - The validation engine MUST NOT evaluate or maintain denylists, blacklists, or prohibited field sets in code.
-   - The system MUST accept ONLY explicitly allowlisted fields at their exact designated schema layers.
-   - Any unlisted field, extra property, misplaced key, unexpected configuration section, or out-of-range enumerated value MUST be rejected immediately with `HTTP 400 Bad Request` (*"Invalid subscriber device configuration payload: contains unrecognized or disallowed properties"*).
+1. **Pure Positive Allowlist Principle (Zero-Trust Whitelist Only)**:
+   - The authorization engine MUST NOT evaluate, maintain, or rely upon denylists, blacklists, or negative forbidden-field sets in code.
+   - Authorization is governed strictly by evaluating whether submitted properties belong to the positive **Subscriber-Permitted Field Allowlist**:
+     - `name`: User-facing device label or friendly name (persisted to `info.name`).
+     - `description`: User-facing device description (persisted to `info.description`).
+     - `configuration`: Array of `DeviceConfigurationElement` containing the authoritative uCentral device configuration.
+     - `deviceConfiguration`: Linked configuration UUID reference (evaluated under the Configuration Lazy Adoption rule).
+     - `contact`: Subscriber contact details.
+     - `location`: Subscriber location details.
 
-2. **Layer 1: Top-Level DTO Allowlist**:
-   - Subscribers MAY mutate only the following top-level properties on `SubscriberDevice`:
-     - `name`: String, length $1 \le L \le 64$ characters.
-     - `configuration`: Array of configuration element objects.
-   - If the request payload contains ANY other top-level property (such as `id`, `serialNumber`, `subscriberId`, `venueId`, `operatorId`, `locationId`, `deviceType`, `rrm`, etc.), the system MUST reject the request with `HTTP 400 Bad Request`.
+2. **Allowlist Enforcement**:
+   - Every property submitted in a subscriber update payload MUST belong strictly to the positive Subscriber-Permitted Field Allowlist.
+   - Any property outside this positive allowlist is unauthorized for subscriber mutation.
+   - Administrative, management, tenant, and hardware properties are inherently protected against modification by virtue of their exclusion from the positive allowlist.
+   - If an authenticated subscriber mutation payload contains or attempts to modify any property not explicitly membered in the Subscriber-Permitted Field Allowlist, the system MUST reject the request fail-closed with `HTTP 403 ACCESS_DENIED`.
 
-### 6.3 Deep Configuration Pure Positive Allowlist & Merge Semantics
+### 6.3 Authoritative Configuration and Schema Validation
 
-When a subscriber update includes the `configuration` array, the system MUST enforce positive structural matching at every layer of the JSON tree:
+When a subscriber update includes the `configuration` array:
 
-1. **Layer 2: Configuration Section Allowlist**:
-   - The `configuration` array MUST contain only element objects where `"name": "interfaces"`.
-   - The array MUST be bounded to at most 1 section element.
-   - Any section element whose `"name"` is not `"interfaces"` (such as `"radios"`, `"switch"`, `"services"`, `"metrics"`, `"firewall"`, or `"config-raw"`) is not in the allowlist and MUST be rejected with `HTTP 400 Bad Request`.
+1. **Authoritative Configuration Block Model**:
+   - The system treats the `configuration` array in `PUT /api/v1/subscriberDevice/{id}` as the authoritative device configuration.
+   - Subscriber clients (such as UserPortal) construct the complete uCentral configuration document encompassing client Wi-Fi networks (SSIDs, security parameters, passphrases) and underlying device settings.
 
-2. **Layer 3: Interface Object Allowlist**:
-   - Within the `"interfaces"` section, only interface objects where `"role": "downstream"` (or `"role": "lan"`) are permitted.
-   - Any interface object specifying any other role (e.g. `"upstream"`, `"wan"`), or defining `"network": "management"`, is not in the allowlist and MUST be rejected with `HTTP 400 Bad Request`.
+2. **Strict Schema Validation (`ValidateConfigBlock`)**:
+   - Every configuration block in the `configuration` array MUST be validated via `ValidateConfigBlock()` against the canonical uCentral schema for the target device group (`DefaultAPSchema`, `DefaultSWITCHSchema`, or `DefaultOLGSchema`).
+   - Structural and schema validation asserts that:
+     - Every configuration element contains a non-empty `name`.
+     - Root section names inside `configuration` belong strictly to recognized uCentral sections (`globals`, `interfaces`, `metrics`, `radios`, `services`, `unit`, `definitions`, `ethernet`, `switch`, `config-raw`, `third-party`, `nat`).
+     - The document satisfies strict JSON schema validation via `valijson::Validator` in strict mode.
 
-3. **Layer 4: SSID Object Allowlist**:
-   - Within permitted downstream interfaces, only SSID elements where `"bss-mode": "ap"` are permitted.
-   - Any SSID element specifying any other mode (e.g. `"mesh"`, `"sta"`) is not in the allowlist and MUST be rejected with `HTTP 400 Bad Request`.
+3. **Rejection of Faulty or Incomplete Configurations**:
+   - Partial configuration snippets, malformed JSON, or schema-violating structures that do not satisfy the complete uCentral schema MUST be rejected immediately with `HTTP 400 Bad Request` (`ConfigBlockInvalid` or `InvalidJSONDocument`).
+   - A rejected configuration payload MUST NOT modify `ConfigurationDB`, MUST NOT update `SubscriberDeviceDB`, and MUST NOT be pushed to the physical device.
 
-4. **Layer 5: SSID Leaf Property Allowlist**:
-   - Within an allowlisted AP SSID object, the system permits strictly the following leaf properties:
-     - `name`: SSID name, string, length $1 \le L \le 32$ printable characters.
-     - `hidden-ssid`: Boolean (`true` or `false`), optional.
-     - `encryption`: Object containing strictly:
-       - `proto`: String enum restricted to `["psk2", "sae", "sae-mixed", "psk-mixed"]`.
-       - `key`: Passphrase string, length $8 \le L \le 63$ ASCII characters (or 64 hexadecimal characters).
-   - Any other property inside the SSID object or encryption block is not in the allowlist and MUST be rejected with `HTTP 400 Bad Request`.
-
-5. **Non-Destructive Deep Patching**:
-   - The backend MUST NOT overwrite the canonical device configuration template with the subscriber payload.
-   - The system MUST apply only the validated leaf properties (`name`, `hidden-ssid`, `encryption.proto`, `encryption.key`) to the matching client AP SSID in the existing configuration, leaving radios, switch ports, upstream WAN interfaces, telemetry blocks, and downstream parental-control filtering rules intact.
-
-### 6.4 Venue Mutations
+### 6.4 Venue Positive Field Allowlist
 
 For `PUT /api/v1/venue/{id}`:
-1. **Permitted Descriptive Fields**: Subscribers MAY mutate only descriptive metadata:
-   - `name` (string)
-   - `description` (string)
-   - `location` (object/string)
-2. **Prohibited Ownership & Hierarchy Fields**: Any attempt to modify `subscriber`, `entity`, parent venue pointers, or administrative policies MUST be rejected with `HTTP 403 ACCESS_DENIED`.
+1. **Pure Positive Allowlist Principle**:
+   - The authorization engine MUST evaluate venue mutations strictly against the positive **Subscriber-Permitted Venue Field Allowlist**:
+     - `name`: User-facing venue name (persisted to `info.name`).
+     - `description`: User-facing venue description (persisted to `info.description`).
+     - `location`: Linked location UUID string (referencing the subscriber's location record in `LocationDB`).
+2. **Allowlist Enforcement**:
+   - Every property submitted in a subscriber venue update payload MUST belong strictly to the Subscriber-Permitted Venue Field Allowlist.
+   - Any property outside this positive allowlist (including `subscriber`, `entity`, `parent`, `children`, `devices`, `topology`, `managementPolicy`, `deviceRules`, `contacts`, `configurations`, `deviceConfiguration`) is unauthorized for subscriber mutation and MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
 
 ---
 
@@ -490,45 +495,47 @@ The system MUST enforce an operational semantic separation between authorization
 ### 9.1 Operational Error Boundary
 
 #### HTTP 403 — Authorization Failure
-> **Rule:** The request is structurally understood, but the caller is not permitted to perform the requested operation or access/modify the requested resource.
+> **Rule:** The request is structurally understood, but the caller is not permitted to perform the requested operation or modify unauthorized properties.
 
 Enforced for:
-- Foreign resource access (e.g., target device or venue does not belong to caller).
 - Identity mismatch: A client-supplied `subscriberId` does not match the authenticated caller (e.g., `{ "subscriberId": "someone-else" }` $\longrightarrow$ `HTTP 403 ACCESS_DENIED`).
-- Administrative field modification: Attempts to mutate administrative, ownership, or policy properties (`deviceType`, `managementPolicy`, `deviceRules`, `subscriberId`, `operatorId`, `realMacAddress`).
-- Unauthorized endpoints or operations: Invocations of administrative endpoints (e.g., `POST /api/v1/venue`, `DELETE /api/v1/venue/{id}`, or parameterized `DELETE /api/v1/subscriber/{foreign_id}` where `{foreign_id} != CallerId`).
+- Non-allowlisted property modification: Attempts by a subscriber to mutate properties outside the positive Subscriber-Permitted Field Allowlists (e.g., administrative, management, or hardware properties).
+- Unauthorized endpoints or operations: Invocations of administrative endpoints (e.g., `POST /api/v1/venue`, `DELETE /api/v1/venue/{id}`, or parameterized `DELETE /api/v1/subscriber/{id}`).
 - Standalone configuration access: Invocations of `/api/v1/configuration*`.
 - Unsupported subscriber operations: Profile mutations outside `operation=updateMac`.
 - Syntactically recognized unauthorized paths (e.g., `POST /api/v1/subscriberDevice/123`).
 - Prohibited query parameters: Use of `?email=...`, `?macAddress=...`, or `?listOnly=true` on profile GET.
-- Query parameter `signupUUID` mismatching `CallerId`.
 - Missing, empty, or unresolvable subscriber identity context.
+
+#### HTTP 404 — Not Found & Resource Existence Masking
+> **Rule:** The target resource does not exist, or exists but belongs to another subscriber or entity.
+
+Enforced for:
+- Non-existent target resource identifiers: Requested device UUID, serial number, or venue ID does not exist in the database.
+- Uniform foreign resource masking (Issue 6 resolution): To eliminate existence-oracle scanning of device serial numbers, device UUIDs, or venue IDs, any access to a foreign or unassigned resource via target resource endpoints (`/api/v1/subscriberDevice/{id}`, `/api/v1/venue/{id}`, or `?signupUUID=<id>`) returns `HTTP 404 Not Found`, identical to a non-existent resource, with internal diagnostic logging preserved.
 
 #### HTTP 400 — Request Validation Failure
 > **Rule:** The operation is permitted for the caller, but the request representation itself is invalid, unsupported, or violates domain schema constraints.
 
 Enforced for:
-- Unknown fields: Request payload contains unrecognized properties where an allowlist applies (e.g., `{ "someUnknownField": "value" }` $\longrightarrow$ `HTTP 400 Bad Request`).
-- Invalid nested Wi-Fi structure: Configuration payload targets non-wireless interfaces, upstream WAN backhaul, or unsupported sections.
-- Unsupported configuration blocks or unknown nested configuration keys.
-- Management network violations: Nested Wi-Fi payload defining, modifying, or referencing `network: "management"`.
-- Malformed request syntax or unparseable JSON payload.
+- Invalid configuration payload: Configuration payload that fails strict uCentral schema validation via `ValidateConfigBlock()` (e.g., unrecognized section blocks, missing required fields, or schema violations) $\longrightarrow$ `HTTP 400 Bad Request` (`ConfigBlockInvalid`).
+- Malformed request syntax or unparseable JSON payload $\longrightarrow$ `HTTP 400 Bad Request` (`InvalidJSONDocument`).
 - Malformed path parameters or invalid structural representation.
-- Invalid data types, formats, or values outside allowable ranges (e.g., invalid MAC format).
+- Invalid data types, formats, or values outside allowable ranges (e.g., invalid MAC format, invalid serial syntax).
 - Active claimed devices remaining during subscriber self-deletion (`StillInUse`).
 
 ---
 
 ## 10. Security Requirements
 
-1. **Cross-Subscriber Isolation**: The system MUST strictly enforce isolation between subscribers. A subscriber MUST NOT be able to view, claim, mutate, or delete resources belonging to any other subscriber.
+1. **Cross-Subscriber Isolation & Existence Masking**: The system MUST strictly enforce isolation between subscribers. A subscriber MUST NOT be able to view, claim, mutate, or delete resources belonging to any other subscriber. To eliminate existence-oracle scanning of device serial numbers, device UUIDs, and venue IDs across the platform, endpoints targeting specific resources MUST return a uniform `HTTP 404 Not Found` for both non-existent and foreign-owned resources, while logging distinct diagnostic reasons internally.
 2. **Server-Derived Ownership and Identity**: Ownership of newly claimed or created resources MUST be assigned server-side from `CallerId`. If a client supplies an optional `subscriberId`, it MUST match `CallerId` (`HTTP 403 ACCESS_DENIED` on mismatch); client-supplied ownership values have zero authority to establish or expand caller authorization scope.
 3. **No Operator / Tenant Dependency**: The subscriber authorization path MUST NOT evaluate or depend upon `operatorId`, `CallerTenant`, or tenant equality checks.
 4. **Strict Collection Scoping**: Device collection queries MUST be scoped strictly to `WHERE subscriberId = CallerId` with zero possibility of falling back to operator-wide visibility.
 5. **Exact-Match Capabilities**: The system MUST enforce exact-match HTTP method capabilities with zero method aliasing.
-6. **Property-Level Mutation Allowlists**: The system MUST enforce strict property-level allowlists for all mutations; denylist-based authorization controls MUST NOT be used.
-7. **Administrative Field Immutability**: Administrative, management, and ownership properties MUST remain strictly read-only for subscribers and rejected with `403 ACCESS_DENIED` upon mutation attempt.
-8. **Deep Configuration Protection**: Nested configuration JSON MUST enforce schema and structural constraints, preventing modification of management networks or non-client wireless interfaces.
+6. **Pure Positive Mutation Allowlists**: The system MUST enforce strict property-level positive allowlists for all mutations; denylist-based authorization controls MUST NOT be used in code.
+7. **Administrative Protection via Positive Allowlist**: Administrative, management, and hardware properties are protected against subscriber mutation by virtue of their exclusion from the positive allowlist, and any attempt to submit or mutate properties outside the allowlist MUST be rejected with `HTTP 403 ACCESS_DENIED`.
+8. **Authoritative Configuration Schema Protection**: Device configuration payloads MUST enforce strict uCentral data-model validation via `ValidateConfigBlock()`, rejecting partial, malformed, or schema-violating configurations before persistence or push.
 9. **Fail-Closed Default**: Authorization MUST fail closed with `HTTP 403 ACCESS_DENIED` for any unauthorized capability, unsupported subscriber operation, unauthorized path variant, ownership mismatch, or missing/incomplete identity context. Structurally invalid, malformed, or unparseable request representations MUST fail closed with `HTTP 400 Bad Request`.
 10. **Subscriber-Safe Response Projection**: The system MUST project subscriber profile responses to strip internal operator notes, classification tags, and internal error traces.
 11. **Preservation of Administrative RBAC**: Administrative roles, policies, and privileges MUST remain unaffected by subscriber authorization logic.
@@ -543,30 +550,30 @@ Enforced for:
 - **AC-SUB-1**: An authenticated subscriber calling bare `GET /api/v1/subscriber` successfully retrieves their own profile (`userId == CallerId`).
 - **AC-SUB-2**: The response payload for `GET /api/v1/subscriber` contains only subscriber-safe fields; internal operator metadata (`notes`, `tags`, internal error traces) is redacted.
 - **AC-SUB-3**: A subscriber calling `GET /api/v1/subscriber` with query parameter `?email=...`, `?macAddress=...`, or `?listOnly=true` receives `HTTP 403 ACCESS_DENIED`.
-- **AC-SUB-4**: A subscriber calling `GET /api/v1/subscriber?signupUUID=<own_id>` successfully retrieves their profile; calling with `?signupUUID=<foreign_id>` receives `HTTP 403 ACCESS_DENIED`.
+- **AC-SUB-4**: A subscriber calling `GET /api/v1/subscriber?signupUUID=<own_id>` successfully retrieves their profile; calling with `?signupUUID=<foreign_id>` receives `HTTP 404 Not Found` (uniform existence masking).
 - **AC-SUB-5**: An authenticated subscriber calling `PUT /api/v1/subscriber?operation=updateMac` with a valid, unassigned MAC successfully updates their profile.
 - **AC-SUB-6**: An authenticated subscriber calling `PUT /api/v1/subscriber` with an operation other than `updateMac` (or an empty operation) receives `HTTP 403 ACCESS_DENIED`.
 - **AC-SUB-7**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with zero active claimed devices successfully deletes their profile.
 - **AC-SUB-8**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with active claimed devices remaining receives `HTTP 400 Bad Request` (`StillInUse`).
-- **AC-SUB-9**: An authenticated subscriber calling parameterized `DELETE /api/v1/subscriber/{id}` where `{id} == CallerId` and zero active claimed devices remain successfully deletes their profile; calling where `{id} != CallerId` receives `HTTP 403 ACCESS_DENIED`.
+- **AC-SUB-9**: Any authenticated subscriber calling parameterized `DELETE /api/v1/subscriber/{id}` (regardless of whether `{id} == CallerId` or `{id} != CallerId`) receives `HTTP 403 ACCESS_DENIED`. Subscribers must use bare `DELETE /api/v1/subscriber` for self-deletion.
 
 ### 11.2 Subscriber Devices
 - **AC-DEV-1**: An authenticated subscriber calling `GET /api/v1/subscriberDevice` receives only devices where `subscriberId == CallerId`.
-- **AC-DEV-2**: An authenticated subscriber calling `GET /api/v1/subscriberDevice/{id}` (via UUID or hardware serial number) for an owned device receives the device payload; calling for a foreign device receives `HTTP 403 ACCESS_DENIED`.
+- **AC-DEV-2**: An authenticated subscriber calling `GET /api/v1/subscriberDevice/{id}` (via UUID or hardware serial number) for an owned device receives the device payload; calling for a foreign device receives `HTTP 404 Not Found` (uniform existence masking).
 - **AC-DEV-3**: An authenticated subscriber calling `POST /api/v1/subscriberDevice/0` with eligible claim data successfully claims the device, with ownership assigned to `CallerId`.
 - **AC-DEV-4**: An authenticated subscriber calling `POST /api/v1/subscriberDevice/{non_zero_id}` receives `HTTP 403 ACCESS_DENIED`.
 - **AC-DEV-5**: A client-supplied `subscriberId` in the body of `POST /api/v1/subscriberDevice/0` that does not match `CallerId` is rejected with `HTTP 403 ACCESS_DENIED`; if absent or matching `CallerId`, the device is claimed with `newDevice.subscriberId = CallerId`.
-- **AC-DEV-6**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on an owned device with allowlisted fields (`name`, `configuration` containing valid downstream AP SSID updates) successfully updates the device.
-- **AC-DEV-7**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on a foreign device receives `HTTP 403 ACCESS_DENIED`.
-- **AC-DEV-8**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` with unlisted top-level fields (e.g. `serialNumber`, `deviceType`, `subscriberId`, `operatorId`) receives `HTTP 400 Bad Request`.
-- **AC-DEV-9**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` with unlisted configuration sections (e.g. `radios`, `switch`, `services`, `config-raw`), WAN roles (`upstream`), or mesh modes receives `HTTP 400 Bad Request`.
-- **AC-DEV-10**: A nested Wi-Fi configuration update containing valid allowlisted leaf properties (`name`, `hidden-ssid`, `encryption.proto`, `encryption.key`) in a client AP SSID block succeeds.
-- **AC-DEV-11**: A nested configuration update referencing `network: "management"` or specifying any unlisted property at any layer receives `HTTP 400 Bad Request`.
+- **AC-DEV-6**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on an owned device with permitted fields (`name`, schema-valid `configuration`) successfully updates the device record and linked configuration.
+- **AC-DEV-7**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on a foreign device receives `HTTP 404 Not Found` (uniform existence masking).
+- **AC-DEV-8**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` attempting to submit or modify any property outside the positive Subscriber-Permitted Field Allowlist (e.g., `serialNumber`, `deviceType`, `deviceGroup`, `subscriberId`, `operatorId`, `managementPolicy`, `deviceRules`, `realMacAddress`, or any arbitrary property) receives `HTTP 403 ACCESS_DENIED`.
+- **AC-DEV-9**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` with a malformed JSON payload receives `HTTP 400 Bad Request` (`InvalidJSONDocument`).
+- **AC-DEV-10**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` with a partial snippet, unrecognized root section name, or schema-violating configuration that fails `ValidateConfigBlock()` receives `HTTP 400 Bad Request` (`ConfigBlockInvalid`).
+- **AC-DEV-11**: When a configuration update fails schema validation via `ValidateConfigBlock()`, the system aborts execution without modifying `ConfigurationDB` or `SubscriberDeviceDB`, and does not push changes to the physical device.
 - **AC-DEV-12**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on an owned device where the linked configuration has `cfg.subscriber == ""` (legacy configuration) automatically adopts the configuration (`cfg.subscriber = CallerId`, `cfg.subscriberOnly = true`); calling where `cfg.subscriber != ""` and `cfg.subscriber != CallerId` receives `HTTP 403 ACCESS_DENIED`.
-- **AC-DEV-13**: An authenticated subscriber calling `DELETE /api/v1/subscriberDevice/{id}` (via UUID or hardware serial number) on an owned device successfully unclaims the device; calling on a foreign device receives `HTTP 403 ACCESS_DENIED`.
+- **AC-DEV-13**: An authenticated subscriber calling `DELETE /api/v1/subscriberDevice/{id}` (via UUID or hardware serial number) on an owned device successfully unclaims the device; calling on a foreign device receives `HTTP 404 Not Found` (uniform existence masking).
 
 ### 11.3 Venues
-- **AC-VEN-1**: An authenticated subscriber calling `GET /api/v1/venue/{id}` on an owned venue (`venue.subscriber == CallerId`) receives the venue record; calling on a foreign venue receives `HTTP 403 ACCESS_DENIED`.
+- **AC-VEN-1**: An authenticated subscriber calling `GET /api/v1/venue/{id}` on an owned venue (`venue.subscriber == CallerId`) receives the venue record; calling on a foreign venue receives `HTTP 404 Not Found` (uniform existence masking).
 - **AC-VEN-2**: An authenticated subscriber calling `PUT /api/v1/venue/{id}` on an owned venue with permitted fields (`name`, `description`, `location`) successfully updates the venue.
 - **AC-VEN-3**: An authenticated subscriber calling `PUT /api/v1/venue/{id}` attempting to modify `subscriber`, `entity`, or administrative settings receives `HTTP 403 ACCESS_DENIED`.
 - **AC-VEN-4**: An authenticated subscriber calling `POST /api/v1/venue` receives `HTTP 403 ACCESS_DENIED`.
@@ -609,27 +616,28 @@ Test suites MUST provide comprehensive verification across all authorization bou
 |                                                                         |
 | 4. Resource Ownership & Isolation:                                      |
 |    - Verify owned device/venue GET/PUT/DELETE succeeds.                 |
-|    - Verify cross-subscriber access on foreign resource returns 403.     |
+|    - Verify foreign resource access returns 404 (existence masking).    |
+|    - Verify distinct internal diagnostic reason logged for audit.       |
 |                                                                         |
 | 5. Sentinel Creation Enforcement:                                       |
 |    - Verify POST /subscriberDevice/0 claims device for caller.          |
 |    - Verify non-sentinel paths (/123, /new) fail closed with 403.       |
 |                                                                         |
-| 6. Pure Positive Allowlists & Schema Enforcement:                       |
-|    - Verify top-level device allowlist (name, configuration).           |
-|    - Verify unlisted top-level/administrative fields return 400.        |
-|    - Verify nested configuration allowlist (interfaces -> downstream -> |
-|      ap -> name, hidden-ssid, encryption).                              |
-|    - Verify unlisted sections/roles/modes/keys return 400 Bad Request.  |
-|    - Verify legacy config adoption (cfg.subscriber == "" -> CallerId).  |
+| 6. Field Authorization & Configuration Schema Enforcement:                |
+|    - Verify permitted subscriber fields (name, description, contact,    |
+|      location, configuration, deviceConfiguration).                     |
+|    - Verify submission of non-allowlisted properties returns 403.       |
+|    - Verify authoritative configuration validated via ValidateConfigBlock|
+|    - Verify malformed, partial, or schema-violating config returns 400.  |
+|    - Verify legacy config adoption (cfg.subscriber == "" -> CallerId).   |
 |                                                                         |
 | 7. Profile & Venue Boundaries:                                          |
 |    - Verify GET /subscriber response redaction (notes/tags stripped).   |
 |    - Verify prohibited query parameters on GET /subscriber return 403.  |
 |    - Verify PUT /subscriber permits only operation=updateMac for subs.  |
 |    - Verify bare DELETE /subscriber enforces device-count constraint.   |
-|    - Verify parameterized DELETE /subscriber/{id} allows {id}==CallerId |
-|      (with device constraint) and rejects foreign {id} with 403.        |
+|    - Verify parameterized DELETE /subscriber/{id} returns 403 for subs   |
+|      (administrative exclusivity; subscribers must use bare path).      |
 |    - Verify venue POST and DELETE return 403.                           |
 |                                                                         |
 | 8. Registration vs. Self-Service Separation:                            |
@@ -683,8 +691,8 @@ The following matrix maps requirement areas to specification sections, acceptanc
 | **Collection Scoping** | Section 4.4 | AC-DEV-1 | Collection Scoping Suite |
 | **Resource Ownership** | Section 4.3 | AC-DEV-2, AC-VEN-1 | Ownership & Isolation Suite |
 | **Creation Sentinel Path** | Section 5.2.3 | AC-DEV-3, AC-DEV-4 | Sentinel Creation Suite |
-| **Mutation Allowlists** | Section 6.2 | AC-DEV-6, AC-DEV-8, AC-DEV-9 | Mutation Allowlists Suite |
-| **Nested Wi-Fi Configuration** | Section 6.3 | AC-DEV-10, AC-DEV-11 | Mutation Allowlists Suite |
+| **Mutation Positive Allowlists** | Section 6.2 | AC-DEV-6, AC-DEV-8 | Mutation Allowlists Suite |
+| **Authoritative Device Configuration** | Section 6.3 | AC-DEV-9, AC-DEV-10, AC-DEV-11 | Configuration Schema Suite |
 | **Profile Safe Projection** | Section 5.1.2 | AC-SUB-2, AC-SUB-3, AC-SUB-4 | Profile & Venue Suite |
 | **Profile Operations** | Section 5.1.3 | AC-SUB-5, AC-SUB-6 | Profile & Venue Suite |
 | **Subscriber Self-Deletion** | Section 5.1.4, 5.1.5 | AC-SUB-7, AC-SUB-8, AC-SUB-9 | Profile & Venue Suite |
@@ -692,5 +700,5 @@ The following matrix maps requirement areas to specification sections, acceptanc
 | **Configuration API Boundary** | Section 5.4 | AC-CFG-1 | Capability Enforcement Suite |
 | **Registration Flow (Flow A)** | Section 7 | AC-REG-1, AC-REG-2 | Registration Separation Suite |
 | **Administrative Compatibility**| Section 8 | AC-ADM-1 | Administrative Regression Suite |
-| **Error Differentiation (403/400)**| Section 9 | AC-DEV-8, AC-DEV-9, AC-SUB-8 | All Suites |
+| **Error Differentiation (403/404/400)**| Section 9 | AC-DEV-2, AC-DEV-8, AC-DEV-9, AC-SUB-8 | All Suites |
 | **Security Requirements** | Section 10 | All ACs | All Suites |
