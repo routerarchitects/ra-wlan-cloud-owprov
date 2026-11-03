@@ -2096,69 +2096,82 @@ static void test_redis_bootstrap_shutdown_cancellation() {
 		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when cancelled, preserving ability to bootstrap later");
 	}
 
-	// 2. StopSubSystemServers signals BootstrapShutdown_ and joins active in-flight BootstrapThread_ safely
-	{
-		TestMicroService svc("owprov");
-		std::atomic_bool workerStarted = false;
-		std::atomic_bool shutdownObserved = false;
-
-		svc.BootstrapInProgress_ = true;
-		svc.BootstrapThread_ = std::thread([&]() {
-			workerStarted = true;
-			while (!svc.BootstrapShutdown_) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(5));
-			}
-			shutdownObserved = true;
-		});
-
-		while (!workerStarted) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(2));
-		}
-
-		auto start = std::chrono::steady_clock::now();
-		svc.StopSubSystemServers();
-		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now() - start).count();
-
-		TEST_ASSERT(!svc.BootstrapThread_.joinable(), "BootstrapThread_ must be joined by StopSubSystemServers");
-		TEST_ASSERT(shutdownObserved, "Active bootstrap worker observed BootstrapShutdown_ signal");
-		TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after StopSubSystemServers");
-		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be reset after StopSubSystemServers");
-		TEST_ASSERT(elapsedMs < 1000, "StopSubSystemServers must join thread cleanly without hanging");
-	}
-
-	// 3. Mid-wait cancellation in ScheduleRedisBootstrap aborts wait loop immediately
+	// 2. StopSubSystemServers called while a real ScheduleRedisBootstrap() worker is active
+	//    in BootstrapThread_ signals BootstrapShutdown_, aborts the 5s Kafka wait loop,
+	//    cancels the bootstrap, and joins the thread cleanly without hanging.
 	{
 		TestMicroService svc("owprov");
 		svc.SetConfigBool("openwifi.kafka.enable", true);
 		svc.SetConfigInt("openwifi.service.bootstrap.kafka_wait_ms", 5000);
 
+		// Prepare a snapshot in MockRedisServer to verify snapshot load is skipped on cancellation
+		std::vector<Types::MicroServiceMeta> snapshot;
+		snapshot.push_back({
+			.InstanceId = "owgw-cancelled-1",
+			.Id = 1,
+			.Type = "owgw",
+			.PrivateEndPoint = "https://owgw-internal:17004",
+			.PublicEndPoint = "https://owgw.example.com:16004",
+			.AccessKey = "key-cancel",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		});
+		MockRedisServer mockRedis(snapshot);
+		svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+		svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+		// Enable Kafka with unassigned broadcast consumer and long wait timeout
 		KafkaManager()->KafkaEnabled_ = true;
 		KafkaManager()->BroadcastConsumer().Running_ = true;
 		KafkaManager()->BroadcastConsumer().Assigned_ = false;
 
+		svc.BootstrapShutdown_ = false;
+		svc.BootstrapInProgress_ = false;
+		svc.RedisBootstrapDone_ = false;
+
 		auto start = std::chrono::steady_clock::now();
-		std::thread bg([&]() {
-			svc.ScheduleRedisBootstrap();
+
+		// Spawn real production bootstrap worker into BootstrapThread_
+		svc.BootstrapThread_ = std::thread([&svc]() {
+			try {
+				svc.ScheduleRedisBootstrap();
+			} catch (...) {
+			}
 		});
 
-		// Let it enter the wait loop, then signal shutdown mid-wait
-		std::this_thread::sleep_for(std::chrono::milliseconds(40));
-		svc.BootstrapShutdown_ = true;
-
-		if (bg.joinable()) {
-			bg.join();
+		// Wait until ScheduleRedisBootstrap has started and entered the Kafka wait loop
+		while (!svc.BootstrapInProgress_) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		}
+		// Brief pause to ensure the worker is blocked in WaitForPartitionAssignment
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+		// Invoke production shutdown sequence while the real bootstrap worker is active
+		svc.StopSubSystemServers();
+
 		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now() - start).count();
 
+		// Reset KafkaManager state
 		KafkaManager()->KafkaEnabled_ = false;
 		KafkaManager()->BroadcastConsumer().Running_ = false;
 		KafkaManager()->BroadcastConsumer().Assigned_ = false;
 
-		TEST_ASSERT(elapsedMs < 1000, "Mid-wait shutdown signal must abort 5s wait loop immediately");
-		TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after aborted bootstrap");
-		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when aborted mid-wait");
+		// Verify production shutdown contract:
+		// - BootstrapThread_ must be joined by StopSubSystemServers
+		// - In-progress and done flags must be reset
+		// - Wait loop must have aborted early (< 1000ms instead of 5000ms timeout)
+		// - Snapshot must NOT have been loaded into registry
+		TEST_ASSERT(!svc.BootstrapThread_.joinable(),
+		            "BootstrapThread_ must be joined by StopSubSystemServers");
+		TEST_ASSERT(!svc.BootstrapInProgress_,
+		            "BootstrapInProgress_ must be reset after StopSubSystemServers");
+		TEST_ASSERT(!svc.RedisBootstrapDone_,
+		            "RedisBootstrapDone_ must be reset after StopSubSystemServers");
+		TEST_ASSERT(elapsedMs < 1000,
+		            "StopSubSystemServers must abort 5s wait loop and join cleanly (< 1000ms)");
+		TEST_ASSERT(svc.GetServiceInstances("owgw").empty(),
+		            "Cancelled bootstrap must not populate service registry from Redis");
 	}
 
 	std::cout << "  PASS: test_redis_bootstrap_shutdown_cancellation" << std::endl;
@@ -2222,44 +2235,91 @@ static void test_redis_bootstrap_kafka_timeout_fallback_to_redis() {
 	std::cout << "  PASS: test_redis_bootstrap_kafka_timeout_fallback_to_redis" << std::endl;
 }
 
-// Test 38: Unreachable Redis does not disrupt Kafka event generation or throw
+// Test 38: Unreachable Redis does not disrupt Kafka event submission
+//
+// Verifies the isolation contract required by issue #112:
+//   - RefreshRedisRegistration() and DeleteRedisRegistration() degrade gracefully
+//     without throwing when Redis is unavailable.
+//   - KafkaManager::PostMessage() still submits EVENT_JOIN, EVENT_KEEP_ALIVE, and
+//     EVENT_LEAVE to the producer queue even when Redis is unavailable.
+//
+// Strategy: enable Kafka (so PostMessage gates open) but do NOT start the producer
+// worker thread. The Poco::NotificationQueue in KafkaProducer::ProducerThr_ then
+// acts as an in-process spy: Produce() enqueues synchronously without any real
+// broker connection. We drive the EventBusManager::run() lifecycle sequence inline,
+// then drain Queue_ and assert all 3 event submissions arrived.
 static void test_redis_failure_isolation_preserves_kafka_events() {
 	TestMicroService svc("owprov");
 	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
 	svc.SetConfigInt("openwifi.redis.port", 59999); // Unreachable port
 	svc.SetConfigInt("openwifi.redis.timeout", 50);
 
-	// 1. RefreshRedisRegistration must handle Redis connection failure gracefully without throwing
-	try {
+	// Enable Kafka so PostMessage routes to ProducerThr_.Produce().
+	// Do NOT start the producer worker thread — Queue_ remains as our spy.
+	KafkaManager()->KafkaEnabled_ = true;
+	KafkaManager()->ProducerThr_.Running_ = false;
+	KafkaManager()->ProducerThr_.Queue_.clear();
+
+	// Drive the EventBusManager::run() event lifecycle inline.
+	// All three Redis calls degrade gracefully (connection refused, logged only).
+	// All three KafkaManager::PostMessage calls must still enqueue to the producer queue.
+	//
+	//   EventBusManager::run() start:  RefreshRedisRegistration() + PostMessage(EVENT_JOIN)
+	//   EventBusManager::run() loop:   RefreshRedisRegistration() + PostMessage(EVENT_KEEP_ALIVE)
+	//   EventBusManager::run() exit:   DeleteRedisRegistration()  + PostMessage(EVENT_LEAVE)
+	{
 		svc.RefreshRedisRegistration();
-	} catch (...) {
-		TEST_ASSERT(false, "RefreshRedisRegistration must not throw on Redis connection failure");
+		auto msg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN);
+		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS,
+		                            MicroServicePrivateEndPoint(), msg, false);
 	}
-
-	// 2. Kafka JOIN event payload can still be generated cleanly
-	std::string joinMsg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN);
-	TEST_ASSERT(!joinMsg.empty(), "EVENT_JOIN message generated successfully");
-	TEST_ASSERT(joinMsg.find("join") != std::string::npos, "EVENT_JOIN contains 'join' event");
-	TEST_ASSERT(joinMsg.find(svc.InstanceId()) != std::string::npos, "EVENT_JOIN contains local InstanceId");
-
-	// 3. Kafka KEEP_ALIVE event payload can still be generated cleanly
-	std::string keepaliveMsg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE);
-	TEST_ASSERT(!keepaliveMsg.empty(), "EVENT_KEEP_ALIVE message generated successfully");
-	TEST_ASSERT(keepaliveMsg.find("keep-alive") != std::string::npos, "EVENT_KEEP_ALIVE contains 'keep-alive' event");
-	TEST_ASSERT(keepaliveMsg.find(svc.InstanceId()) != std::string::npos, "EVENT_KEEP_ALIVE contains local InstanceId");
-
-	// 4. DeleteRedisRegistration must handle Redis connection failure gracefully without throwing
-	try {
+	{
+		svc.RefreshRedisRegistration();
+		auto msg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE);
+		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS,
+		                            MicroServicePrivateEndPoint(), msg, false);
+	}
+	{
 		svc.DeleteRedisRegistration();
-	} catch (...) {
-		TEST_ASSERT(false, "DeleteRedisRegistration must not throw on Redis connection failure");
+		auto msg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_LEAVE);
+		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS,
+		                            MicroServicePrivateEndPoint(), msg, false);
 	}
 
-	// 5. Kafka LEAVE event payload can still be generated cleanly
-	std::string leaveMsg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_LEAVE);
-	TEST_ASSERT(!leaveMsg.empty(), "EVENT_LEAVE message generated successfully");
-	TEST_ASSERT(leaveMsg.find("leave") != std::string::npos, "EVENT_LEAVE contains 'leave' event");
-	TEST_ASSERT(leaveMsg.find(svc.InstanceId()) != std::string::npos, "EVENT_LEAVE contains local InstanceId");
+	// Drain the producer queue and collect every submitted notification
+	std::vector<std::string> submitted;
+	while (KafkaManager()->ProducerThr_.Queue_.size() > 0) {
+		Poco::AutoPtr<Poco::Notification> note(
+			KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
+		if (auto km = dynamic_cast<KafkaMessage *>(note.get())) {
+			submitted.push_back(km->Payload());
+		}
+	}
+
+	// Reset KafkaManager spy state
+	KafkaManager()->KafkaEnabled_ = false;
+	KafkaManager()->ProducerThr_.Queue_.clear();
+
+	// Assert all 3 Kafka events were actually submitted via PostMessage even though Redis was down
+	TEST_ASSERT(submitted.size() == 3,
+	            "Exactly 3 Kafka messages must be submitted via PostMessage when Redis is unavailable");
+
+	bool hasJoin = false, hasKeepAlive = false, hasLeave = false;
+	for (const auto &payload : submitted) {
+		if (payload.find("keep-alive") != std::string::npos) {
+			hasKeepAlive = true;
+		} else if (payload.find("leave") != std::string::npos) {
+			hasLeave = true;
+		} else if (payload.find("join") != std::string::npos) {
+			hasJoin = true;
+		}
+	}
+	TEST_ASSERT(hasJoin,
+	            "EVENT_JOIN submitted via KafkaManager::PostMessage when Redis was unavailable");
+	TEST_ASSERT(hasKeepAlive,
+	            "EVENT_KEEP_ALIVE submitted via KafkaManager::PostMessage when Redis was unavailable");
+	TEST_ASSERT(hasLeave,
+	            "EVENT_LEAVE submitted via KafkaManager::PostMessage when Redis was unavailable");
 
 	std::cout << "  PASS: test_redis_failure_isolation_preserves_kafka_events" << std::endl;
 }
