@@ -695,9 +695,15 @@ namespace OpenWifi {
             }
 
             std::vector<Types::MicroServiceMeta> entries;
+            bool incompleteSnapshot = false;
             if (!BootstrapShutdown_) {
                 try {
-                    entries = ServiceRegistry::LoadAll(host, port, password, db, timeoutMs, &BootstrapShutdown_);
+                    entries = ServiceRegistry::LoadAll(host, port, password, db, timeoutMs, &BootstrapShutdown_, &incompleteSnapshot);
+                    if (incompleteSnapshot) {
+                        poco_warning(Logger_, fmt::format(
+                            "BootstrapFromRedisSnapshot: Redis snapshot load was incomplete (loaded {} entries due to Redis failure). "
+                            "Service discovery will rely on live Kafka events to complete registry state.", entries.size()));
+                    }
                 } catch (const std::exception &e) {
                     poco_warning(Logger_, fmt::format("BootstrapFromRedisSnapshot: error loading snapshot: {}", e.what()));
                 } catch (...) {

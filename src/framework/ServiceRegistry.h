@@ -7,43 +7,23 @@
 #pragma once
 
 //
-// ServiceRegistry — Redis service-registry snapshot for Phase 3 horizontal scaling.
+// ServiceRegistry — Redis service-registry snapshot helpers for Phase 3 horizontal scaling.
 //
-// Responsibility:
-//   - Format Redis keys:  service-registry:{service_type}:{instance_id}
-//   - Serialize/deserialize MicroServiceMeta to/from JSON stored in Redis
-//   - Provide stateless helpers: Write (SET EX), Delete (DEL), LoadAll (SCAN + GET)
+// Shared Redis Contract:
+//   - Key format:    service-registry:{service_type}:{instance_id}  (lowercase service_type)
+//   - JSON payload fields:
+//       * instanceId, type:                          Required, non-empty string (type lowercase)
+//       * privateEndPoint, publicEndPoint, accessKey: Required, non-empty string
+//       * lastUpdate:                                Required, positive integer (Unix epoch seconds > 0)
+//       * version:                                   Optional string (defaults to empty string)
+//   - Operations:    SET ... EX <ttl> on registration/keep-alive (default 60s); DEL on leave;
+//                    SCAN 0 MATCH service-registry:* COUNT 100 + GET for bootstrap.
+//   - Compatibility: Unknown JSON fields are ignored; key and payload service type and instance ID must match.
 //
-// Architectural contract:
-//   - Redis is used ONLY for bootstrap snapshot seeding. It is NOT consulted
-//     during normal API request-path service lookups. The authoritative runtime
-//     view is MicroService::Services_ (in-memory, updated via Kafka service_events).
-//   - All Redis operations are non-throwing from the caller's perspective:
-//     failures are caught, logged, and not re-thrown. A Redis failure must
-//     not affect normal Kafka-based service-event publishing or local discovery.
-//   - Redis credentials must NOT appear in logs. The password field, if any,
-//     is passed only to the client library and never formatted into log messages.
-//
-// Bootstrap race correctness:
-//   The caller (MicroService::BootstrapFromRedisSnapshot) loads this snapshot
-//   AFTER the Kafka BroadcastConsumer is running. During snapshot loading, live
-//   Kafka LEAVE events may concurrently remove instances from Services_. To
-//   prevent stale snapshot data from reintroducing departed services, the caller
-//   maintains a DepartedDuringBootstrap_ set (entries recorded by BusMessageReceived
-//   on LEAVE while BootstrapInProgress_ is true). LoadAll returns raw entries;
-//   the caller filters against this set under InfraMutex_.
-//
-// Thread safety:
-//   These helpers are stateless. The Poco::Redis::Client is constructed on each
-//   operation (connect, execute, disconnect) to avoid cross-thread sharing of
-//   a single live connection. This is intentional: Redis operations happen only
-//   at startup bootstrap and on JOIN/KEEP_ALIVE/LEAVE events, not in tight loops.
-//   Each call creates a short-lived connection — acceptable given the low call
-//   frequency (once per keep-alive interval, typically 5-10 seconds).
-//
-//   A long-lived shared connection would require its own mutex and reconnect logic.
-//   The short-lived approach is simpler, more failure-tolerant, and appropriate
-//   for this use case.
+// Architectural rules:
+//   - Redis is used ONLY for startup bootstrap snapshot seeding; Kafka remains authoritative.
+//   - Operations are non-throwing and fail gracefully; passwords are never logged.
+//   - Snapshot seeding runs after Kafka broadcast consumer starts, guarded by DepartedDuringBootstrap_.
 //
 
 #include <atomic>
@@ -68,14 +48,17 @@ namespace OpenWifi::ServiceRegistry {
 [[nodiscard]] std::optional<std::pair<std::string, std::string>>
 ParseKey(const std::string &RedisKey);
 
-/// Serialises a MicroServiceMeta to JSON for Redis storage.
+/// Serialises a MicroServiceMeta to JSON for Redis storage according to the
+/// shared Redis service-registration contract.
 /// Only the fields needed to reconstruct a registry entry are stored.
 /// Numeric legacy ID is intentionally omitted (Kafka wire format only).
 [[nodiscard]] std::string Serialize(const Types::MicroServiceMeta &Meta);
 
-/// Deserialises a MicroServiceMeta from a JSON string previously written by Serialize().
+/// Deserialises a MicroServiceMeta from a JSON string previously written by Serialize()
+/// or by a peer service implementing the shared Redis service-registration contract.
 /// Returns nullopt if the JSON is malformed, missing required fields, or has
-/// an empty InstanceId, Type, or PrivateEndPoint.
+/// an empty InstanceId, Type, PrivateEndPoint, PublicEndPoint, or AccessKey, or
+/// if lastUpdate <= 0.
 [[nodiscard]] std::optional<Types::MicroServiceMeta>
 Deserialize(const std::string &Json);
 
@@ -104,15 +87,19 @@ bool DeleteRegistration(const std::string &Host, int Port,
 
 /// Loads all service-registry:* entries from Redis in a single SCAN pass.
 /// For each key matching "service-registry:*", performs a GET and deserialises
-/// the value. Invalid, missing, or malformed entries are silently skipped.
+/// the value. Invalid, missing, or malformed entries are skipped without aborting.
+/// If a Redis command/connection failure occurs during loading, the snapshot is marked
+/// incomplete and loading stops gracefully.
 ///
-/// Returns the collection of valid registry entries found.
-/// Returns an empty vector on connection failure (graceful degradation).
-/// Logs connection failures at warning level and entry-level errors at debug level.
+/// Returns the collection of valid registry entries found up to any failure.
+/// Returns an empty vector on initial connection failure (graceful degradation).
+/// If IncompleteSnapshot is non-null, it is set to true if a Redis command or network
+/// failure occurred (or false if the entire scan and all GETs completed cleanly).
 [[nodiscard]] std::vector<Types::MicroServiceMeta>
 LoadAll(const std::string &Host, int Port,
         const std::string &Password, int Db,
         int ConnectTimeoutMs,
-        const std::atomic_bool *CancelSignal = nullptr);
+        const std::atomic_bool *CancelSignal = nullptr,
+        bool *IncompleteSnapshot = nullptr);
 
 } // namespace OpenWifi::ServiceRegistry

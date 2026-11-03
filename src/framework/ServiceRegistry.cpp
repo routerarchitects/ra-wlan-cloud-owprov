@@ -39,6 +39,7 @@ constexpr const char *KEY_PREFIX = "service-registry:";
 // JSON field names used in Redis-stored service metadata.
 // These are stable identifiers: do not change them without a migration plan,
 // as peer services sharing the same Redis snapshot contract depend on them.
+// See CONFIGURATION.md for the full Shared Redis Service-Registration Contract specification.
 constexpr const char *FIELD_INSTANCE_ID   = "instanceId";
 constexpr const char *FIELD_TYPE          = "type";
 constexpr const char *FIELD_PRIVATE_EP    = "privateEndPoint";
@@ -270,14 +271,21 @@ std::vector<Types::MicroServiceMeta>
 LoadAll(const std::string &Host, int Port,
         const std::string &Password, int Db,
         int ConnectTimeoutMs,
-        const std::atomic_bool *CancelSignal) {
+        const std::atomic_bool *CancelSignal,
+        bool *IncompleteSnapshot) {
     Poco::Logger &Log = Poco::Logger::get("ServiceRegistry");
     std::vector<Types::MicroServiceMeta> Results;
+
+    if (IncompleteSnapshot) {
+        *IncompleteSnapshot = false;
+    }
 
     if (CancelSignal && *CancelSignal) {
         poco_information(Log, "ServiceRegistry: Snapshot load skipped; cancellation signal is set.");
         return Results;
     }
+
+    bool redisFailure = false;
 
     try {
         Poco::Redis::Client Client;
@@ -303,14 +311,26 @@ LoadAll(const std::string &Host, int Port,
             auto ScanReply = Client.execute<Poco::Redis::Array>(ScanCmd);
 
             // SCAN reply: [next_cursor, [key1, key2, ...]]
-            if (ScanReply.size() < 2) break;
+            if (ScanReply.size() < 2) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply has fewer than 2 elements; snapshot is incomplete.");
+                redisFailure = true;
+                break;
+            }
 
             auto NextCursorBs = ScanReply.get<Poco::Redis::BulkString>(0);
-            if (NextCursorBs.isNull()) break;
+            if (NextCursorBs.isNull()) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply cursor is null; snapshot is incomplete.");
+                redisFailure = true;
+                break;
+            }
             Cursor = NextCursorBs.value();
 
             auto KeyArray = ScanReply.get<Poco::Redis::Array>(1);
-            if (KeyArray.isNull()) break;
+            if (KeyArray.isNull()) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply key array is null; snapshot is incomplete.");
+                redisFailure = true;
+                break;
+            }
 
             for (std::size_t i = 0; i < KeyArray.size(); ++i) {
                 if (CancelSignal && *CancelSignal) {
@@ -318,28 +338,58 @@ LoadAll(const std::string &Host, int Port,
                     break;
                 }
 
+                auto KeyBs = KeyArray.get<Poco::Redis::BulkString>(i);
+                if (KeyBs.isNull()) continue;
+                const std::string Key = KeyBs.value();
+
+                // Validate key format
+                auto Parsed = ParseKey(Key);
+                if (!Parsed) {
+                    poco_debug(Log, fmt::format("ServiceRegistry: SCAN returned unexpected key '{}', skipping.", Key));
+                    continue;
+                }
+
+                // GET the JSON value from Redis: handle Redis transport/command errors
+                // separately from payload deserialization errors.
+                Poco::Redis::BulkString ValueBs;
                 try {
-                    auto KeyBs = KeyArray.get<Poco::Redis::BulkString>(i);
-                    if (KeyBs.isNull()) continue;
-                    const std::string Key = KeyBs.value();
-
-                    // Validate key format
-                    auto Parsed = ParseKey(Key);
-                    if (!Parsed) {
-                        poco_debug(Log, fmt::format(
-                            "ServiceRegistry: SCAN returned unexpected key '{}', skipping.", Key));
-                        continue;
-                    }
-
-                    // GET the JSON value
                     Poco::Redis::Array GetCmd;
                     GetCmd << "GET" << Key;
-                    auto ValueBs = Client.execute<Poco::Redis::BulkString>(GetCmd);
-                    if (ValueBs.isNull()) {
-                        // Key expired between SCAN and GET — safe to skip
-                        continue;
-                    }
+                    ValueBs = Client.execute<Poco::Redis::BulkString>(GetCmd);
+                } catch (const Poco::Redis::RedisException &E) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Redis command error reading key '{}': {}. Snapshot is incomplete.",
+                        Key, E.message()));
+                    redisFailure = true;
+                    break;
+                } catch (const Poco::Exception &E) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Network error reading key '{}' from Redis: {}. Snapshot is incomplete.",
+                        Key, E.displayText()));
+                    redisFailure = true;
+                    break;
+                } catch (const std::exception &E) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Exception reading key '{}' from Redis: {}. Snapshot is incomplete.",
+                        Key, E.what()));
+                    redisFailure = true;
+                    break;
+                } catch (...) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Unknown exception reading key '{}' from Redis. Snapshot is incomplete.",
+                        Key));
+                    redisFailure = true;
+                    break;
+                }
 
+                if (ValueBs.isNull()) {
+                    // Key expired between SCAN and GET — safe to skip, not an error
+                    continue;
+                }
+
+                // Payload deserialization & schema validation: errors here indicate
+                // invalid or malformed data records, NOT Redis command failures.
+                try {
                     auto Meta = Deserialize(ValueBs.value());
                     if (!Meta) {
                         poco_debug(Log, fmt::format(
@@ -359,35 +409,65 @@ LoadAll(const std::string &Host, int Port,
                     Results.push_back(std::move(*Meta));
 
                 } catch (const std::exception &E) {
-                    poco_debug(Log, fmt::format(
-                        "ServiceRegistry: Error processing SCAN key at index {}: {}", i, E.what()));
+                    poco_debug(Log, fmt::format("ServiceRegistry: Error parsing JSON entry for key '{}': {}", Key, E.what()));
                 } catch (...) {
-                    poco_debug(Log, fmt::format(
-                        "ServiceRegistry: Unknown error processing SCAN key at index {}.", i));
+                    poco_debug(Log, fmt::format("ServiceRegistry: Unknown error parsing JSON entry for key '{}'.", Key));
                 }
+            }
+
+            if (redisFailure) {
+                break;
             }
 
         } while (Cursor != "0");
 
-        Client.disconnect();
-        poco_information(Log, fmt::format(
-            "ServiceRegistry: Bootstrap snapshot loaded {} entries from Redis.", Results.size()));
+        try {
+            Client.disconnect();
+        } catch (...) {}
+
+        if (redisFailure) {
+            if (IncompleteSnapshot) {
+                *IncompleteSnapshot = true;
+            }
+            poco_warning(Log, fmt::format(
+                "ServiceRegistry: Incomplete bootstrap snapshot: loaded {} entries before Redis failure. "
+                "Service discovery will rely on live Kafka events.", Results.size()));
+        } else {
+            poco_information(Log, fmt::format("ServiceRegistry: Bootstrap snapshot loaded {} entries from Redis.", Results.size()));
+        }
 
     } catch (const Poco::Redis::RedisException &E) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
         poco_warning(Log, fmt::format(
             "ServiceRegistry: Redis error during bootstrap snapshot load: {}. "
-            "Service discovery will rely on live Kafka events only.", E.message()));
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            E.message(), Results.size()));
     } catch (const Poco::Exception &E) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
         poco_warning(Log, fmt::format(
             "ServiceRegistry: Poco exception during bootstrap snapshot load: {}. "
-            "Service discovery will rely on live Kafka events only.", E.displayText()));
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            E.displayText(), Results.size()));
     } catch (const std::exception &E) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
         poco_warning(Log, fmt::format(
             "ServiceRegistry: Exception during bootstrap snapshot load: {}. "
-            "Service discovery will rely on live Kafka events only.", E.what()));
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            E.what(), Results.size()));
     } catch (...) {
-        poco_warning(Log, "ServiceRegistry: Unknown exception during bootstrap snapshot load. "
-                         "Service discovery will rely on live Kafka events only.");
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Unknown exception during bootstrap snapshot load. "
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            Results.size()));
     }
     return Results;
 }
@@ -406,7 +486,10 @@ bool DeleteRegistration(const std::string &, int, const std::string &, int, int,
 
 std::vector<Types::MicroServiceMeta>
 LoadAll(const std::string &, int, const std::string &, int, int,
-        const std::atomic_bool *) {
+        const std::atomic_bool *, bool *IncompleteSnapshot) {
+    if (IncompleteSnapshot) {
+        *IncompleteSnapshot = true;
+    }
     return {};
 }
 

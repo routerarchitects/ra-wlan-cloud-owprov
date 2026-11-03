@@ -142,6 +142,24 @@ namespace OpenWifi {
 			return LastTTL_;
 		}
 
+		void FailOnGet(bool fail, const std::string &errMsg = "ERR mock redis GET failure") {
+			std::lock_guard G(Mutex_);
+			FailOnGet_ = fail;
+			GetErrMsg_ = errMsg;
+		}
+
+		void FailOnGetAfter(int count, const std::string &errMsg = "ERR mock redis GET failure after count") {
+			std::lock_guard G(Mutex_);
+			FailOnGetAfterCount_ = count;
+			GetCount_ = 0;
+			GetErrMsg_ = errMsg;
+		}
+
+		void SetMalformedScan(bool malformed) {
+			std::lock_guard G(Mutex_);
+			MalformedScan_ = malformed;
+		}
+
 	  private:
 		std::atomic_bool Running_;
 		Poco::Net::ServerSocket Socket_;
@@ -150,6 +168,11 @@ namespace OpenWifi {
 		std::map<std::string, std::string> Store_;
 		int LastTTL_ = -1;
 		std::map<std::string, int> TTLs_;
+		bool FailOnGet_ = false;
+		int FailOnGetAfterCount_ = -1;
+		int GetCount_ = 0;
+		bool MalformedScan_ = false;
+		std::string GetErrMsg_ = "ERR mock redis GET failure";
 		std::thread Worker_;
 
 		static bool SendAll(Poco::Net::StreamSocket &sock, const std::string &data) {
@@ -224,6 +247,12 @@ namespace OpenWifi {
 								std::string cmd = Poco::toUpper(args[0]);
 								if (cmd == "SCAN") {
 									std::lock_guard G(Mutex_);
+									if (MalformedScan_) {
+										// Malformed reply: only 1 element instead of [cursor, [keys]]
+										std::string resp = "*1\r\n$1\r\n0\r\n";
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
 									std::vector<std::string> keys;
 									for (const auto &[k, _] : Store_) {
 										keys.push_back(k);
@@ -235,6 +264,11 @@ namespace OpenWifi {
 									if (!SendAll(client, resp)) break;
 								} else if (cmd == "GET") {
 									std::lock_guard G(Mutex_);
+									if (FailOnGet_ || (FailOnGetAfterCount_ >= 0 && GetCount_++ >= FailOnGetAfterCount_)) {
+										std::string resp = "-" + GetErrMsg_ + "\r\n";
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
 									std::string key = (args.size() > 1) ? args[1] : "";
 									auto it = Store_.find(key);
 									if (it != Store_.end()) {
@@ -2385,6 +2419,133 @@ static void test_redis_service_registry_ttl_independent_of_cache_ttl() {
 	std::cout << "  PASS: test_redis_service_registry_ttl_independent_of_cache_ttl" << std::endl;
 }
 
+// Test 40: LoadAll distinguishes Redis command failures from invalid snapshot data
+static void test_redis_snapshot_distinguishes_redis_failures_from_invalid_data() {
+	// Case 1: Redis command failure on GET marks snapshot as incomplete
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-1",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key1",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.FailOnGet(true, "ERR command execution failed");
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true when Redis GET command fails");
+		TEST_ASSERT(loaded.empty(), "No entries should be successfully loaded when Redis GET fails");
+	}
+
+	// Case 2: Malformed or invalid JSON entries are skipped WITHOUT marking snapshot incomplete
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-valid",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key-valid",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+
+		// Insert a malformed JSON record
+		mockRedis.Set("service-registry:owgw:corrupted-inst", "{ not valid json at all }");
+		// Insert an incomplete record missing required fields
+		mockRedis.Set("service-registry:owfms:incomplete-inst", "{\"instanceId\":\"incomplete-inst\"}");
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(!incomplete, "LoadAll must NOT set IncompleteSnapshot=true for invalid or malformed data records");
+		TEST_ASSERT(loaded.size() == 1, "LoadAll must successfully load the valid entry while skipping malformed records");
+		TEST_ASSERT(loaded[0].InstanceId == "owsec-inst-valid", "Loaded entry must match valid record");
+	}
+
+	// Case 3: Network/connect failure also marks snapshot as incomplete
+	{
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", 59999, "", 0, 50, nullptr, &incomplete);
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true on unreachable Redis");
+		TEST_ASSERT(loaded.empty(), "LoadAll returns empty on unreachable Redis");
+	}
+
+	// Case 4: First GET succeeds, later GET fails -> Result is partial and IncompleteSnapshot == true
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-first",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key1",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			},
+			{
+				.InstanceId = "owsec-inst-second",
+				.Id = 2,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17002",
+				.PublicEndPoint = "https://owsec.example.com:16002",
+				.AccessKey = "key2",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+		// Allow first GET to succeed, fail on second GET
+		mockRedis.FailOnGetAfter(1, "ERR redis command failure on second GET");
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true when a later GET fails");
+		TEST_ASSERT(loaded.size() == 1, "LoadAll must return partial snapshot containing entries loaded before failure");
+		TEST_ASSERT(loaded[0].InstanceId == "owsec-inst-first" || loaded[0].InstanceId == "owsec-inst-second",
+		            "Partial entry must be one of the snapshot items");
+	}
+
+	// Case 5: Malformed SCAN reply marks snapshot as incomplete
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-scan",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key1",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetMalformedScan(true);
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true on malformed SCAN reply");
+		TEST_ASSERT(loaded.empty(), "LoadAll must return empty on malformed SCAN reply");
+	}
+
+	std::cout << "  PASS: test_redis_snapshot_distinguishes_redis_failures_from_invalid_data" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -2427,6 +2588,7 @@ int main() {
 	test_redis_bootstrap_kafka_timeout_fallback_to_redis();
 	test_redis_failure_isolation_preserves_kafka_events();
 	test_redis_service_registry_ttl_independent_of_cache_ttl();
+	test_redis_snapshot_distinguishes_redis_failures_from_invalid_data();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;
