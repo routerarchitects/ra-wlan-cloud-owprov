@@ -1,0 +1,516 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
+
+#include "framework/ServiceRegistry.h"
+
+#include <string>
+#include <vector>
+#include <optional>
+
+#include "Poco/Logger.h"
+#include "Poco/JSON/Object.h"
+#include "Poco/JSON/Parser.h"
+#include "Poco/JSON/Stringifier.h"
+#include "Poco/String.h"
+#include "fmt/format.h"
+
+#ifdef USE_POCO_REDIS
+#include "Poco/Redis/Array.h"
+#include "Poco/Redis/Client.h"
+#include "Poco/Redis/Command.h"
+#include "Poco/Redis/Exception.h"
+#include "Poco/Redis/Type.h"
+#include "Poco/Timespan.h"
+#endif
+
+#include "framework/OpenWifiTypes.h"
+#include "framework/utils.h"
+
+namespace OpenWifi::ServiceRegistry {
+
+namespace {
+
+// Redis key prefix for service-registry entries.
+// All lookup and SCAN operations use this pattern.
+constexpr const char *KEY_PREFIX = "service-registry:";
+
+// JSON field names used in Redis-stored service metadata.
+// These are stable identifiers: do not change them without a migration plan,
+// as peer services sharing the same Redis snapshot contract depend on them.
+// See CONFIGURATION.md for the full Shared Redis Service-Registration Contract specification.
+constexpr const char *FIELD_INSTANCE_ID   = "instanceId";
+constexpr const char *FIELD_TYPE          = "type";
+constexpr const char *FIELD_PRIVATE_EP    = "privateEndPoint";
+constexpr const char *FIELD_PUBLIC_EP     = "publicEndPoint";
+constexpr const char *FIELD_ACCESS_KEY    = "accessKey";
+constexpr const char *FIELD_VERSION       = "version";
+constexpr const char *FIELD_LAST_UPDATE   = "lastUpdate";
+
+// SCAN batch count hint. Redis treats this as advisory; the actual count
+// per iteration may differ. A count of 100 keeps individual SCAN calls fast
+// while reducing round-trips for registries with many entries.
+constexpr int SCAN_COUNT = 100;
+
+} // anonymous namespace
+
+std::string MakeKey(const std::string &ServiceType, const std::string &InstanceId) {
+    return fmt::format("{}{}:{}", KEY_PREFIX, Poco::toLower(ServiceType), InstanceId);
+}
+
+std::optional<std::pair<std::string, std::string>>
+ParseKey(const std::string &RedisKey) {
+    const std::string prefix = KEY_PREFIX;
+    if (RedisKey.size() <= prefix.size() ||
+        RedisKey.substr(0, prefix.size()) != prefix) {
+        return std::nullopt;
+    }
+
+    // Strip prefix: remainder is "{service_type}:{instance_id}"
+    const std::string remainder = RedisKey.substr(prefix.size());
+    const auto colonPos = remainder.find(':');
+    if (colonPos == std::string::npos || colonPos == 0 ||
+        colonPos + 1 >= remainder.size()) {
+        return std::nullopt;
+    }
+
+    std::string serviceType = Poco::toLower(remainder.substr(0, colonPos));
+    std::string instanceId  = remainder.substr(colonPos + 1);
+    if (serviceType.empty() || instanceId.empty()) {
+        return std::nullopt;
+    }
+
+    return std::make_pair(std::move(serviceType), std::move(instanceId));
+}
+
+// ---------------------------------------------------------------------------
+// Serialization
+// ---------------------------------------------------------------------------
+
+std::string Serialize(const Types::MicroServiceMeta &Meta) {
+    Poco::JSON::Object Obj;
+    Obj.set(FIELD_INSTANCE_ID, Meta.InstanceId);
+    Obj.set(FIELD_TYPE,        Poco::toLower(Meta.Type));
+    Obj.set(FIELD_PRIVATE_EP,  Meta.PrivateEndPoint);
+    Obj.set(FIELD_PUBLIC_EP,   Meta.PublicEndPoint);
+    Obj.set(FIELD_ACCESS_KEY,  Meta.AccessKey);
+    Obj.set(FIELD_VERSION,     Meta.Version);
+    Obj.set(FIELD_LAST_UPDATE, static_cast<Poco::Int64>(Meta.LastUpdate));
+
+    std::ostringstream oss;
+    Poco::JSON::Stringifier::stringify(Obj, oss);
+    return oss.str();
+}
+
+std::optional<Types::MicroServiceMeta>
+Deserialize(const std::string &Json) {
+    if (Json.empty()) return std::nullopt;
+    try {
+        Poco::JSON::Parser Parser;
+        auto Val = Parser.parse(Json);
+        auto Obj = Val.extract<Poco::JSON::Object::Ptr>();
+        if (!Obj) return std::nullopt;
+
+        // Strict type and presence checks matching the Shared Redis Contract:
+        // instanceId, type, privateEndPoint, publicEndPoint, accessKey must be non-empty JSON strings.
+        for (const char *field : {FIELD_INSTANCE_ID, FIELD_TYPE, FIELD_PRIVATE_EP, FIELD_PUBLIC_EP, FIELD_ACCESS_KEY}) {
+            if (!Obj->has(field) || Obj->isNull(field)) return std::nullopt;
+            if (!Obj->get(field).isString()) return std::nullopt;
+        }
+
+        // lastUpdate must be a positive integer (not a string, float, or boolean)
+        if (!Obj->has(FIELD_LAST_UPDATE) || Obj->isNull(FIELD_LAST_UPDATE)) return std::nullopt;
+        auto lastUpdateVar = Obj->get(FIELD_LAST_UPDATE);
+        if (!lastUpdateVar.isInteger()) return std::nullopt;
+        int64_t rawLastUpdate = lastUpdateVar.extract<Poco::Int64>();
+        if (rawLastUpdate <= 0) return std::nullopt;
+
+        Types::MicroServiceMeta Meta;
+        Meta.InstanceId      = Obj->get(FIELD_INSTANCE_ID).extract<std::string>();
+        Meta.Type            = Poco::toLower(Obj->get(FIELD_TYPE).extract<std::string>());
+        Meta.PrivateEndPoint = Obj->get(FIELD_PRIVATE_EP).extract<std::string>();
+        Meta.PublicEndPoint  = Obj->get(FIELD_PUBLIC_EP).extract<std::string>();
+        Meta.AccessKey       = Obj->get(FIELD_ACCESS_KEY).extract<std::string>();
+        Meta.LastUpdate      = static_cast<uint64_t>(rawLastUpdate);
+
+        // Optional version: if present, must be a non-null JSON string
+        if (Obj->has(FIELD_VERSION)) {
+            if (Obj->isNull(FIELD_VERSION)) return std::nullopt;
+            auto versionVar = Obj->get(FIELD_VERSION);
+            if (!versionVar.isString()) return std::nullopt;
+            Meta.Version = versionVar.extract<std::string>();
+        }
+
+        // Reject entries missing fields required by Kafka discovery handler
+        // (BusMessageReceived requires InstanceId, Type, PrivateEndPoint, PublicEndPoint, and AccessKey)
+        if (Meta.InstanceId.empty() || Meta.Type.empty() ||
+            Meta.PrivateEndPoint.empty() || Meta.PublicEndPoint.empty() ||
+            Meta.AccessKey.empty()) {
+            return std::nullopt;
+        }
+
+        return Meta;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Redis operations
+// ---------------------------------------------------------------------------
+
+#ifdef USE_POCO_REDIS
+
+namespace {
+
+// Connects a Poco::Redis::Client with a connect and receive timeout.
+// Throws Poco::Exception or std::exception on failure.
+void ConnectClient(Poco::Redis::Client &Client,
+                   const std::string &Host, int Port,
+                   const std::string &Password, int Db,
+                   int ConnectTimeoutMs) {
+    const Poco::Timespan ConnTimeout(ConnectTimeoutMs * 1000LL); // microseconds
+    Client.connect(Host, Port, ConnTimeout);
+    Client.setReceiveTimeout(ConnTimeout);
+
+    // AUTH (only if password is non-empty)
+    if (!Password.empty()) {
+        Poco::Redis::Array AuthCmd;
+        AuthCmd << "AUTH" << Password;
+        auto Reply = Client.execute<std::string>(AuthCmd);
+        if (Reply != "OK") {
+            Client.disconnect();
+            throw Poco::Exception("Redis AUTH rejected");
+        }
+    }
+
+    // SELECT db (skip for db=0, which is the default)
+    if (Db != 0) {
+        Poco::Redis::Array SelectCmd;
+        SelectCmd << "SELECT" << std::to_string(Db);
+        auto Reply = Client.execute<std::string>(SelectCmd);
+        if (Reply != "OK") {
+            Client.disconnect();
+            throw Poco::Exception(fmt::format("Redis SELECT {} rejected", Db));
+        }
+    }
+}
+
+} // anonymous namespace
+
+bool WriteRegistration(const std::string &Host, int Port,
+                       const std::string &Password, int Db,
+                       int ConnectTimeoutMs,
+                       const Types::MicroServiceMeta &Meta, int TtlSeconds) {
+    Poco::Logger &Log = Poco::Logger::get("ServiceRegistry");
+    try {
+        Poco::Redis::Client Client;
+        ConnectClient(Client, Host, Port, Password, Db, ConnectTimeoutMs);
+
+        const std::string Key   = MakeKey(Meta.Type, Meta.InstanceId);
+        const std::string Value = Serialize(Meta);
+
+        // SET key value EX ttl
+        Poco::Redis::Array SetCmd;
+        SetCmd << "SET" << Key << Value << "EX" << std::to_string(TtlSeconds);
+        auto Reply = Client.execute<std::string>(SetCmd);
+        Client.disconnect();
+
+        if (Reply != "OK") {
+            poco_warning(Log, fmt::format(
+                "ServiceRegistry: SET for instance '{}' returned unexpected reply.",
+                Meta.InstanceId));
+            return false;
+        }
+        return true;
+
+    } catch (const Poco::Redis::RedisException &E) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Redis error writing registration for instance '{}': {}",
+            Meta.InstanceId, E.message()));
+    } catch (const Poco::Exception &E) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Poco exception writing registration for instance '{}': {}",
+            Meta.InstanceId, E.displayText()));
+    } catch (const std::exception &E) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Exception writing registration for instance '{}': {}",
+            Meta.InstanceId, E.what()));
+    } catch (...) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Unknown exception writing registration for instance '{}'.",
+            Meta.InstanceId));
+    }
+    return false;
+}
+
+bool DeleteRegistration(const std::string &Host, int Port,
+                        const std::string &Password, int Db,
+                        int ConnectTimeoutMs,
+                        const std::string &ServiceType,
+                        const std::string &InstanceId) {
+    Poco::Logger &Log = Poco::Logger::get("ServiceRegistry");
+    try {
+        Poco::Redis::Client Client;
+        ConnectClient(Client, Host, Port, Password, Db, ConnectTimeoutMs);
+
+        const std::string Key = MakeKey(ServiceType, InstanceId);
+        Poco::Redis::Array DelCmd;
+        DelCmd << "DEL" << Key;
+        Client.execute<Poco::Int64>(DelCmd);
+        Client.disconnect();
+        return true;
+
+    } catch (const Poco::Redis::RedisException &E) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Redis error deleting registration for instance '{}': {}",
+            InstanceId, E.message()));
+    } catch (const Poco::Exception &E) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Poco exception deleting registration for instance '{}': {}",
+            InstanceId, E.displayText()));
+    } catch (const std::exception &E) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Exception deleting registration for instance '{}': {}",
+            InstanceId, E.what()));
+    } catch (...) {
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Unknown exception deleting registration for instance '{}'.",
+            InstanceId));
+    }
+    return false;
+}
+
+std::vector<Types::MicroServiceMeta>
+LoadAll(const std::string &Host, int Port,
+        const std::string &Password, int Db,
+        int ConnectTimeoutMs,
+        const std::atomic_bool *CancelSignal,
+        bool *IncompleteSnapshot) {
+    Poco::Logger &Log = Poco::Logger::get("ServiceRegistry");
+    std::vector<Types::MicroServiceMeta> Results;
+
+    if (IncompleteSnapshot) {
+        *IncompleteSnapshot = false;
+    }
+
+    if (CancelSignal && *CancelSignal) {
+        poco_information(Log, "ServiceRegistry: Snapshot load skipped; cancellation signal is set.");
+        return Results;
+    }
+
+    bool redisFailure = false;
+
+    try {
+        Poco::Redis::Client Client;
+        ConnectClient(Client, Host, Port, Password, Db, ConnectTimeoutMs);
+
+        // Iterative SCAN to enumerate all service-registry:* keys without
+        // blocking the Redis server (avoids KEYS * on production data).
+        std::string Cursor = "0";
+        const std::string Pattern = fmt::format("{}*", KEY_PREFIX);
+
+        do {
+            if (CancelSignal && *CancelSignal) {
+                poco_information(Log, "ServiceRegistry: Snapshot load cancelled by shutdown signal.");
+                break;
+            }
+
+            // SCAN cursor MATCH service-registry:* COUNT 100
+            Poco::Redis::Array ScanCmd;
+            ScanCmd << "SCAN" << Cursor
+                    << "MATCH" << Pattern
+                    << "COUNT" << std::to_string(SCAN_COUNT);
+
+            auto ScanReply = Client.execute<Poco::Redis::Array>(ScanCmd);
+
+            // SCAN reply: [next_cursor, [key1, key2, ...]]
+            if (ScanReply.size() < 2) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply has fewer than 2 elements; snapshot is incomplete.");
+                redisFailure = true;
+                break;
+            }
+
+            auto NextCursorBs = ScanReply.get<Poco::Redis::BulkString>(0);
+            if (NextCursorBs.isNull()) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply cursor is null; snapshot is incomplete.");
+                redisFailure = true;
+                break;
+            }
+            Cursor = NextCursorBs.value();
+
+            if (ScanReply.getType(1) != Poco::Redis::RedisType::REDIS_ARRAY) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply second element is not an array; snapshot is incomplete.");
+                redisFailure = true;
+                break;
+            }
+
+            auto KeyArray = ScanReply.get<Poco::Redis::Array>(1);
+            std::size_t numKeys = KeyArray.isNull() ? 0 : KeyArray.size();
+
+            for (std::size_t i = 0; i < numKeys; ++i) {
+                if (CancelSignal && *CancelSignal) {
+                    poco_information(Log, "ServiceRegistry: Snapshot load cancelled by shutdown signal.");
+                    break;
+                }
+
+                auto KeyBs = KeyArray.get<Poco::Redis::BulkString>(i);
+                if (KeyBs.isNull()) continue;
+                const std::string Key = KeyBs.value();
+
+                // Validate key format
+                auto Parsed = ParseKey(Key);
+                if (!Parsed) {
+                    poco_debug(Log, fmt::format("ServiceRegistry: SCAN returned unexpected key '{}', skipping.", Key));
+                    continue;
+                }
+
+                // GET the JSON value from Redis: handle Redis transport/command errors
+                // separately from payload deserialization errors.
+                Poco::Redis::BulkString ValueBs;
+                try {
+                    Poco::Redis::Array GetCmd;
+                    GetCmd << "GET" << Key;
+                    ValueBs = Client.execute<Poco::Redis::BulkString>(GetCmd);
+                } catch (const Poco::Redis::RedisException &E) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Redis command error reading key '{}': {}. Snapshot is incomplete.",
+                        Key, E.message()));
+                    redisFailure = true;
+                    break;
+                } catch (const Poco::Exception &E) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Network error reading key '{}' from Redis: {}. Snapshot is incomplete.",
+                        Key, E.displayText()));
+                    redisFailure = true;
+                    break;
+                } catch (const std::exception &E) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Exception reading key '{}' from Redis: {}. Snapshot is incomplete.",
+                        Key, E.what()));
+                    redisFailure = true;
+                    break;
+                } catch (...) {
+                    poco_warning(Log, fmt::format(
+                        "ServiceRegistry: Unknown exception reading key '{}' from Redis. Snapshot is incomplete.",
+                        Key));
+                    redisFailure = true;
+                    break;
+                }
+
+                if (ValueBs.isNull()) {
+                    // Key expired between SCAN and GET — safe to skip, not an error
+                    continue;
+                }
+
+                // Payload deserialization & schema validation: errors here indicate
+                // invalid or malformed data records, NOT Redis command failures.
+                try {
+                    auto Meta = Deserialize(ValueBs.value());
+                    if (!Meta) {
+                        poco_debug(Log, fmt::format(
+                            "ServiceRegistry: Skipping invalid or incomplete entry for key '{}'.", Key));
+                        continue;
+                    }
+
+                    // Validate key-to-payload consistency:
+                    // Key format is service-registry:{service_type}:{instance_id}.
+                    if (Meta->Type != Parsed->first || Meta->InstanceId != Parsed->second) {
+                        poco_warning(Log, fmt::format(
+                            "ServiceRegistry: Key '{}' does not match payload content (payload type='{}', id='{}'), skipping.",
+                            Key, Meta->Type, Meta->InstanceId));
+                        continue;
+                    }
+
+                    Results.push_back(std::move(*Meta));
+
+                } catch (const std::exception &E) {
+                    poco_debug(Log, fmt::format("ServiceRegistry: Error parsing JSON entry for key '{}': {}", Key, E.what()));
+                } catch (...) {
+                    poco_debug(Log, fmt::format("ServiceRegistry: Unknown error parsing JSON entry for key '{}'.", Key));
+                }
+            }
+
+            if (redisFailure || (CancelSignal && *CancelSignal)) {
+                break;
+            }
+
+        } while (Cursor != "0");
+
+        try {
+            Client.disconnect();
+        } catch (...) {}
+
+        if (redisFailure) {
+            if (IncompleteSnapshot) {
+                *IncompleteSnapshot = true;
+            }
+            poco_warning(Log, fmt::format(
+                "ServiceRegistry: Incomplete bootstrap snapshot: loaded {} entries before Redis failure. "
+                "Service discovery will rely on live Kafka events.", Results.size()));
+        } else {
+            poco_information(Log, fmt::format("ServiceRegistry: Bootstrap snapshot loaded {} entries from Redis.", Results.size()));
+        }
+
+    } catch (const Poco::Redis::RedisException &E) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Redis error during bootstrap snapshot load: {}. "
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            E.message(), Results.size()));
+    } catch (const Poco::Exception &E) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Poco exception during bootstrap snapshot load: {}. "
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            E.displayText(), Results.size()));
+    } catch (const std::exception &E) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Exception during bootstrap snapshot load: {}. "
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            E.what(), Results.size()));
+    } catch (...) {
+        if (IncompleteSnapshot) {
+            *IncompleteSnapshot = true;
+        }
+        poco_warning(Log, fmt::format(
+            "ServiceRegistry: Unknown exception during bootstrap snapshot load. "
+            "Snapshot is incomplete (loaded {} entries); Kafka service events will continue discovery.",
+            Results.size()));
+    }
+    return Results;
+}
+
+#else // USE_POCO_REDIS not defined — Redis support compiled out
+
+bool WriteRegistration(const std::string &, int, const std::string &, int, int,
+                       const Types::MicroServiceMeta &, int) {
+    return false;
+}
+
+bool DeleteRegistration(const std::string &, int, const std::string &, int, int,
+                        const std::string &, const std::string &) {
+    return false;
+}
+
+std::vector<Types::MicroServiceMeta>
+LoadAll(const std::string &, int, const std::string &, int, int,
+        const std::atomic_bool *, bool *IncompleteSnapshot) {
+    if (IncompleteSnapshot) {
+        *IncompleteSnapshot = true;
+    }
+    return {};
+}
+
+#endif // USE_POCO_REDIS
+
+} // namespace OpenWifi::ServiceRegistry

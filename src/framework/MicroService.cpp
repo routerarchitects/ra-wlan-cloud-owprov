@@ -28,6 +28,7 @@
 #include "framework/RESTAPI_ExtServer.h"
 #include "framework/RESTAPI_GenericServerAccounting.h"
 #include "framework/RESTAPI_IntServer.h"
+#include "framework/ServiceRegistry.h"
 #include "framework/UI_WebSocketClientServer.h"
 #include "framework/WebSocketLogger.h"
 #include "framework/utils.h"
@@ -116,6 +117,9 @@ namespace OpenWifi {
 										if (it->second.empty()) {
 											Services_.erase(it);
 										}
+									}
+									if (!RedisBootstrapDone_ || BootstrapInProgress_) {
+										DepartedDuringBootstrap_.insert(MsgInstanceId);
 									}
 									poco_information(
 										BusLogger,
@@ -583,10 +587,251 @@ namespace OpenWifi {
     }
 
     void MicroService::StopEverything([[maybe_unused]] Poco::Util::Application &self) {
+        BootstrapShutdown_ = true;
+        if (BootstrapThread_.joinable()) {
+            BootstrapThread_.join();
+        }
+
+        // Remove this instance's Redis registration on clean shutdown.
+        // Must happen before Kafka LEAVE is published so that peer services
+        // receiving the Kafka LEAVE event find no stale Redis entry.
+        DeleteRedisRegistration();
+
         if (ServiceEventsWatcherId_ != 0) {
             KafkaManager()->UnregisterTopicWatcher(
                 KafkaTopics::SERVICE_EVENTS, ServiceEventsWatcherId_, KafkaConsumerType::Broadcast);
             ServiceEventsWatcherId_ = 0;
+        }
+    }
+
+    void MicroService::RefreshRedisRegistration() {
+        try {
+            if (!ConfigGetBool("openwifi.redis.enable", true)) {
+                return;
+            }
+            std::string host = ConfigGetString("openwifi.redis.host", "");
+            if (host.empty() || host == "none") {
+                return;
+            }
+            int port = static_cast<int>(ConfigGetInt("openwifi.redis.port", 6379));
+            std::string password = ConfigGetString("openwifi.redis.password", "");
+            int db = static_cast<int>(ConfigGetInt("openwifi.redis.db", 0));
+            int timeoutMs = static_cast<int>(ConfigGetInt("openwifi.redis.timeout", 2000));
+            int ttl = static_cast<int>(ConfigGetInt("openwifi.redis.service_registry.ttl", 60));
+            if (ttl < 20) {
+                poco_warning(Logger_, fmt::format("openwifi.redis.service_registry.ttl ({}s) is unsafe for the 10s keep-alive interval (minimum 20s); falling back to default 60s.", ttl));
+                ttl = 60;
+            }
+
+            Types::MicroServiceMeta meta;
+            meta.InstanceId = InstanceId();
+            meta.Id = ID_;
+            meta.Type = Poco::toLower(DAEMON_APP_NAME);
+            meta.PrivateEndPoint = MyPrivateEndPoint_;
+            meta.PublicEndPoint = MyPublicEndPoint_;
+            meta.AccessKey = MyHash_;
+            meta.Version = Version_;
+            meta.LastUpdate = Utils::Now();
+
+            ServiceRegistry::WriteRegistration(host, port, password, db, timeoutMs, meta, ttl);
+        } catch (const std::exception &e) {
+            poco_warning(Logger_, fmt::format("RefreshRedisRegistration error: {}", e.what()));
+        } catch (...) {
+            poco_warning(Logger_, "RefreshRedisRegistration error: unknown exception");
+        }
+    }
+
+    void MicroService::DeleteRedisRegistration() {
+        try {
+            if (!ConfigGetBool("openwifi.redis.enable", true)) {
+                return;
+            }
+            std::string host = ConfigGetString("openwifi.redis.host", "");
+            if (host.empty() || host == "none") {
+                return;
+            }
+            int port = static_cast<int>(ConfigGetInt("openwifi.redis.port", 6379));
+            std::string password = ConfigGetString("openwifi.redis.password", "");
+            int db = static_cast<int>(ConfigGetInt("openwifi.redis.db", 0));
+            int timeoutMs = static_cast<int>(ConfigGetInt("openwifi.redis.timeout", 2000));
+
+            std::string serviceType = Poco::toLower(DAEMON_APP_NAME);
+            std::string instanceId = InstanceId();
+
+            ServiceRegistry::DeleteRegistration(host, port, password, db, timeoutMs, serviceType, instanceId);
+        } catch (const std::exception &e) {
+            poco_warning(Logger_, fmt::format("DeleteRedisRegistration error: {}", e.what()));
+        } catch (...) {
+            poco_warning(Logger_, "DeleteRedisRegistration error: unknown exception");
+        }
+    }
+
+    void MicroService::BootstrapFromRedisSnapshot() {
+        try {
+            if (!ConfigGetBool("openwifi.redis.enable", true)) {
+                poco_information(Logger_, "Redis service-registry bootstrap skipped: openwifi.redis.enable is false.");
+                std::lock_guard G(InfraMutex_);
+                BootstrapInProgress_ = false;
+                RedisBootstrapDone_ = true;
+                return;
+            }
+            std::string host = ConfigGetString("openwifi.redis.host", "");
+            if (host.empty() || host == "none") {
+                poco_information(Logger_, "Redis service-registry bootstrap skipped: openwifi.redis.host is not configured.");
+                std::lock_guard G(InfraMutex_);
+                BootstrapInProgress_ = false;
+                RedisBootstrapDone_ = true;
+                return;
+            }
+            int port = static_cast<int>(ConfigGetInt("openwifi.redis.port", 6379));
+            std::string password = ConfigGetString("openwifi.redis.password", "");
+            int db = static_cast<int>(ConfigGetInt("openwifi.redis.db", 0));
+            int timeoutMs = static_cast<int>(ConfigGetInt("openwifi.redis.timeout", 2000));
+
+            poco_information(Logger_, fmt::format("Starting Redis service-registry bootstrap snapshot load from {}:{} (db={})", host, port, db));
+
+            {
+                std::unique_lock G(InfraMutex_);
+                BootstrapInProgress_ = true;
+            }
+
+            std::vector<Types::MicroServiceMeta> entries;
+            bool incompleteSnapshot = false;
+            if (!BootstrapShutdown_) {
+                try {
+                    entries = ServiceRegistry::LoadAll(host, port, password, db, timeoutMs, &BootstrapShutdown_, &incompleteSnapshot);
+                    if (incompleteSnapshot) {
+                        poco_warning(Logger_, fmt::format(
+                            "BootstrapFromRedisSnapshot: Redis snapshot load was incomplete (loaded {} entries due to Redis failure). "
+                            "Service discovery will rely on live Kafka events to complete registry state.", entries.size()));
+                    }
+                } catch (const std::exception &e) {
+                    poco_warning(Logger_, fmt::format("BootstrapFromRedisSnapshot: error loading snapshot: {}", e.what()));
+                } catch (...) {
+                    poco_warning(Logger_, "BootstrapFromRedisSnapshot: unknown error loading snapshot");
+                }
+            }
+
+            if (BootstrapShutdown_) {
+                std::lock_guard G(InfraMutex_);
+                BootstrapInProgress_ = false;
+                return;
+            }
+
+            // Apply loaded snapshot entries under InfraMutex_ with race guards.
+            {
+                std::unique_lock G(InfraMutex_);
+                auto now = Utils::Now();
+                std::size_t seededCount = 0;
+
+                for (auto &meta : entries) {
+                    if (meta.LastUpdate == 0) {
+                        poco_debug(Logger_, fmt::format(
+                            "BootstrapFromRedisSnapshot: Skipping snapshot entry '{}' for service '{}' with zero timestamp",
+                            meta.InstanceId, meta.Type));
+                        continue;
+                    }
+
+                    if (meta.InstanceId == InstanceId()) {
+                        continue;
+                    }
+
+                    if (DepartedDuringBootstrap_.count(meta.InstanceId) > 0) {
+                        poco_information(Logger_, fmt::format(
+                            "BootstrapFromRedisSnapshot: Skipping departed instance '{}' for service '{}'",
+                            meta.InstanceId, meta.Type));
+                        continue;
+                    }
+
+                    auto &typeServices = Services_[meta.Type];
+                    auto it = typeServices.find(meta.InstanceId);
+                    if (it == typeServices.end()) {
+                        meta.LastUpdate = now;
+                        typeServices[meta.InstanceId] = std::move(meta);
+                        ++seededCount;
+                    } else {
+                        poco_debug(Logger_, fmt::format(
+                            "BootstrapFromRedisSnapshot: Instance '{}' for service '{}' already discovered via Kafka, preserving live state.",
+                            meta.InstanceId, meta.Type));
+                    }
+                }
+
+                DepartedDuringBootstrap_.clear();
+                BootstrapInProgress_ = false;
+                RedisBootstrapDone_ = true;
+
+                poco_information(Logger_, fmt::format(
+                    "BootstrapFromRedisSnapshot: Registry populated with {} entries from Redis snapshot. Current services: {}",
+                    seededCount, MakeServiceListString(Services_)));
+            }
+        } catch (const std::exception &e) {
+            poco_warning(Logger_, fmt::format("BootstrapFromRedisSnapshot error: {}", e.what()));
+            std::lock_guard G(InfraMutex_);
+            BootstrapInProgress_ = false;
+            RedisBootstrapDone_ = true;
+        } catch (...) {
+            poco_warning(Logger_, "BootstrapFromRedisSnapshot error: unknown exception");
+            std::lock_guard G(InfraMutex_);
+            BootstrapInProgress_ = false;
+            RedisBootstrapDone_ = true;
+        }
+    }
+
+    void MicroService::ScheduleRedisBootstrap() {
+        try {
+            {
+                std::lock_guard G(InfraMutex_);
+                if (RedisBootstrapDone_ || BootstrapInProgress_) {
+                    return;
+                }
+                BootstrapInProgress_ = true;
+            }
+
+            if (KafkaManager()->Enabled()) {
+                const auto maxWaitMs = static_cast<uint64_t>(ConfigGetInt("openwifi.service.bootstrap.kafka_wait_ms", 5000));
+                const auto startTime = std::chrono::steady_clock::now();
+
+                while (!BootstrapShutdown_ &&
+                       KafkaManager()->BroadcastConsumer().IsRunning() &&
+                       !KafkaManager()->BroadcastConsumer().HasPartitionAssignment()) {
+                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - startTime).count();
+                    if (elapsedMs >= static_cast<int64_t>(maxWaitMs)) {
+                        break;
+                    }
+                    uint64_t waitChunkMs = std::min<uint64_t>(200, maxWaitMs - elapsedMs);
+                    if (KafkaManager()->BroadcastConsumer().WaitForPartitionAssignment(waitChunkMs)) {
+                        break;
+                    }
+                }
+
+                if (BootstrapShutdown_) {
+                    std::lock_guard G(InfraMutex_);
+                    BootstrapInProgress_ = false;
+                    return;
+                }
+
+                if (!KafkaManager()->BroadcastConsumer().HasPartitionAssignment()) {
+                    poco_warning(Logger_,
+                        "Kafka partition assignment wait timed out or consumer not assigned; proceeding with Redis snapshot bootstrap.");
+                }
+            }
+
+            if (BootstrapShutdown_) {
+                std::lock_guard G(InfraMutex_);
+                BootstrapInProgress_ = false;
+                return;
+            }
+
+            BootstrapFromRedisSnapshot();
+        } catch (const std::exception &e) {
+            poco_warning(Logger_, fmt::format("ScheduleRedisBootstrap error: {}", e.what()));
+            std::lock_guard G(InfraMutex_);
+            BootstrapInProgress_ = false;
+        } catch (...) {
+            poco_warning(Logger_, "ScheduleRedisBootstrap error: unknown exception");
+            std::lock_guard G(InfraMutex_);
+            BootstrapInProgress_ = false;
         }
     }
 
@@ -699,14 +944,30 @@ namespace OpenWifi {
 		for (auto i : SubSystems_) {
 			i->Start();
 		}
+		BootstrapThread_ = std::thread([this]() {
+			try {
+				this->ScheduleRedisBootstrap();
+			} catch (...) {
+			}
+		});
 		EventBusManager()->Start();
 	}
 
 	void MicroService::StopSubSystemServers() {
 		AddActivity("Stopping");
 		EventBusManager()->Stop();
+		BootstrapShutdown_ = true;
+		if (BootstrapThread_.joinable()) {
+			BootstrapThread_.join();
+		}
 		for (auto i = SubSystems_.rbegin(); i != SubSystems_.rend(); ++i) {
 			(*i)->Stop();
+		}
+		{
+			std::lock_guard G(InfraMutex_);
+			RedisBootstrapDone_ = false;
+			BootstrapInProgress_ = false;
+			BootstrapShutdown_ = false;
 		}
 	}
 

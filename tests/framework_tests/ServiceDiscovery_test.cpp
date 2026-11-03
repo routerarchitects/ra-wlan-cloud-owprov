@@ -3,9 +3,11 @@
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
 //
 
+#include <algorithm>
 #include <any>
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <set>
 #include <string>
@@ -28,11 +30,13 @@
 #include "framework/RESTAPI_GenericServerAccounting.h"
 #include "framework/RESTAPI_Handler.h"
 #include "framework/utils.h"
+#include "framework/ServiceRegistry.h"
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
 
 #define private public
 #define protected public
 #include "framework/MicroService.h"
+#include "framework/KafkaManager.h"
 #undef private
 #undef protected
 #include "framework/OpenWifiTypes.h"
@@ -40,6 +44,9 @@
 #include "framework/RESTAPI_Handler.h"
 #include "framework/utils.h"
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
+#include "Poco/Net/ServerSocket.h"
+#include "Poco/Net/StreamSocket.h"
+#include "Poco/Net/SocketAddress.h"
 
 #define TEST_ASSERT(cond, msg)                                                                   \
 	do {                                                                                         \
@@ -86,6 +93,291 @@ namespace OpenWifi {
 		}
 	} // namespace SecurityObjects
 
+	// Lightweight in-process RESP Redis fixture for exercising production
+	// ServiceRegistry::LoadAll and MicroService::BootstrapFromRedisSnapshot
+	class MockRedisServer {
+	  public:
+		explicit MockRedisServer(const std::vector<Types::MicroServiceMeta> &Entries = {})
+			: Running_(true), Socket_(Poco::Net::SocketAddress("127.0.0.1", 0)) {
+			for (const auto &meta : Entries) {
+				auto key = ServiceRegistry::MakeKey(meta.Type, meta.InstanceId);
+				Store_[key] = ServiceRegistry::Serialize(meta);
+			}
+			Port_ = Socket_.address().port();
+			Socket_.setReceiveTimeout(Poco::Timespan(100 * 1000));
+			Worker_ = std::thread([this]() { Run(); });
+		}
+
+		~MockRedisServer() {
+			Stop();
+		}
+
+		void Stop() {
+			if (Running_.exchange(false)) {
+				try {
+					Socket_.close();
+				} catch (...) {}
+				if (Worker_.joinable()) {
+					Worker_.join();
+				}
+			}
+		}
+
+		[[nodiscard]] uint16_t Port() const { return Port_; }
+
+		void Set(const std::string &key, const std::string &val) {
+			std::lock_guard G(Mutex_);
+			Store_[key] = val;
+		}
+
+		void SetMeta(const Types::MicroServiceMeta &meta) {
+			std::lock_guard G(Mutex_);
+			Store_[ServiceRegistry::MakeKey(meta.Type, meta.InstanceId)] = ServiceRegistry::Serialize(meta);
+		}
+
+		int LastSetTTL(const std::string &key = "") {
+			std::lock_guard G(Mutex_);
+			if (!key.empty()) {
+				auto it = TTLs_.find(key);
+				return (it != TTLs_.end()) ? it->second : -1;
+			}
+			return LastTTL_;
+		}
+
+		void FailOnGet(bool fail, const std::string &errMsg = "ERR mock redis GET failure") {
+			std::lock_guard G(Mutex_);
+			FailOnGet_ = fail;
+			GetErrMsg_ = errMsg;
+		}
+
+		void FailOnGetAfter(int count, const std::string &errMsg = "ERR mock redis GET failure after count") {
+			std::lock_guard G(Mutex_);
+			FailOnGetAfterCount_ = count;
+			GetCount_ = 0;
+			GetErrMsg_ = errMsg;
+		}
+
+		void SetMalformedScan(bool malformed) {
+			std::lock_guard G(Mutex_);
+			MalformedScan_ = malformed;
+		}
+
+		void SetScanPageSize(int pageSize) {
+			std::lock_guard G(Mutex_);
+			ScanPageSize_ = pageSize;
+		}
+
+		void SetEmptyIntermediateScanPage(bool enable) {
+			std::lock_guard G(Mutex_);
+			EmptyIntermediatePage_ = enable;
+		}
+
+		void SetHookOnScan(std::function<void(const std::string &cursor)> hook) {
+			std::lock_guard G(Mutex_);
+			ScanHook_ = hook;
+		}
+
+		void SetHookOnGet(std::function<void(const std::string &key)> hook) {
+			std::lock_guard G(Mutex_);
+			GetHook_ = hook;
+		}
+
+		int ScanRequestCount() {
+			std::lock_guard G(Mutex_);
+			return ScanRequestCount_;
+		}
+
+	  private:
+		std::atomic_bool Running_;
+		Poco::Net::ServerSocket Socket_;
+		uint16_t Port_ = 0;
+		std::mutex Mutex_;
+		std::map<std::string, std::string> Store_;
+		int LastTTL_ = -1;
+		std::map<std::string, int> TTLs_;
+		bool FailOnGet_ = false;
+		int FailOnGetAfterCount_ = -1;
+		int GetCount_ = 0;
+		bool MalformedScan_ = false;
+		int ScanPageSize_ = 0;
+		bool EmptyIntermediatePage_ = false;
+		int ScanRequestCount_ = 0;
+		std::function<void(const std::string &cursor)> ScanHook_;
+		std::function<void(const std::string &key)> GetHook_;
+		std::string GetErrMsg_ = "ERR mock redis GET failure";
+		std::thread Worker_;
+
+		static bool SendAll(Poco::Net::StreamSocket &sock, const std::string &data) {
+			int total = 0;
+			int len = static_cast<int>(data.size());
+			while (total < len) {
+				int n = sock.sendBytes(data.data() + total, len - total);
+				if (n <= 0) return false;
+				total += n;
+			}
+			return true;
+		}
+
+		static bool ParseOneCommand(std::string &buffer, std::vector<std::string> &args) {
+			if (buffer.empty()) return false;
+			if (buffer[0] != '*') return false;
+			auto pos = buffer.find("\r\n");
+			if (pos == std::string::npos) return false;
+			int numArgs = 0;
+			try {
+				numArgs = std::stoi(buffer.substr(1, pos - 1));
+			} catch (...) {
+				return false;
+			}
+			std::size_t cur = pos + 2;
+			std::vector<std::string> parsed;
+			for (int i = 0; i < numArgs; ++i) {
+				if (cur >= buffer.size() || buffer[cur] != '$') return false;
+				auto nextCrlf = buffer.find("\r\n", cur);
+				if (nextCrlf == std::string::npos) return false;
+				int len = 0;
+				try {
+					len = std::stoi(buffer.substr(cur + 1, nextCrlf - cur - 1));
+				} catch (...) {
+					return false;
+				}
+				cur = nextCrlf + 2;
+				if (cur + len + 2 > buffer.size()) return false;
+				parsed.push_back(buffer.substr(cur, len));
+				cur += len + 2;
+			}
+			buffer.erase(0, cur);
+			args = std::move(parsed);
+			return true;
+		}
+
+		void Run() {
+			while (Running_) {
+				try {
+					if (!Socket_.poll(Poco::Timespan(50 * 1000), Poco::Net::Socket::SELECT_READ)) {
+						continue;
+					}
+					Poco::Net::StreamSocket client = Socket_.acceptConnection();
+					client.setReceiveTimeout(Poco::Timespan(500 * 1000));
+					client.setSendTimeout(Poco::Timespan(500 * 1000));
+
+					std::string buffer;
+					char readBuf[4096];
+
+					while (Running_) {
+						try {
+							if (!client.poll(Poco::Timespan(50 * 1000), Poco::Net::Socket::SELECT_READ)) {
+								continue;
+							}
+							int n = client.receiveBytes(readBuf, sizeof(readBuf));
+							if (n <= 0) break;
+							buffer.append(readBuf, n);
+
+							std::vector<std::string> args;
+							while (ParseOneCommand(buffer, args)) {
+								if (args.empty()) continue;
+								std::string cmd = Poco::toUpper(args[0]);
+								if (cmd == "SCAN") {
+									std::lock_guard G(Mutex_);
+									ScanRequestCount_++;
+									std::string inCursor = (args.size() > 1) ? args[1] : "0";
+									if (ScanHook_) {
+										ScanHook_(inCursor);
+									}
+									if (MalformedScan_) {
+										// Malformed reply: only 1 element instead of [cursor, [keys]]
+										std::string resp = "*1\r\n$1\r\n0\r\n";
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
+									if (EmptyIntermediatePage_ && inCursor == "0") {
+										// Intermediate empty page with non-zero cursor "42" and 0 keys
+										std::string resp = "*2\r\n$2\r\n42\r\n*0\r\n";
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
+									std::vector<std::string> keys;
+									for (const auto &[k, _] : Store_) {
+										keys.push_back(k);
+									}
+									if (ScanPageSize_ > 0) {
+										int curIndex = 0;
+										if (inCursor != "0" && inCursor != "42") {
+											try { curIndex = std::stoi(inCursor); } catch (...) {}
+										}
+										int endIndex = std::min(curIndex + ScanPageSize_, static_cast<int>(keys.size()));
+										std::string nextCursor = (endIndex >= static_cast<int>(keys.size())) ? "0" : std::to_string(endIndex);
+										int batchCount = endIndex - curIndex;
+
+										std::string resp = "*2\r\n$" + std::to_string(nextCursor.size()) + "\r\n" + nextCursor + "\r\n*" + std::to_string(batchCount) + "\r\n";
+										for (int idx = curIndex; idx < endIndex; ++idx) {
+											resp += "$" + std::to_string(keys[idx].size()) + "\r\n" + keys[idx] + "\r\n";
+										}
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
+									std::string resp = "*2\r\n$1\r\n0\r\n*" + std::to_string(keys.size()) + "\r\n";
+									for (const auto &k : keys) {
+										resp += "$" + std::to_string(k.size()) + "\r\n" + k + "\r\n";
+									}
+									if (!SendAll(client, resp)) break;
+								} else if (cmd == "GET") {
+									std::lock_guard G(Mutex_);
+									std::string key = (args.size() > 1) ? args[1] : "";
+									if (GetHook_) {
+										GetHook_(key);
+									}
+									if (FailOnGet_ || (FailOnGetAfterCount_ >= 0 && GetCount_++ >= FailOnGetAfterCount_)) {
+										std::string resp = "-" + GetErrMsg_ + "\r\n";
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
+									auto it = Store_.find(key);
+									if (it != Store_.end()) {
+										std::string resp = "$" + std::to_string(it->second.size()) + "\r\n" + it->second + "\r\n";
+										if (!SendAll(client, resp)) break;
+									} else {
+										std::string resp = "$-1\r\n";
+										if (!SendAll(client, resp)) break;
+									}
+								} else if (cmd == "SET") {
+									std::lock_guard G(Mutex_);
+									if (args.size() > 2) {
+										Store_[args[1]] = args[2];
+									}
+									if (args.size() >= 5 && Poco::toUpper(args[3]) == "EX") {
+										try {
+											int ttlVal = std::stoi(args[4]);
+											TTLs_[args[1]] = ttlVal;
+											LastTTL_ = ttlVal;
+										} catch (...) {}
+									}
+									std::string resp = "+OK\r\n";
+									if (!SendAll(client, resp)) break;
+								} else if (cmd == "DEL") {
+									std::lock_guard G(Mutex_);
+									if (args.size() > 1) {
+										Store_.erase(args[1]);
+									}
+									std::string resp = ":1\r\n";
+									if (!SendAll(client, resp)) break;
+								} else {
+									// AUTH, SELECT, PING, etc.
+									std::string resp = "+OK\r\n";
+									if (!SendAll(client, resp)) break;
+								}
+							}
+						} catch (...) {
+							break;
+						}
+					}
+				} catch (...) {
+					// Socket closed or accept timeout
+				}
+			}
+		}
+	};
+
 	// Test harness class exposing protected/internal state for verification
 	class TestMicroService : public MicroService {
 	  public:
@@ -114,6 +406,43 @@ namespace OpenWifi {
 					itInst->second.LastUpdate = ts;
 				}
 			}
+		}
+
+		void SetConfig(const std::string &Key, const std::string &Val) {
+			config().setString(Key, Val);
+		}
+
+		void SetConfigInt(const std::string &Key, int Val) {
+			config().setInt(Key, Val);
+		}
+
+		void SetConfigBool(const std::string &Key, bool Val) {
+			config().setBool(Key, Val);
+		}
+
+		void RemoveConfig(const std::string &Key) {
+			config().remove(Key);
+			if (config().hasProperty(Key)) {
+				throw std::runtime_error("Failed to remove test config: " + Key);
+			}
+		}
+
+		void SetBootstrapInProgress(bool inProgress) {
+			std::unique_lock G(InfraMutex_);
+			BootstrapInProgress_ = inProgress;
+			if (inProgress) {
+				DepartedDuringBootstrap_.clear();
+			}
+		}
+
+		bool IsBootstrapInProgress() {
+			std::unique_lock G(InfraMutex_);
+			return BootstrapInProgress_;
+		}
+
+		std::unordered_set<std::string> GetDepartedDuringBootstrap() {
+			std::unique_lock G(InfraMutex_);
+			return DepartedDuringBootstrap_;
 		}
 	};
 
@@ -1370,6 +1699,1029 @@ static void test_production_dual_identity_wire_format_lifecycle() {
 	std::cout << "  PASS: test_production_dual_identity_wire_format_lifecycle" << std::endl;
 }
 
+// Test 27: Redis service-registry key generation and parsing helpers
+static void test_redis_service_registry_key_helpers() {
+	// Standard canonical format: service-registry:{service_type}:{instance_id}
+	auto key = ServiceRegistry::MakeKey("owprov", "owprov-1-uuid-1234");
+	TEST_ASSERT(key == "service-registry:owprov:owprov-1-uuid-1234", "MakeKey produces expected format");
+
+	// Key generation normalizes service type to lowercase
+	auto keyUpper = ServiceRegistry::MakeKey("OWGW", "owgw-inst-A");
+	TEST_ASSERT(keyUpper == "service-registry:owgw:owgw-inst-A", "MakeKey normalizes uppercase type to lowercase");
+
+	// Parsing valid key
+	auto parsed = ServiceRegistry::ParseKey("service-registry:owsec:owsec-rep-1");
+	TEST_ASSERT(parsed.has_value(), "ParseKey succeeds for valid key");
+	TEST_ASSERT(parsed->first == "owsec", "Parsed service type is owsec");
+	TEST_ASSERT(parsed->second == "owsec-rep-1", "Parsed instance ID is owsec-rep-1");
+
+	// Parsing valid key with uppercase type normalizes to lowercase
+	auto parsedUpper = ServiceRegistry::ParseKey("service-registry:OWFMS:owfms-rep-2");
+	TEST_ASSERT(parsedUpper.has_value(), "ParseKey succeeds for uppercase type");
+	TEST_ASSERT(parsedUpper->first == "owfms", "Parsed service type normalized to lowercase");
+
+	// Invalid prefix
+	auto badPrefix = ServiceRegistry::ParseKey("other-prefix:owprov:inst-1");
+	TEST_ASSERT(!badPrefix.has_value(), "ParseKey rejects wrong prefix");
+
+	// Missing colon separator
+	auto noColon = ServiceRegistry::ParseKey("service-registry:owprov");
+	TEST_ASSERT(!noColon.has_value(), "ParseKey rejects key without instance separator");
+
+	// Empty instance ID
+	auto emptyId = ServiceRegistry::ParseKey("service-registry:owprov:");
+	TEST_ASSERT(!emptyId.has_value(), "ParseKey rejects empty instance ID");
+
+	// Empty service type
+	auto emptyType = ServiceRegistry::ParseKey("service-registry::inst-1");
+	TEST_ASSERT(!emptyType.has_value(), "ParseKey rejects empty service type");
+
+	// Empty string
+	auto emptyStr = ServiceRegistry::ParseKey("");
+	TEST_ASSERT(!emptyStr.has_value(), "ParseKey rejects empty string");
+
+	std::cout << "  PASS: test_redis_service_registry_key_helpers" << std::endl;
+}
+
+// Test 28: Redis serialization and deserialization of MicroServiceMeta
+static void test_redis_service_registry_serialization_deserialization() {
+	Types::MicroServiceMeta meta;
+	meta.InstanceId = "owprov-inst-uuid-1234";
+	meta.Id = 42; // Numeric legacy ID
+	meta.Type = "OWPROV";
+	meta.PrivateEndPoint = "https://owprov-internal:17005";
+	meta.PublicEndPoint = "https://owprov.example.com:16005";
+	meta.AccessKey = "access-key-hash-xyz";
+	meta.Version = "2.5.0";
+	meta.LastUpdate = Utils::Now();
+
+	// Serialize
+	auto jsonStr = ServiceRegistry::Serialize(meta);
+	TEST_ASSERT(!jsonStr.empty(), "Serialize produces non-empty JSON");
+
+	// Deserialize
+	auto restored = ServiceRegistry::Deserialize(jsonStr);
+	TEST_ASSERT(restored.has_value(), "Deserialize succeeds");
+	TEST_ASSERT(restored->InstanceId == "owprov-inst-uuid-1234", "InstanceId preserved");
+	TEST_ASSERT(restored->Type == "owprov", "Type normalized to lowercase");
+	TEST_ASSERT(restored->PrivateEndPoint == "https://owprov-internal:17005", "PrivateEndPoint preserved");
+	TEST_ASSERT(restored->PublicEndPoint == "https://owprov.example.com:16005", "PublicEndPoint preserved");
+	TEST_ASSERT(restored->AccessKey == "access-key-hash-xyz", "AccessKey preserved");
+	TEST_ASSERT(restored->Version == "2.5.0", "Version preserved");
+	TEST_ASSERT(restored->LastUpdate == meta.LastUpdate, "LastUpdate timestamp preserved");
+
+	// Deserialization with missing required fields
+	Poco::JSON::Object missingId;
+	missingId.set("type", "owgw");
+	missingId.set("privateEndPoint", "https://owgw:17004");
+	std::ostringstream ss1;
+	Poco::JSON::Stringifier::stringify(missingId, ss1);
+	auto bad1 = ServiceRegistry::Deserialize(ss1.str());
+	TEST_ASSERT(!bad1.has_value(), "Deserialize rejects entry without instanceId");
+
+	Poco::JSON::Object missingType;
+	missingType.set("instanceId", "inst-1");
+	missingType.set("privateEndPoint", "https://owgw:17004");
+	std::ostringstream ss2;
+	Poco::JSON::Stringifier::stringify(missingType, ss2);
+	auto bad2 = ServiceRegistry::Deserialize(ss2.str());
+	TEST_ASSERT(!bad2.has_value(), "Deserialize rejects entry without type");
+
+	Poco::JSON::Object missingPrivate;
+	missingPrivate.set("instanceId", "inst-1");
+	missingPrivate.set("type", "owgw");
+	missingPrivate.set("publicEndPoint", "https://owgw:16004");
+	missingPrivate.set("accessKey", "key123");
+	missingPrivate.set("lastUpdate", 123456);
+	std::ostringstream ss3;
+	Poco::JSON::Stringifier::stringify(missingPrivate, ss3);
+	auto bad3 = ServiceRegistry::Deserialize(ss3.str());
+	TEST_ASSERT(!bad3.has_value(), "Deserialize rejects entry without privateEndPoint");
+
+	// Missing publicEndPoint
+	Poco::JSON::Object missingPublic;
+	missingPublic.set("instanceId", "inst-1");
+	missingPublic.set("type", "owgw");
+	missingPublic.set("privateEndPoint", "https://owgw:17004");
+	missingPublic.set("accessKey", "key123");
+	missingPublic.set("lastUpdate", 123456);
+	std::ostringstream ss4;
+	Poco::JSON::Stringifier::stringify(missingPublic, ss4);
+	auto bad4 = ServiceRegistry::Deserialize(ss4.str());
+	TEST_ASSERT(!bad4.has_value(), "Deserialize rejects entry without publicEndPoint");
+
+	// Missing accessKey
+	Poco::JSON::Object missingKey;
+	missingKey.set("instanceId", "inst-1");
+	missingKey.set("type", "owgw");
+	missingKey.set("privateEndPoint", "https://owgw:17004");
+	missingKey.set("publicEndPoint", "https://owgw:16004");
+	missingKey.set("lastUpdate", 123456);
+	std::ostringstream ss5;
+	Poco::JSON::Stringifier::stringify(missingKey, ss5);
+	auto bad5 = ServiceRegistry::Deserialize(ss5.str());
+	TEST_ASSERT(!bad5.has_value(), "Deserialize rejects entry without accessKey");
+
+	// Negative lastUpdate
+	Poco::JSON::Object negativeTs;
+	negativeTs.set("instanceId", "inst-1");
+	negativeTs.set("type", "owgw");
+	negativeTs.set("privateEndPoint", "https://owgw:17004");
+	negativeTs.set("publicEndPoint", "https://owgw:16004");
+	negativeTs.set("accessKey", "key123");
+	negativeTs.set("lastUpdate", -1);
+	std::ostringstream ss6;
+	Poco::JSON::Stringifier::stringify(negativeTs, ss6);
+	auto bad6 = ServiceRegistry::Deserialize(ss6.str());
+	TEST_ASSERT(!bad6.has_value(), "Deserialize rejects entry with negative lastUpdate");
+
+	// Empty or malformed input
+	TEST_ASSERT(!ServiceRegistry::Deserialize("").has_value(), "Deserialize rejects empty string");
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{malformed-json").has_value(), "Deserialize rejects malformed JSON");
+
+	// Strict JSON field type validation:
+	// 1. Numeric privateEndPoint
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":17004,\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects numeric privateEndPoint");
+
+	// 2. String lastUpdate
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"lastUpdate\":\"123456\"}").has_value(),
+	            "Deserialize rejects string lastUpdate");
+
+	// 3. Numeric instanceId
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":1001,\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects numeric instanceId");
+
+	// 4. Boolean accessKey
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":true,\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects boolean accessKey");
+
+	// 5. Numeric version
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"version\":1,\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects numeric version");
+
+	// 6. Explicit null version
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"version\":null,\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects explicit null version");
+
+	std::cout << "  PASS: test_redis_service_registry_serialization_deserialization" << std::endl;
+}
+
+// Test 29: Redis snapshot bootstrap seeds multiple replicas and deduplicates routes
+static void test_redis_bootstrap_snapshot_seeding() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// Snapshot contains:
+	// - 2 replicas of owgw sharing https://owgw-internal:17004
+	// - 1 replica of owsec at https://owsec-internal:16001
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-replica-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+	snapshot.push_back({
+		.InstanceId = "owgw-replica-2",
+		.Id = 2,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 3
+	});
+	snapshot.push_back({
+		.InstanceId = "owsec-replica-1",
+		.Id = 10,
+		.Type = "owsec",
+		.PrivateEndPoint = "https://owsec-internal:16001",
+		.PublicEndPoint = "https://owsec.example.com:16001",
+		.AccessKey = "key-sec",
+		.Version = "1.1.0",
+		.LastUpdate = now - 1
+	});
+
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	svc.BootstrapFromRedisSnapshot();
+
+	// Verify instances seeded
+	auto gwInstances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(gwInstances.size() == 2, "2 owgw replicas seeded from snapshot");
+	TEST_ASSERT(gwInstances.find("owgw-replica-1") != gwInstances.end(), "Replica 1 present");
+	TEST_ASSERT(gwInstances.find("owgw-replica-2") != gwInstances.end(), "Replica 2 present");
+
+	// Verify logical endpoint deduplication
+	auto gwRoutes = svc.GetServices("owgw");
+	TEST_ASSERT(gwRoutes.size() == 1, "Logical route deduplicated to 1 endpoint");
+	TEST_ASSERT(gwRoutes[0].PrivateEndPoint == "https://owgw-internal:17004", "owgw route correct");
+
+	auto secInstances = svc.GetServiceInstances("owsec");
+	TEST_ASSERT(secInstances.size() == 1, "1 owsec replica seeded");
+	auto secRoutes = svc.GetServices("owsec");
+	TEST_ASSERT(secRoutes.size() == 1, "owsec route present");
+	TEST_ASSERT(secRoutes[0].PrivateEndPoint == "https://owsec-internal:16001", "owsec route correct");
+
+	std::cout << "  PASS: test_redis_bootstrap_snapshot_seeding" << std::endl;
+}
+
+// Test 30: Clock skew tolerance and invalid snapshot entries during bootstrap
+// Remote timestamps with clock skew (e.g. >120s behind or in the future) are accepted
+// because Redis TTL enforces freshness; entries are assigned local timestamp 'now'.
+// Only entries with invalid timestamp (0) are ignored.
+static void test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	std::vector<Types::MicroServiceMeta> snapshot;
+	// Entry from peer with synchronized clock (5s ago)
+	snapshot.push_back({
+		.InstanceId = "owgw-sync",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-sync",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+	// Entry from peer whose clock is skewed 150s behind (would exceed 120s if compared against local clock)
+	// Must be accepted because it exists unexpired in Redis!
+	snapshot.push_back({
+		.InstanceId = "owgw-skewed-behind",
+		.Id = 2,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-skewed",
+		.Version = "1.0.0",
+		.LastUpdate = now - 150
+	});
+	// Invalid entry with 0 timestamp
+	snapshot.push_back({
+		.InstanceId = "owgw-zero-ts",
+		.Id = 3,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-zero",
+		.Version = "1.0.0",
+		.LastUpdate = 0
+	});
+
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	auto before = Utils::Now();
+	svc.BootstrapFromRedisSnapshot();
+	auto after = Utils::Now();
+
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 2, "Both sync and skewed entries seeded, zero-ts ignored");
+	TEST_ASSERT(instances.find("owgw-sync") != instances.end(), "Sync entry present");
+	TEST_ASSERT(instances.find("owgw-skewed-behind") != instances.end(), "Skewed entry accepted");
+	TEST_ASSERT(instances.find("owgw-zero-ts") == instances.end(), "Zero-ts entry ignored");
+
+	// Verify that seeded entry was assigned local 'now' timestamp, not the remote skewed timestamp
+	TEST_ASSERT(instances["owgw-skewed-behind"].LastUpdate >= before &&
+	            instances["owgw-skewed-behind"].LastUpdate <= after,
+	            "Assigned local 'now' timestamp for local cleanup");
+
+	std::cout << "  PASS: test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored" << std::endl;
+}
+
+// Test 31: Concurrent Kafka LEAVE during bootstrap prevents stale snapshot resurrection
+static void test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrection() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Start bootstrap phase
+	svc.SetBootstrapInProgress(true);
+	TEST_ASSERT(svc.IsBootstrapInProgress(), "Bootstrap in progress flag set");
+
+	// 2. While bootstrap is running, a Kafka LEAVE message arrives for "owgw-departing-1"
+	auto leavePayload = MakePayload("leave", "owgw-departing-1", "owgw",
+	                                "https://owgw-internal:17004", "https://owgw.example.com:16004");
+	svc.BusMessageReceived("service_events", leavePayload);
+
+	// Verify tombstone was recorded in DepartedDuringBootstrap_
+	auto tombstones = svc.GetDepartedDuringBootstrap();
+	TEST_ASSERT(tombstones.count("owgw-departing-1") == 1, "Departing instance recorded in tombstone set");
+
+	// 3. The delayed Redis snapshot arrives containing the departing instance AND a healthy instance
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-departing-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 2
+	});
+	snapshot.push_back({
+		.InstanceId = "owgw-surviving-2",
+		.Id = 2,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 1
+	});
+
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	// Apply snapshot merge using production BootstrapFromRedisSnapshot
+	svc.BootstrapFromRedisSnapshot();
+
+	// 4. Verify departing instance was NOT resurrected, but surviving instance was added
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.find("owgw-departing-1") == instances.end(), "Departed instance NOT resurrected by snapshot");
+	TEST_ASSERT(instances.find("owgw-surviving-2") != instances.end(), "Surviving instance present");
+	TEST_ASSERT(instances.size() == 1, "Only surviving instance in registry");
+
+	// Verify bootstrap state is cleaned up
+	TEST_ASSERT(!svc.IsBootstrapInProgress(), "Bootstrap in progress reset to false");
+	TEST_ASSERT(svc.GetDepartedDuringBootstrap().empty(), "Tombstone set cleared");
+
+	std::cout << "  PASS: test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrection" << std::endl;
+}
+
+// Test 32: Newer Kafka events arriving during bootstrap are not overwritten by older snapshot
+static void test_redis_bootstrap_race_newer_kafka_event_preserved() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Live Kafka JOIN arrives before snapshot completes: LastUpdate = now, Version = 2.0.0
+	auto joinPayload = MakePayload("join", "owgw-inst-1", "owgw",
+	                               "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                               "live-key", "2.0.0");
+	svc.BusMessageReceived("service_events", joinPayload);
+
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Instance registered via Kafka");
+	auto kafkaTs = instances["owgw-inst-1"].LastUpdate;
+	TEST_ASSERT(instances["owgw-inst-1"].Version == "2.0.0", "Version 2.0.0 from Kafka");
+
+	// 2. Snapshot has entry for the same instance with a FUTURE timestamp (clock skew):
+	// Even if snapshot has LastUpdate = now + 50, live Kafka state MUST NOT be overwritten!
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-inst-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "old-key",
+		.Version = "1.0.0",
+		.LastUpdate = now + 50
+	});
+
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	svc.BootstrapFromRedisSnapshot();
+
+	// 3. Verify snapshot did NOT overwrite live Kafka data despite clock skew
+	instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances["owgw-inst-1"].Version == "2.0.0", "Newer version preserved from Kafka");
+	TEST_ASSERT(instances["owgw-inst-1"].LastUpdate == kafkaTs, "Live Kafka timestamp preserved");
+	TEST_ASSERT(instances["owgw-inst-1"].AccessKey == "live-key", "Live access key preserved");
+
+	std::cout << "  PASS: test_redis_bootstrap_race_newer_kafka_event_preserved" << std::endl;
+}
+
+// Test 33: Kafka JOIN, KEEP_ALIVE, and LEAVE continue functioning normally after bootstrap
+static void test_redis_bootstrap_kafka_events_continue_after_bootstrap() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Seed registry with owgw-1
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-gw",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	svc.BootstrapFromRedisSnapshot();
+	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 1, "Seeded with 1 replica");
+
+	// 2. Kafka JOIN adds owgw-2 sharing the same endpoint
+	auto join2 = MakePayload("join", "owgw-2", "owgw",
+	                         "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                         "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", join2);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 2, "Kafka JOIN added second replica");
+	TEST_ASSERT(svc.GetServices("owgw").size() == 1, "Shared route preserved");
+
+	// 3. Kafka KEEP_ALIVE refreshes owgw-1
+	auto keepalive1 = MakePayload("keep-alive", "owgw-1", "owgw",
+	                              "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                              "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", keepalive1);
+	TEST_ASSERT(svc.GetServiceInstances("owgw")["owgw-1"].LastUpdate >= now - 1, "Timestamp refreshed");
+
+	// 4. Kafka LEAVE removes owgw-1; owgw-2 keeps route alive
+	auto leave1 = MakePayload("leave", "owgw-1", "owgw",
+	                          "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                          "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", leave1);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").size() == 1, "Only owgw-2 remains");
+	TEST_ASSERT(svc.GetServices("owgw").size() == 1, "Route still active via surviving replica");
+
+	// 5. Kafka LEAVE removes owgw-2; route cleanly removed
+	auto leave2 = MakePayload("leave", "owgw-2", "owgw",
+	                          "https://owgw-internal:17004", "https://owgw.example.com:16004",
+	                          "key-gw", "1.0.0");
+	svc.BusMessageReceived("service_events", leave2);
+	TEST_ASSERT(svc.GetServiceInstances("owgw").empty(), "Registry empty");
+	TEST_ASSERT(svc.GetServices("owgw").empty(), "Route cleanly removed");
+
+	std::cout << "  PASS: test_redis_bootstrap_kafka_events_continue_after_bootstrap" << std::endl;
+}
+
+// Test 34: Redis lifecycle operations degrade gracefully when Redis is disabled or unconfigured
+static void test_redis_lifecycle_methods_graceful_when_disabled_or_unavailable() {
+	TestMicroService svc("owprov");
+
+	// In test environment, Redis host is unconfigured or disabled.
+	// All operations must be safe no-ops and never throw.
+	try {
+		svc.BootstrapFromRedisSnapshot();
+		svc.RefreshRedisRegistration();
+		svc.DeleteRedisRegistration();
+	} catch (const std::exception &e) {
+		TEST_ASSERT(false, std::string("Redis lifecycle method threw exception: ") + e.what());
+	} catch (...) {
+		TEST_ASSERT(false, "Redis lifecycle method threw unknown exception");
+	}
+
+	// Direct ServiceRegistry calls with unreachable port should log warnings and return false / empty
+	bool writeRes = ServiceRegistry::WriteRegistration("127.0.0.1", 59999, "", 0, 50, {
+		.InstanceId = "test-inst",
+		.Id = 1,
+		.Type = "owprov",
+		.PrivateEndPoint = "https://localhost:17005",
+		.PublicEndPoint = "https://localhost:16005",
+		.AccessKey = "testkey",
+		.Version = "1.0.0",
+		.LastUpdate = Utils::Now()
+	}, 60);
+	TEST_ASSERT(!writeRes, "WriteRegistration returns false on unreachable Redis");
+
+	bool delRes = ServiceRegistry::DeleteRegistration("127.0.0.1", 59999, "", 0, 50, "owprov", "test-inst");
+	TEST_ASSERT(!delRes, "DeleteRegistration returns false on unreachable Redis");
+
+	auto loaded = ServiceRegistry::LoadAll("127.0.0.1", 59999, "", 0, 50);
+	TEST_ASSERT(loaded.empty(), "LoadAll returns empty vector on unreachable Redis");
+
+	std::atomic_bool cancelSignal = true;
+	auto cancelledLoad = ServiceRegistry::LoadAll("127.0.0.1", 59999, "", 0, 50, &cancelSignal);
+	TEST_ASSERT(cancelledLoad.empty(), "LoadAll with CancelSignal returns empty immediately");
+
+	std::cout << "  PASS: test_redis_lifecycle_methods_graceful_when_disabled_or_unavailable" << std::endl;
+}
+
+// Test 35: Overlapping rolling restarts produce distinct Redis keys and do not collide
+static void test_redis_overlapping_restarts_isolated_keys() {
+	std::string oldUuid = "aaaa-1111-uuid";
+	std::string newUuid = "bbbb-2222-uuid";
+
+	auto oldKey = ServiceRegistry::MakeKey("owprov", oldUuid);
+	auto newKey = ServiceRegistry::MakeKey("owprov", newUuid);
+
+	TEST_ASSERT(oldKey != newKey, "Overlapping replicas produce distinct Redis keys");
+	TEST_ASSERT(oldKey == "service-registry:owprov:aaaa-1111-uuid", "Old key format correct");
+	TEST_ASSERT(newKey == "service-registry:owprov:bbbb-2222-uuid", "New key format correct");
+
+	auto parsedOld = ServiceRegistry::ParseKey(oldKey);
+	auto parsedNew = ServiceRegistry::ParseKey(newKey);
+	TEST_ASSERT(parsedOld.has_value() && parsedNew.has_value(), "Both keys parse successfully");
+	TEST_ASSERT(parsedOld->second == oldUuid, "Old key instance ID matches");
+	TEST_ASSERT(parsedNew->second == newUuid, "New key instance ID matches");
+
+	std::cout << "  PASS: test_redis_overlapping_restarts_isolated_keys" << std::endl;
+}
+
+// Test 36: Bootstrap wait loop terminates immediately upon shutdown cancellation signal
+static void test_redis_bootstrap_shutdown_cancellation() {
+	// 1. Pre-set shutdown signal aborts ScheduleRedisBootstrap immediately without entering wait loop
+	{
+		TestMicroService svc("owprov");
+		svc.BootstrapShutdown_ = true;
+		auto start = std::chrono::steady_clock::now();
+		svc.ScheduleRedisBootstrap();
+		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
+
+		TEST_ASSERT(elapsedMs < 100, "ScheduleRedisBootstrap with BootstrapShutdown_ must return immediately");
+		TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after cancelled bootstrap");
+		TEST_ASSERT(!svc.RedisBootstrapDone_, "RedisBootstrapDone_ must NOT be true when cancelled, preserving ability to bootstrap later");
+	}
+
+	// 2. StopSubSystemServers called while a real ScheduleRedisBootstrap() worker is active
+	//    in BootstrapThread_ signals BootstrapShutdown_, aborts the 5s Kafka wait loop,
+	//    cancels the bootstrap, and joins the thread cleanly without hanging.
+	{
+		TestMicroService svc("owprov");
+		svc.SetConfigBool("openwifi.kafka.enable", true);
+		svc.SetConfigInt("openwifi.service.bootstrap.kafka_wait_ms", 5000);
+
+		// Prepare a snapshot in MockRedisServer to verify snapshot load is skipped on cancellation
+		std::vector<Types::MicroServiceMeta> snapshot;
+		snapshot.push_back({
+			.InstanceId = "owgw-cancelled-1",
+			.Id = 1,
+			.Type = "owgw",
+			.PrivateEndPoint = "https://owgw-internal:17004",
+			.PublicEndPoint = "https://owgw.example.com:16004",
+			.AccessKey = "key-cancel",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		});
+		MockRedisServer mockRedis(snapshot);
+		svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+		svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+		// Enable Kafka with unassigned broadcast consumer and long wait timeout
+		KafkaManager()->KafkaEnabled_ = true;
+		KafkaManager()->BroadcastConsumer().Running_ = true;
+		KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+		svc.BootstrapShutdown_ = false;
+		svc.BootstrapInProgress_ = false;
+		svc.RedisBootstrapDone_ = false;
+
+		auto start = std::chrono::steady_clock::now();
+
+		// Spawn real production bootstrap worker into BootstrapThread_
+		svc.BootstrapThread_ = std::thread([&svc]() {
+			try {
+				svc.ScheduleRedisBootstrap();
+			} catch (...) {
+			}
+		});
+
+		// Wait until ScheduleRedisBootstrap has started and entered the Kafka wait loop
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		while (!svc.IsBootstrapInProgress() &&
+		       std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		TEST_ASSERT(svc.IsBootstrapInProgress(),
+		            "Bootstrap worker must enter in-progress state");
+
+		// Brief pause to ensure the worker is blocked in WaitForPartitionAssignment
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+		// Invoke production shutdown sequence while the real bootstrap worker is active
+		svc.StopSubSystemServers();
+
+		auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
+
+		// Reset KafkaManager state
+		KafkaManager()->KafkaEnabled_ = false;
+		KafkaManager()->BroadcastConsumer().Running_ = false;
+		KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+		// Verify production shutdown contract:
+		// - BootstrapThread_ must be joined by StopSubSystemServers
+		// - In-progress and done flags must be reset
+		// - Wait loop must have aborted early (< 1000ms instead of 5000ms timeout)
+		// - Snapshot must NOT have been loaded into registry
+		TEST_ASSERT(!svc.BootstrapThread_.joinable(),
+		            "BootstrapThread_ must be joined by StopSubSystemServers");
+		TEST_ASSERT(!svc.IsBootstrapInProgress(),
+		            "BootstrapInProgress_ must be reset after StopSubSystemServers");
+		TEST_ASSERT(!svc.RedisBootstrapDone_,
+		            "RedisBootstrapDone_ must be reset after StopSubSystemServers");
+		TEST_ASSERT(elapsedMs < 1000,
+		            "StopSubSystemServers must abort 5s wait loop and join cleanly (< 1000ms)");
+		TEST_ASSERT(svc.GetServiceInstances("owgw").empty(),
+		            "Cancelled bootstrap must not populate service registry from Redis");
+	}
+
+	std::cout << "  PASS: test_redis_bootstrap_shutdown_cancellation" << std::endl;
+}
+
+// Test 37: Kafka partition assignment timeout does not block bootstrap; proceeds to load Redis
+static void test_redis_bootstrap_kafka_timeout_fallback_to_redis() {
+	TestMicroService svc("owprov");
+	auto now = Utils::Now();
+
+	// 1. Prepare Redis snapshot in MockRedisServer
+	std::vector<Types::MicroServiceMeta> snapshot;
+	snapshot.push_back({
+		.InstanceId = "owgw-fallback-1",
+		.Id = 1,
+		.Type = "owgw",
+		.PrivateEndPoint = "https://owgw-internal:17004",
+		.PublicEndPoint = "https://owgw.example.com:16004",
+		.AccessKey = "key-fb",
+		.Version = "1.0.0",
+		.LastUpdate = now - 5
+	});
+
+	MockRedisServer mockRedis(snapshot);
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	// 2. Enable Kafka with unassigned BroadcastConsumer and short wait timeout (100ms)
+	svc.SetConfigBool("openwifi.kafka.enable", true);
+	svc.SetConfigInt("openwifi.service.bootstrap.kafka_wait_ms", 100);
+
+	KafkaManager()->KafkaEnabled_ = true;
+	KafkaManager()->BroadcastConsumer().Running_ = true;
+	KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+	svc.BootstrapShutdown_ = false;
+	svc.BootstrapInProgress_ = false;
+	svc.RedisBootstrapDone_ = false;
+
+	auto start = std::chrono::steady_clock::now();
+	svc.ScheduleRedisBootstrap();
+	auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - start).count();
+
+	// Reset KafkaManager state
+	KafkaManager()->KafkaEnabled_ = false;
+	KafkaManager()->BroadcastConsumer().Running_ = false;
+	KafkaManager()->BroadcastConsumer().Assigned_ = false;
+
+	// Must wait approximately 100ms for Kafka partition assignment before timing out and falling back
+	TEST_ASSERT(elapsedMs >= 80, "Must wait for Kafka partition assignment timeout (>= 80ms)");
+	TEST_ASSERT(elapsedMs < 1000, "ScheduleRedisBootstrap must not block indefinitely (< 1000ms)");
+	TEST_ASSERT(!svc.BootstrapInProgress_, "BootstrapInProgress_ must be false after completion");
+	TEST_ASSERT(svc.RedisBootstrapDone_, "RedisBootstrapDone_ must be marked true after fallback");
+
+	// Verify snapshot from MockRedisServer was loaded into registry after fallback
+	auto instances = svc.GetServiceInstances("owgw");
+	TEST_ASSERT(instances.size() == 1, "Snapshot instance loaded into registry after fallback");
+	TEST_ASSERT(instances.find("owgw-fallback-1") != instances.end(), "owgw-fallback-1 present");
+
+	std::cout << "  PASS: test_redis_bootstrap_kafka_timeout_fallback_to_redis" << std::endl;
+}
+
+// Test 38: Unreachable Redis does not disrupt Kafka event submission
+//
+// Verifies the isolation contract required by issue #112:
+//   - RefreshRedisRegistration() and DeleteRedisRegistration() degrade gracefully
+//     without throwing when Redis is unavailable.
+//   - KafkaManager::PostMessage() still submits EVENT_JOIN, EVENT_KEEP_ALIVE, and
+//     EVENT_LEAVE to the producer queue even when Redis is unavailable.
+//
+// Strategy: enable Kafka (so PostMessage gates open) but do NOT start the producer
+// worker thread. The Poco::NotificationQueue in KafkaProducer::ProducerThr_ then
+// acts as an in-process spy: Produce() enqueues synchronously without any real
+// broker connection. We drive the EventBusManager::run() lifecycle sequence inline,
+// then drain Queue_ and assert all 3 event submissions arrived.
+static void test_redis_failure_isolation_preserves_kafka_events() {
+	TestMicroService svc("owprov");
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", 59999); // Unreachable port
+	svc.SetConfigInt("openwifi.redis.timeout", 50);
+
+	// Enable Kafka so PostMessage routes to ProducerThr_.Produce().
+	// Do NOT start the producer worker thread — Queue_ remains as our spy.
+	KafkaManager()->KafkaEnabled_ = true;
+	KafkaManager()->ProducerThr_.Running_ = false;
+	KafkaManager()->ProducerThr_.Queue_.clear();
+
+	// Drive the EventBusManager::run() event lifecycle inline.
+	// All three Redis calls degrade gracefully (connection refused, logged only).
+	// All three KafkaManager::PostMessage calls must still enqueue to the producer queue.
+	//
+	//   EventBusManager::run() start:  RefreshRedisRegistration() + PostMessage(EVENT_JOIN)
+	//   EventBusManager::run() loop:   RefreshRedisRegistration() + PostMessage(EVENT_KEEP_ALIVE)
+	//   EventBusManager::run() exit:   DeleteRedisRegistration()  + PostMessage(EVENT_LEAVE)
+	{
+		svc.RefreshRedisRegistration();
+		auto msg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN);
+		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS,
+		                            MicroServicePrivateEndPoint(), msg, false);
+	}
+	{
+		svc.RefreshRedisRegistration();
+		auto msg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE);
+		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS,
+		                            MicroServicePrivateEndPoint(), msg, false);
+	}
+	{
+		svc.DeleteRedisRegistration();
+		auto msg = MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_LEAVE);
+		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS,
+		                            MicroServicePrivateEndPoint(), msg, false);
+	}
+
+	// Drain the producer queue and collect every submitted notification
+	std::vector<std::string> submitted;
+	while (KafkaManager()->ProducerThr_.Queue_.size() > 0) {
+		Poco::AutoPtr<Poco::Notification> note(
+			KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
+		if (auto km = dynamic_cast<KafkaMessage *>(note.get())) {
+			submitted.push_back(km->Payload());
+		}
+	}
+
+	// Reset KafkaManager spy state
+	KafkaManager()->KafkaEnabled_ = false;
+	KafkaManager()->ProducerThr_.Queue_.clear();
+
+	// Assert all 3 Kafka events were actually submitted via PostMessage even though Redis was down
+	TEST_ASSERT(submitted.size() == 3,
+	            "Exactly 3 Kafka messages must be submitted via PostMessage when Redis is unavailable");
+
+	bool hasJoin = false, hasKeepAlive = false, hasLeave = false;
+	for (const auto &payload : submitted) {
+		if (payload.find("keep-alive") != std::string::npos) {
+			hasKeepAlive = true;
+		} else if (payload.find("leave") != std::string::npos) {
+			hasLeave = true;
+		} else if (payload.find("join") != std::string::npos) {
+			hasJoin = true;
+		}
+	}
+	TEST_ASSERT(hasJoin,
+	            "EVENT_JOIN submitted via KafkaManager::PostMessage when Redis was unavailable");
+	TEST_ASSERT(hasKeepAlive,
+	            "EVENT_KEEP_ALIVE submitted via KafkaManager::PostMessage when Redis was unavailable");
+	TEST_ASSERT(hasLeave,
+	            "EVENT_LEAVE submitted via KafkaManager::PostMessage when Redis was unavailable");
+
+	std::cout << "  PASS: test_redis_failure_isolation_preserves_kafka_events" << std::endl;
+}
+
+// Test 39: Service-registry TTL defaults to 60s independently of application cache TTL
+static void test_redis_service_registry_ttl_independent_of_cache_ttl() {
+	MockRedisServer mockRedis;
+	TestMicroService svc("owprov");
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	std::string key = ServiceRegistry::MakeKey("owprov", svc.InstanceId());
+
+	// Case 1: openwifi.redis.cache.ttl is configured to 300s, but
+	// openwifi.redis.service_registry.ttl is absent (missing).
+	// RefreshRedisRegistration must use the 60s service-registry default,
+	// NOT inherit the 300s application cache TTL.
+	svc.SetConfigInt("openwifi.redis.cache.ttl", 300);
+	svc.RemoveConfig("openwifi.redis.service_registry.ttl");
+
+	svc.RefreshRedisRegistration();
+
+	TEST_ASSERT(mockRedis.LastSetTTL(key) == 60,
+	            "Missing service_registry.ttl must default to 60s, independent of openwifi.redis.cache.ttl");
+
+	// Case 2: When openwifi.redis.service_registry.ttl is explicitly set, it is respected.
+	svc.SetConfigInt("openwifi.redis.service_registry.ttl", 120);
+	svc.RefreshRedisRegistration();
+
+	TEST_ASSERT(mockRedis.LastSetTTL(key) == 120,
+	            "Explicit openwifi.redis.service_registry.ttl (120s) must be respected");
+
+	// Case 3: When openwifi.redis.service_registry.ttl is configured to an unsafe value (< 20s),
+	// it falls back to the safe default 60s.
+	svc.SetConfigInt("openwifi.redis.service_registry.ttl", 15);
+	svc.RefreshRedisRegistration();
+	TEST_ASSERT(mockRedis.LastSetTTL(key) == 60,
+	            "Unsafe service_registry.ttl (< 20s) must fall back to 60s default");
+
+	std::cout << "  PASS: test_redis_service_registry_ttl_independent_of_cache_ttl" << std::endl;
+}
+
+// Test 40: LoadAll distinguishes Redis command failures from invalid snapshot data
+static void test_redis_snapshot_distinguishes_redis_failures_from_invalid_data() {
+	// Case 1: Redis command failure on GET marks snapshot as incomplete
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-1",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key1",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.FailOnGet(true, "ERR command execution failed");
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true when Redis GET command fails");
+		TEST_ASSERT(loaded.empty(), "No entries should be successfully loaded when Redis GET fails");
+	}
+
+	// Case 2: Malformed or invalid JSON entries are skipped WITHOUT marking snapshot incomplete
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-valid",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key-valid",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+
+		// Insert a malformed JSON record
+		mockRedis.Set("service-registry:owgw:corrupted-inst", "{ not valid json at all }");
+		// Insert an incomplete record missing required fields
+		mockRedis.Set("service-registry:owfms:incomplete-inst", "{\"instanceId\":\"incomplete-inst\"}");
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(!incomplete, "LoadAll must NOT set IncompleteSnapshot=true for invalid or malformed data records");
+		TEST_ASSERT(loaded.size() == 1, "LoadAll must successfully load the valid entry while skipping malformed records");
+		TEST_ASSERT(loaded[0].InstanceId == "owsec-inst-valid", "Loaded entry must match valid record");
+	}
+
+	// Case 3: Network/connect failure also marks snapshot as incomplete
+	{
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", 59999, "", 0, 50, nullptr, &incomplete);
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true on unreachable Redis");
+		TEST_ASSERT(loaded.empty(), "LoadAll returns empty on unreachable Redis");
+	}
+
+	// Case 4: First GET succeeds, later GET fails -> Result is partial and IncompleteSnapshot == true
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-first",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key1",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			},
+			{
+				.InstanceId = "owsec-inst-second",
+				.Id = 2,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17002",
+				.PublicEndPoint = "https://owsec.example.com:16002",
+				.AccessKey = "key2",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+		// Allow first GET to succeed, fail on second GET
+		mockRedis.FailOnGetAfter(1, "ERR redis command failure on second GET");
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true when a later GET fails");
+		TEST_ASSERT(loaded.size() == 1, "LoadAll must return partial snapshot containing entries loaded before failure");
+		TEST_ASSERT(loaded[0].InstanceId == "owsec-inst-first" || loaded[0].InstanceId == "owsec-inst-second",
+		            "Partial entry must be one of the snapshot items");
+	}
+
+	// Case 5: Malformed SCAN reply marks snapshot as incomplete
+	{
+		std::vector<Types::MicroServiceMeta> snapshot = {
+			{
+				.InstanceId = "owsec-inst-scan",
+				.Id = 1,
+				.Type = "owsec",
+				.PrivateEndPoint = "https://owsec-internal:17001",
+				.PublicEndPoint = "https://owsec.example.com:16001",
+				.AccessKey = "key1",
+				.Version = "1.0.0",
+				.LastUpdate = Utils::Now()
+			}
+		};
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetMalformedScan(true);
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(incomplete, "LoadAll must set IncompleteSnapshot=true on malformed SCAN reply");
+		TEST_ASSERT(loaded.empty(), "LoadAll must return empty on malformed SCAN reply");
+	}
+
+	std::cout << "  PASS: test_redis_snapshot_distinguishes_redis_failures_from_invalid_data" << std::endl;
+}
+
+// Test 41: Multi-page SCAN with intermediate pages and cancellation
+static void test_redis_snapshot_multipage_scan_and_intermediate_pages() {
+	std::vector<Types::MicroServiceMeta> snapshot = {
+		{
+			.InstanceId = "owgw-page-1",
+			.Id = 1,
+			.Type = "owgw",
+			.PrivateEndPoint = "https://owgw-internal:17004",
+			.PublicEndPoint = "https://owgw.example.com:16004",
+			.AccessKey = "key1",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		},
+		{
+			.InstanceId = "owgw-page-2",
+			.Id = 2,
+			.Type = "owgw",
+			.PrivateEndPoint = "https://owgw-internal:17004",
+			.PublicEndPoint = "https://owgw.example.com:16004",
+			.AccessKey = "key2",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		},
+		{
+			.InstanceId = "owsec-page-3",
+			.Id = 3,
+			.Type = "owsec",
+			.PrivateEndPoint = "https://owsec-internal:17001",
+			.PublicEndPoint = "https://owsec.example.com:16001",
+			.AccessKey = "key3",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		}
+	};
+
+	// Case 1: Multi-page SCAN traversal across 3 batches (1 key per page)
+	{
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetScanPageSize(1); // 1 key per batch, traversing non-zero cursors until 0
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(!incomplete, "Multi-page SCAN should complete without marking incomplete");
+		TEST_ASSERT(loaded.size() == 3, "Multi-page SCAN must load all 3 entries across pages");
+	}
+
+	// Case 2: Intermediate empty SCAN page (cursor != 0 with empty key list)
+	{
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetScanPageSize(0);
+		mockRedis.SetEmptyIntermediateScanPage(true); // page 1 returns cursor "42" with 0 keys, page 2 returns all keys
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(!incomplete, "Empty intermediate page should not mark snapshot incomplete");
+		TEST_ASSERT(loaded.size() == 3, "All entries loaded after traversing empty intermediate page");
+	}
+
+	// Case 3: Cancellation after processing the first batch refrains from issuing subsequent SCAN requests
+	{
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetScanPageSize(1); // 1 key per batch, across 3 batches
+
+		std::atomic_bool cancelSignal = false;
+		// Cancel during GET of the first page's entry so cancellation is set
+		// after the first page is processed, before the next SCAN request begins.
+		mockRedis.SetHookOnGet([&cancelSignal](const std::string &/*key*/) {
+			cancelSignal = true;
+		});
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, &cancelSignal, &incomplete);
+
+		TEST_ASSERT(loaded.size() == 1, "Only first batch should be loaded when cancellation occurs before second SCAN");
+		TEST_ASSERT(mockRedis.ScanRequestCount() == 1, "Loader must refrain from sending subsequent SCAN requests after cancellation");
+	}
+
+	std::cout << "  PASS: test_redis_snapshot_multipage_scan_and_intermediate_pages" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -1399,7 +2751,23 @@ int main() {
 	test_legacy_peers_distinct_endpoints_same_numeric_id();
 	test_uuid_in_id_field_lifecycle();
 	test_production_dual_identity_wire_format_lifecycle();
+	test_redis_service_registry_key_helpers();
+	test_redis_service_registry_serialization_deserialization();
+	test_redis_bootstrap_snapshot_seeding();
+	test_redis_bootstrap_clock_skew_tolerance_and_invalid_ignored();
+	test_redis_bootstrap_race_concurrent_kafka_leave_prevents_resurrection();
+	test_redis_bootstrap_race_newer_kafka_event_preserved();
+	test_redis_bootstrap_kafka_events_continue_after_bootstrap();
+	test_redis_lifecycle_methods_graceful_when_disabled_or_unavailable();
+	test_redis_overlapping_restarts_isolated_keys();
+	test_redis_bootstrap_shutdown_cancellation();
+	test_redis_bootstrap_kafka_timeout_fallback_to_redis();
+	test_redis_failure_isolation_preserves_kafka_events();
+	test_redis_service_registry_ttl_independent_of_cache_ttl();
+	test_redis_snapshot_distinguishes_redis_failures_from_invalid_data();
+	test_redis_snapshot_multipage_scan_and_intermediate_pages();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;
 }
+

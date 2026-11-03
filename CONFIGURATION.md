@@ -258,3 +258,77 @@ logging.level = information
 logging.asynch = true
 logging.websocket = false
 ```
+
+### Redis Service Registry Parameters
+For Phase 3 horizontal scaling, microservices publish an instance registration to Redis to enable fast bootstrap snapshot seeding when other service replicas start up.
+```properties
+openwifi.redis.enable = true
+openwifi.redis.host =
+openwifi.redis.port = 6379
+openwifi.redis.password =
+openwifi.redis.db = 0
+openwifi.redis.timeout = 2000
+openwifi.redis.service_registry.ttl = 60
+openwifi.service.bootstrap.kafka_wait_ms = 5000
+```
+
+#### openwifi.redis.enable
+Enables Redis service registration and bootstrap snapshot loading. Defaults to `true` when host is configured.
+
+#### openwifi.redis.host
+The hostname or IP address of the Redis server. If left empty, Redis registration and bootstrap snapshotting are gracefully skipped, and service discovery relies entirely on live Kafka events.
+
+#### openwifi.redis.port
+The port on which the Redis server is listening. Default is `6379`.
+
+#### openwifi.redis.password
+Optional Redis authentication password. Redis credentials are treated as sensitive and are never printed in logs. Default is empty.
+
+#### openwifi.redis.db
+The Redis logical database index. Default is `0`.
+
+#### openwifi.redis.timeout
+Socket connect and receive timeout in milliseconds. Default is `2000`.
+
+#### openwifi.redis.service_registry.ttl
+TTL in seconds for the service registry key (`SET ... EX <ttl>`). Default is `60` seconds. Active instances refresh this key on keep-alive intervals (every 10 seconds). Must be at least 20 seconds (at least $2\times$ the heartbeat interval); values less than 20 seconds trigger a warning and automatically fall back to the 60-second default. This setting is strictly independent of any application-level cache TTL.
+
+#### openwifi.service.bootstrap.kafka_wait_ms
+Maximum time in milliseconds the service waits for Kafka broadcast partition assignment before proceeding with Redis snapshot bootstrap. Default is `5000`.
+
+---
+
+## Shared Redis Service-Registration Contract
+OWPROV implements this shared Redis service-registration contract. Other OpenWiFi microservices must adopt the same contract separately to participate in Redis-backed startup discovery.
+
+### 1. Redis Key Format
+```text
+service-registry:<service_type>:<instance_id>
+```
+- `<service_type>`: Microservice name normalized to lowercase (e.g. `owprov`, `owgw`, `owsec`).
+- `<instance_id>`: Unique runtime instance identifier string (e.g. UUID v4 or `<slot-id>-<uuid>`).
+- Prefix: Fixed `service-registry:` namespace prefix.
+
+### 2. JSON Payload Specification
+The Redis key value is stored as a UTF-8 encoded JSON object with the following fields:
+
+| Field | Type | Validation / Requirement | Description |
+|---|---|---|---|
+| `instanceId` | String | Required, non-empty | Unique instance ID; must match `<instance_id>` in the key. |
+| `type` | String | Required, non-empty | Service type normalized to lowercase; must match `<service_type>` in the key. |
+| `privateEndPoint` | String | Required, non-empty | Internal REST API endpoint URL (e.g. `https://owprov:17004`). |
+| `publicEndPoint` | String | Required, non-empty | Public external REST endpoint URL (e.g. `https://ucentral.example.com:16005`). |
+| `accessKey` | String | Required, non-empty | Inter-service authentication token or access secret. |
+| `lastUpdate` | Integer | Required, positive integer | POSIX timestamp in **seconds** (> 0). Values $\le 0$ are rejected. |
+| `version` | String | Optional | Service version string (e.g. `1.0.0`). Defaults to empty string if omitted. |
+
+### 3. Lifecycle Operations
+- **Startup / Keep-Alive**: Instances publish their JSON registration using `SET service-registry:<type>:<id> <json> EX <ttl>` (default TTL: 60s). Registrations must be refreshed periodically on keep-alive cycles (recommended every 5 to 10 seconds, or at most half the TTL).
+- **Graceful Shutdown**: On graceful termination, the instance deletes its key using `DEL service-registry:<type>:<id>`.
+- **Startup Bootstrap**: When a microservice boots up, it discovers peer instances via `SCAN 0 MATCH service-registry:* COUNT 100` followed by `GET <key>`.
+
+### 4. Compatibility Rules
+- **Forward Compatibility**: Consumers must ignore unrecognized JSON properties to allow safe schema evolution across versions.
+- **Key-Payload Consistency**: Consumers validate that payload `type` and `instanceId` match the corresponding segments in the Redis key. In case of mismatch, the entry is rejected.
+- **Graceful Fallback**: If Redis is unavailable or returns an error during snapshot loading, the snapshot is marked incomplete and the service relies on live Kafka events on the `service_events` topic for discovery.
+

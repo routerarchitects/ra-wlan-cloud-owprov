@@ -14,6 +14,7 @@
 #include <iostream>
 #include <optional>
 #include <random>
+#include <unordered_set>
 #include <vector>
 
 // This must be defined for poco_debug and poco_trace macros to function.
@@ -132,6 +133,10 @@ namespace OpenWifi {
 		void LoadConfigurationFile();
 		void Reload();
 		void LoadMyConfig();
+		void BootstrapFromRedisSnapshot();
+		void ScheduleRedisBootstrap();
+		void RefreshRedisRegistration();
+		void DeleteRedisRegistration();
 		void InitializeInstanceIdentity(const std::string &ConfiguredSlot);
 		void InitializeInstanceIdentityFromConfig();
 		void ReloadInstanceIdentityFromConfigFile();
@@ -243,6 +248,12 @@ namespace OpenWifi {
 		Poco::ThreadPool TimerPool_{"timer:pool", 2, 32};
         ArgVec Args_;
 		uint64_t ServiceEventsWatcherId_ = 0;
+
+		bool BootstrapInProgress_ = false;
+		bool RedisBootstrapDone_ = false;
+		std::atomic_bool BootstrapShutdown_ = false;
+		std::unordered_set<std::string> DepartedDuringBootstrap_;
+		std::thread BootstrapThread_;
 	};
 
 	inline MicroService *MicroService::instance_ = nullptr;

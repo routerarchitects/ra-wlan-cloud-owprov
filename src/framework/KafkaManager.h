@@ -81,6 +81,8 @@ namespace OpenWifi {
 		[[nodiscard]] bool IsRunning() const { return Running_; }
 		[[nodiscard]] std::set<std::string> Topics() const;
 		[[nodiscard]] std::vector<std::string> Subscriptions() const;
+		[[nodiscard]] bool HasPartitionAssignment() const { return Assigned_; }
+		bool WaitForPartitionAssignment(uint64_t TimeoutMs = 5000) const;
 
 	  private:
 		KafkaConsumerType 		ConsumerType_ = KafkaConsumerType::Group;
@@ -89,6 +91,7 @@ namespace OpenWifi {
 		Types::NotifyTable 		Notifiers_;
 		Poco::Thread 			Worker_;
 		mutable std::atomic_bool Running_ = false;
+		mutable std::atomic_bool Assigned_ = false;
 		uint64_t 				FunctionId_ = 1;
 		std::unique_ptr<cppkafka::Consumer> 			Consumer_;
 		std::set<std::string>	Topics_;

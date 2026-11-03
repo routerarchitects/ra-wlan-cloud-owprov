@@ -61,4 +61,7 @@ namespace OpenWifi {
 	std::string MicroServiceRuntimeIncarnationId();
 	std::string MicroServiceSlotId();
 	std::string MicroServiceRuntimeInstanceId();
+	void MicroServiceRefreshRedisRegistration();
+	void MicroServiceDeleteRedisRegistration();
+	void MicroServiceBootstrapFromRedisSnapshot();
 } // namespace OpenWifi
