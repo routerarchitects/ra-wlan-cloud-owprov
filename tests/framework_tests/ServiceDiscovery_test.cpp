@@ -2140,9 +2140,14 @@ static void test_redis_bootstrap_shutdown_cancellation() {
 		});
 
 		// Wait until ScheduleRedisBootstrap has started and entered the Kafka wait loop
-		while (!svc.BootstrapInProgress_) {
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		while (!svc.IsBootstrapInProgress() &&
+		       std::chrono::steady_clock::now() < deadline) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		}
+		TEST_ASSERT(svc.IsBootstrapInProgress(),
+		            "Bootstrap worker must enter in-progress state");
+
 		// Brief pause to ensure the worker is blocked in WaitForPartitionAssignment
 		std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
@@ -2164,7 +2169,7 @@ static void test_redis_bootstrap_shutdown_cancellation() {
 		// - Snapshot must NOT have been loaded into registry
 		TEST_ASSERT(!svc.BootstrapThread_.joinable(),
 		            "BootstrapThread_ must be joined by StopSubSystemServers");
-		TEST_ASSERT(!svc.BootstrapInProgress_,
+		TEST_ASSERT(!svc.IsBootstrapInProgress(),
 		            "BootstrapInProgress_ must be reset after StopSubSystemServers");
 		TEST_ASSERT(!svc.RedisBootstrapDone_,
 		            "RedisBootstrapDone_ must be reset after StopSubSystemServers");
