@@ -133,12 +133,23 @@ namespace OpenWifi {
 			Store_[ServiceRegistry::MakeKey(meta.Type, meta.InstanceId)] = ServiceRegistry::Serialize(meta);
 		}
 
+		int LastSetTTL(const std::string &key = "") {
+			std::lock_guard G(Mutex_);
+			if (!key.empty()) {
+				auto it = TTLs_.find(key);
+				return (it != TTLs_.end()) ? it->second : -1;
+			}
+			return LastTTL_;
+		}
+
 	  private:
 		std::atomic_bool Running_;
 		Poco::Net::ServerSocket Socket_;
 		uint16_t Port_ = 0;
 		std::mutex Mutex_;
 		std::map<std::string, std::string> Store_;
+		int LastTTL_ = -1;
+		std::map<std::string, int> TTLs_;
 		std::thread Worker_;
 
 		static bool SendAll(Poco::Net::StreamSocket &sock, const std::string &data) {
@@ -238,6 +249,13 @@ namespace OpenWifi {
 									if (args.size() > 2) {
 										Store_[args[1]] = args[2];
 									}
+									if (args.size() >= 5 && Poco::toUpper(args[3]) == "EX") {
+										try {
+											int ttlVal = std::stoi(args[4]);
+											TTLs_[args[1]] = ttlVal;
+											LastTTL_ = ttlVal;
+										} catch (...) {}
+									}
 									std::string resp = "+OK\r\n";
 									if (!SendAll(client, resp)) break;
 								} else if (cmd == "DEL") {
@@ -304,6 +322,13 @@ namespace OpenWifi {
 
 		void SetConfigBool(const std::string &Key, bool Val) {
 			config().setBool(Key, Val);
+		}
+
+		void RemoveConfig(const std::string &Key) {
+			config().remove(Key);
+			if (config().hasProperty(Key)) {
+				throw std::runtime_error("Failed to remove test config: " + Key);
+			}
 		}
 
 		void SetBootstrapInProgress(bool inProgress) {
@@ -2329,6 +2354,37 @@ static void test_redis_failure_isolation_preserves_kafka_events() {
 	std::cout << "  PASS: test_redis_failure_isolation_preserves_kafka_events" << std::endl;
 }
 
+// Test 39: Service-registry TTL defaults to 60s independently of application cache TTL
+static void test_redis_service_registry_ttl_independent_of_cache_ttl() {
+	MockRedisServer mockRedis;
+	TestMicroService svc("owprov");
+	svc.SetConfig("openwifi.redis.host", "127.0.0.1");
+	svc.SetConfigInt("openwifi.redis.port", mockRedis.Port());
+
+	std::string key = ServiceRegistry::MakeKey("owprov", svc.InstanceId());
+
+	// Case 1: openwifi.redis.cache.ttl is configured to 300s, but
+	// openwifi.redis.service_registry.ttl is absent (missing).
+	// RefreshRedisRegistration must use the 60s service-registry default,
+	// NOT inherit the 300s application cache TTL.
+	svc.SetConfigInt("openwifi.redis.cache.ttl", 300);
+	svc.RemoveConfig("openwifi.redis.service_registry.ttl");
+
+	svc.RefreshRedisRegistration();
+
+	TEST_ASSERT(mockRedis.LastSetTTL(key) == 60,
+	            "Missing service_registry.ttl must default to 60s, independent of openwifi.redis.cache.ttl");
+
+	// Case 2: When openwifi.redis.service_registry.ttl is explicitly set, it is respected.
+	svc.SetConfigInt("openwifi.redis.service_registry.ttl", 120);
+	svc.RefreshRedisRegistration();
+
+	TEST_ASSERT(mockRedis.LastSetTTL(key) == 120,
+	            "Explicit openwifi.redis.service_registry.ttl (120s) must be respected");
+
+	std::cout << "  PASS: test_redis_service_registry_ttl_independent_of_cache_ttl" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -2370,6 +2426,7 @@ int main() {
 	test_redis_bootstrap_shutdown_cancellation();
 	test_redis_bootstrap_kafka_timeout_fallback_to_redis();
 	test_redis_failure_isolation_preserves_kafka_events();
+	test_redis_service_registry_ttl_independent_of_cache_ttl();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;

@@ -617,7 +617,7 @@ namespace OpenWifi {
             std::string password = ConfigGetString("openwifi.redis.password", "");
             int db = static_cast<int>(ConfigGetInt("openwifi.redis.db", 0));
             int timeoutMs = static_cast<int>(ConfigGetInt("openwifi.redis.timeout", 2000));
-            int ttl = static_cast<int>(ConfigGetInt("openwifi.redis.service_registry.ttl", ConfigGetInt("openwifi.redis.cache.ttl", 60)));
+            int ttl = static_cast<int>(ConfigGetInt("openwifi.redis.service_registry.ttl", 60));
             if (ttl <= 10) {
                 ttl = 60;
             }

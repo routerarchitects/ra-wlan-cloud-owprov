@@ -12,6 +12,14 @@ namespace OpenWifi {
 	void EventBusManager::run() {
 		Running_ = true;
 		Utils::SetThreadName("fmwk:EventMgr");
+
+		// Redis registration is refreshed before Kafka JOIN/KEEP_ALIVE, and deleted
+		// before LEAVE, to keep the shared snapshot consistent when Redis is available.
+		//
+		// Redis failures are caught and logged, allowing Kafka event submission to
+		// proceed afterward. These calls remain synchronous, so slow Redis responses
+		// can delay Kafka events. openwifi.redis.timeout configures connection and
+		// receive timeouts, not a strict end-to-end operation deadline.
 		MicroServiceRefreshRedisRegistration();
 		auto Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN));
 		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(), Msg,
