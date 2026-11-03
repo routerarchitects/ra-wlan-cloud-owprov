@@ -14,6 +14,7 @@
 #include "Poco/JSON/Object.h"
 #include "Poco/JSON/Parser.h"
 #include "Poco/JSON/Stringifier.h"
+#include "Poco/String.h"
 #include "fmt/format.h"
 
 #ifdef USE_POCO_REDIS
@@ -54,8 +55,6 @@ constexpr const char *FIELD_LAST_UPDATE   = "lastUpdate";
 constexpr int SCAN_COUNT = 100;
 
 } // anonymous namespace
-
-#include "Poco/String.h"
 
 std::string MakeKey(const std::string &ServiceType, const std::string &InstanceId) {
     return fmt::format("{}{}:{}", KEY_PREFIX, Poco::toLower(ServiceType), InstanceId);
@@ -114,18 +113,35 @@ Deserialize(const std::string &Json) {
         auto Obj = Val.extract<Poco::JSON::Object::Ptr>();
         if (!Obj) return std::nullopt;
 
-        Types::MicroServiceMeta Meta;
-        Meta.InstanceId     = Obj->optValue<std::string>(FIELD_INSTANCE_ID, "");
-        Meta.Type           = Poco::toLower(Obj->optValue<std::string>(FIELD_TYPE, ""));
-        Meta.PrivateEndPoint = Obj->optValue<std::string>(FIELD_PRIVATE_EP, "");
-        Meta.PublicEndPoint  = Obj->optValue<std::string>(FIELD_PUBLIC_EP, "");
-        Meta.AccessKey      = Obj->optValue<std::string>(FIELD_ACCESS_KEY, "");
-        Meta.Version        = Obj->optValue<std::string>(FIELD_VERSION, "");
-        int64_t rawLastUpdate = Obj->optValue<Poco::Int64>(FIELD_LAST_UPDATE, 0);
-        if (rawLastUpdate <= 0) {
-            return std::nullopt;
+        // Strict type and presence checks matching the Shared Redis Contract:
+        // instanceId, type, privateEndPoint, publicEndPoint, accessKey must be non-empty JSON strings.
+        for (const char *field : {FIELD_INSTANCE_ID, FIELD_TYPE, FIELD_PRIVATE_EP, FIELD_PUBLIC_EP, FIELD_ACCESS_KEY}) {
+            if (!Obj->has(field) || Obj->isNull(field)) return std::nullopt;
+            if (!Obj->get(field).isString()) return std::nullopt;
         }
-        Meta.LastUpdate     = static_cast<uint64_t>(rawLastUpdate);
+
+        // lastUpdate must be a positive integer (not a string, float, or boolean)
+        if (!Obj->has(FIELD_LAST_UPDATE) || Obj->isNull(FIELD_LAST_UPDATE)) return std::nullopt;
+        auto lastUpdateVar = Obj->get(FIELD_LAST_UPDATE);
+        if (!lastUpdateVar.isInteger()) return std::nullopt;
+        int64_t rawLastUpdate = lastUpdateVar.extract<Poco::Int64>();
+        if (rawLastUpdate <= 0) return std::nullopt;
+
+        Types::MicroServiceMeta Meta;
+        Meta.InstanceId      = Obj->get(FIELD_INSTANCE_ID).extract<std::string>();
+        Meta.Type            = Poco::toLower(Obj->get(FIELD_TYPE).extract<std::string>());
+        Meta.PrivateEndPoint = Obj->get(FIELD_PRIVATE_EP).extract<std::string>();
+        Meta.PublicEndPoint  = Obj->get(FIELD_PUBLIC_EP).extract<std::string>();
+        Meta.AccessKey       = Obj->get(FIELD_ACCESS_KEY).extract<std::string>();
+        Meta.LastUpdate      = static_cast<uint64_t>(rawLastUpdate);
+
+        // Optional version: if present, must be a non-null JSON string
+        if (Obj->has(FIELD_VERSION)) {
+            if (Obj->isNull(FIELD_VERSION)) return std::nullopt;
+            auto versionVar = Obj->get(FIELD_VERSION);
+            if (!versionVar.isString()) return std::nullopt;
+            Meta.Version = versionVar.extract<std::string>();
+        }
 
         // Reject entries missing fields required by Kafka discovery handler
         // (BusMessageReceived requires InstanceId, Type, PrivateEndPoint, PublicEndPoint, and AccessKey)
@@ -325,14 +341,16 @@ LoadAll(const std::string &Host, int Port,
             }
             Cursor = NextCursorBs.value();
 
-            auto KeyArray = ScanReply.get<Poco::Redis::Array>(1);
-            if (KeyArray.isNull()) {
-                poco_warning(Log, "ServiceRegistry: SCAN reply key array is null; snapshot is incomplete.");
+            if (ScanReply.getType(1) != Poco::Redis::RedisType::REDIS_ARRAY) {
+                poco_warning(Log, "ServiceRegistry: SCAN reply second element is not an array; snapshot is incomplete.");
                 redisFailure = true;
                 break;
             }
 
-            for (std::size_t i = 0; i < KeyArray.size(); ++i) {
+            auto KeyArray = ScanReply.get<Poco::Redis::Array>(1);
+            std::size_t numKeys = KeyArray.isNull() ? 0 : KeyArray.size();
+
+            for (std::size_t i = 0; i < numKeys; ++i) {
                 if (CancelSignal && *CancelSignal) {
                     poco_information(Log, "ServiceRegistry: Snapshot load cancelled by shutdown signal.");
                     break;
@@ -415,7 +433,7 @@ LoadAll(const std::string &Host, int Port,
                 }
             }
 
-            if (redisFailure) {
+            if (redisFailure || (CancelSignal && *CancelSignal)) {
                 break;
             }
 

@@ -291,7 +291,7 @@ The Redis logical database index. Default is `0`.
 Socket connect and receive timeout in milliseconds. Default is `2000`.
 
 #### openwifi.redis.service_registry.ttl
-TTL in seconds for the service registry key (`SET ... EX <ttl>`). Default is `60` seconds. Active instances refresh this key on keep-alive intervals. This setting is strictly independent of any application-level cache TTL.
+TTL in seconds for the service registry key (`SET ... EX <ttl>`). Default is `60` seconds. Active instances refresh this key on keep-alive intervals (every 10 seconds). Must be at least 20 seconds (at least $2\times$ the heartbeat interval); values less than 20 seconds trigger a warning and automatically fall back to the 60-second default. This setting is strictly independent of any application-level cache TTL.
 
 #### openwifi.service.bootstrap.kafka_wait_ms
 Maximum time in milliseconds the service waits for Kafka broadcast partition assignment before proceeding with Redis snapshot bootstrap. Default is `5000`.

@@ -3,9 +3,11 @@
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
 //
 
+#include <algorithm>
 #include <any>
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <set>
 #include <string>
@@ -160,6 +162,31 @@ namespace OpenWifi {
 			MalformedScan_ = malformed;
 		}
 
+		void SetScanPageSize(int pageSize) {
+			std::lock_guard G(Mutex_);
+			ScanPageSize_ = pageSize;
+		}
+
+		void SetEmptyIntermediateScanPage(bool enable) {
+			std::lock_guard G(Mutex_);
+			EmptyIntermediatePage_ = enable;
+		}
+
+		void SetHookOnScan(std::function<void(const std::string &cursor)> hook) {
+			std::lock_guard G(Mutex_);
+			ScanHook_ = hook;
+		}
+
+		void SetHookOnGet(std::function<void(const std::string &key)> hook) {
+			std::lock_guard G(Mutex_);
+			GetHook_ = hook;
+		}
+
+		int ScanRequestCount() {
+			std::lock_guard G(Mutex_);
+			return ScanRequestCount_;
+		}
+
 	  private:
 		std::atomic_bool Running_;
 		Poco::Net::ServerSocket Socket_;
@@ -172,6 +199,11 @@ namespace OpenWifi {
 		int FailOnGetAfterCount_ = -1;
 		int GetCount_ = 0;
 		bool MalformedScan_ = false;
+		int ScanPageSize_ = 0;
+		bool EmptyIntermediatePage_ = false;
+		int ScanRequestCount_ = 0;
+		std::function<void(const std::string &cursor)> ScanHook_;
+		std::function<void(const std::string &key)> GetHook_;
 		std::string GetErrMsg_ = "ERR mock redis GET failure";
 		std::thread Worker_;
 
@@ -247,15 +279,42 @@ namespace OpenWifi {
 								std::string cmd = Poco::toUpper(args[0]);
 								if (cmd == "SCAN") {
 									std::lock_guard G(Mutex_);
+									ScanRequestCount_++;
+									std::string inCursor = (args.size() > 1) ? args[1] : "0";
+									if (ScanHook_) {
+										ScanHook_(inCursor);
+									}
 									if (MalformedScan_) {
 										// Malformed reply: only 1 element instead of [cursor, [keys]]
 										std::string resp = "*1\r\n$1\r\n0\r\n";
 										if (!SendAll(client, resp)) break;
 										continue;
 									}
+									if (EmptyIntermediatePage_ && inCursor == "0") {
+										// Intermediate empty page with non-zero cursor "42" and 0 keys
+										std::string resp = "*2\r\n$2\r\n42\r\n*0\r\n";
+										if (!SendAll(client, resp)) break;
+										continue;
+									}
 									std::vector<std::string> keys;
 									for (const auto &[k, _] : Store_) {
 										keys.push_back(k);
+									}
+									if (ScanPageSize_ > 0) {
+										int curIndex = 0;
+										if (inCursor != "0" && inCursor != "42") {
+											try { curIndex = std::stoi(inCursor); } catch (...) {}
+										}
+										int endIndex = std::min(curIndex + ScanPageSize_, static_cast<int>(keys.size()));
+										std::string nextCursor = (endIndex >= static_cast<int>(keys.size())) ? "0" : std::to_string(endIndex);
+										int batchCount = endIndex - curIndex;
+
+										std::string resp = "*2\r\n$" + std::to_string(nextCursor.size()) + "\r\n" + nextCursor + "\r\n*" + std::to_string(batchCount) + "\r\n";
+										for (int idx = curIndex; idx < endIndex; ++idx) {
+											resp += "$" + std::to_string(keys[idx].size()) + "\r\n" + keys[idx] + "\r\n";
+										}
+										if (!SendAll(client, resp)) break;
+										continue;
 									}
 									std::string resp = "*2\r\n$1\r\n0\r\n*" + std::to_string(keys.size()) + "\r\n";
 									for (const auto &k : keys) {
@@ -264,12 +323,15 @@ namespace OpenWifi {
 									if (!SendAll(client, resp)) break;
 								} else if (cmd == "GET") {
 									std::lock_guard G(Mutex_);
+									std::string key = (args.size() > 1) ? args[1] : "";
+									if (GetHook_) {
+										GetHook_(key);
+									}
 									if (FailOnGet_ || (FailOnGetAfterCount_ >= 0 && GetCount_++ >= FailOnGetAfterCount_)) {
 										std::string resp = "-" + GetErrMsg_ + "\r\n";
 										if (!SendAll(client, resp)) break;
 										continue;
 									}
-									std::string key = (args.size() > 1) ? args[1] : "";
 									auto it = Store_.find(key);
 									if (it != Store_.end()) {
 										std::string resp = "$" + std::to_string(it->second.size()) + "\r\n" + it->second + "\r\n";
@@ -1777,6 +1839,31 @@ static void test_redis_service_registry_serialization_deserialization() {
 	TEST_ASSERT(!ServiceRegistry::Deserialize("").has_value(), "Deserialize rejects empty string");
 	TEST_ASSERT(!ServiceRegistry::Deserialize("{malformed-json").has_value(), "Deserialize rejects malformed JSON");
 
+	// Strict JSON field type validation:
+	// 1. Numeric privateEndPoint
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":17004,\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects numeric privateEndPoint");
+
+	// 2. String lastUpdate
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"lastUpdate\":\"123456\"}").has_value(),
+	            "Deserialize rejects string lastUpdate");
+
+	// 3. Numeric instanceId
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":1001,\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects numeric instanceId");
+
+	// 4. Boolean accessKey
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":true,\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects boolean accessKey");
+
+	// 5. Numeric version
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"version\":1,\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects numeric version");
+
+	// 6. Explicit null version
+	TEST_ASSERT(!ServiceRegistry::Deserialize("{\"instanceId\":\"inst-1\",\"type\":\"owgw\",\"privateEndPoint\":\"https://priv\",\"publicEndPoint\":\"https://pub\",\"accessKey\":\"key\",\"version\":null,\"lastUpdate\":123456}").has_value(),
+	            "Deserialize rejects explicit null version");
+
 	std::cout << "  PASS: test_redis_service_registry_serialization_deserialization" << std::endl;
 }
 
@@ -2416,6 +2503,13 @@ static void test_redis_service_registry_ttl_independent_of_cache_ttl() {
 	TEST_ASSERT(mockRedis.LastSetTTL(key) == 120,
 	            "Explicit openwifi.redis.service_registry.ttl (120s) must be respected");
 
+	// Case 3: When openwifi.redis.service_registry.ttl is configured to an unsafe value (< 20s),
+	// it falls back to the safe default 60s.
+	svc.SetConfigInt("openwifi.redis.service_registry.ttl", 15);
+	svc.RefreshRedisRegistration();
+	TEST_ASSERT(mockRedis.LastSetTTL(key) == 60,
+	            "Unsafe service_registry.ttl (< 20s) must fall back to 60s default");
+
 	std::cout << "  PASS: test_redis_service_registry_ttl_independent_of_cache_ttl" << std::endl;
 }
 
@@ -2546,6 +2640,88 @@ static void test_redis_snapshot_distinguishes_redis_failures_from_invalid_data()
 	std::cout << "  PASS: test_redis_snapshot_distinguishes_redis_failures_from_invalid_data" << std::endl;
 }
 
+// Test 41: Multi-page SCAN with intermediate pages and cancellation
+static void test_redis_snapshot_multipage_scan_and_intermediate_pages() {
+	std::vector<Types::MicroServiceMeta> snapshot = {
+		{
+			.InstanceId = "owgw-page-1",
+			.Id = 1,
+			.Type = "owgw",
+			.PrivateEndPoint = "https://owgw-internal:17004",
+			.PublicEndPoint = "https://owgw.example.com:16004",
+			.AccessKey = "key1",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		},
+		{
+			.InstanceId = "owgw-page-2",
+			.Id = 2,
+			.Type = "owgw",
+			.PrivateEndPoint = "https://owgw-internal:17004",
+			.PublicEndPoint = "https://owgw.example.com:16004",
+			.AccessKey = "key2",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		},
+		{
+			.InstanceId = "owsec-page-3",
+			.Id = 3,
+			.Type = "owsec",
+			.PrivateEndPoint = "https://owsec-internal:17001",
+			.PublicEndPoint = "https://owsec.example.com:16001",
+			.AccessKey = "key3",
+			.Version = "1.0.0",
+			.LastUpdate = Utils::Now()
+		}
+	};
+
+	// Case 1: Multi-page SCAN traversal across 3 batches (1 key per page)
+	{
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetScanPageSize(1); // 1 key per batch, traversing non-zero cursors until 0
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(!incomplete, "Multi-page SCAN should complete without marking incomplete");
+		TEST_ASSERT(loaded.size() == 3, "Multi-page SCAN must load all 3 entries across pages");
+	}
+
+	// Case 2: Intermediate empty SCAN page (cursor != 0 with empty key list)
+	{
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetScanPageSize(0);
+		mockRedis.SetEmptyIntermediateScanPage(true); // page 1 returns cursor "42" with 0 keys, page 2 returns all keys
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, nullptr, &incomplete);
+
+		TEST_ASSERT(!incomplete, "Empty intermediate page should not mark snapshot incomplete");
+		TEST_ASSERT(loaded.size() == 3, "All entries loaded after traversing empty intermediate page");
+	}
+
+	// Case 3: Cancellation after processing the first batch refrains from issuing subsequent SCAN requests
+	{
+		MockRedisServer mockRedis(snapshot);
+		mockRedis.SetScanPageSize(1); // 1 key per batch, across 3 batches
+
+		std::atomic_bool cancelSignal = false;
+		// Cancel during GET of the first page's entry so cancellation is set
+		// after the first page is processed, before the next SCAN request begins.
+		mockRedis.SetHookOnGet([&cancelSignal](const std::string &/*key*/) {
+			cancelSignal = true;
+		});
+
+		bool incomplete = false;
+		auto loaded = ServiceRegistry::LoadAll("127.0.0.1", mockRedis.Port(), "", 0, 500, &cancelSignal, &incomplete);
+
+		TEST_ASSERT(loaded.size() == 1, "Only first batch should be loaded when cancellation occurs before second SCAN");
+		TEST_ASSERT(mockRedis.ScanRequestCount() == 1, "Loader must refrain from sending subsequent SCAN requests after cancellation");
+	}
+
+	std::cout << "  PASS: test_redis_snapshot_multipage_scan_and_intermediate_pages" << std::endl;
+}
+
 int main() {
 	std::cout << "=== Running Service Discovery Framework Tests ===" << std::endl;
 
@@ -2589,6 +2765,7 @@ int main() {
 	test_redis_failure_isolation_preserves_kafka_events();
 	test_redis_service_registry_ttl_independent_of_cache_ttl();
 	test_redis_snapshot_distinguishes_redis_failures_from_invalid_data();
+	test_redis_snapshot_multipage_scan_and_intermediate_pages();
 
 	std::cout << "=== All Service Discovery Tests PASSED! ===" << std::endl;
 	return 0;

@@ -618,7 +618,8 @@ namespace OpenWifi {
             int db = static_cast<int>(ConfigGetInt("openwifi.redis.db", 0));
             int timeoutMs = static_cast<int>(ConfigGetInt("openwifi.redis.timeout", 2000));
             int ttl = static_cast<int>(ConfigGetInt("openwifi.redis.service_registry.ttl", 60));
-            if (ttl <= 10) {
+            if (ttl < 20) {
+                poco_warning(Logger_, fmt::format("openwifi.redis.service_registry.ttl ({}s) is unsafe for the 10s keep-alive interval (minimum 20s); falling back to default 60s.", ttl));
                 ttl = 60;
             }
 
