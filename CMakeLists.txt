@@ -321,6 +321,19 @@ add_test(NAME kafka_callback_deadlock_test COMMAND kafka_callback_deadlock_test)
 set_tests_properties(kafka_callback_deadlock_test
         PROPERTIES SKIP_RETURN_CODE 77)
 
+add_executable(kafka_producer_partitioning_test
+        tests/framework_tests/KafkaProducerPartitioning_test.cpp
+        src/framework/KafkaManager.cpp
+        src/RESTObjects/RESTAPI_ProvObjects.cpp
+        src/RESTObjects/RESTAPI_SecurityObjects.cpp
+)
+target_link_libraries(kafka_producer_partitioning_test PRIVATE
+        ${Poco_LIBRARIES}
+        CppKafka::cppkafka
+        fmt::fmt)
+
+add_test(NAME kafka_producer_partitioning_test COMMAND kafka_producer_partitioning_test)
+
 add_executable(service_discovery_test
         tests/framework_tests/ServiceDiscovery_test.cpp
         src/framework/MicroService.cpp
