@@ -145,12 +145,12 @@ Authorization MUST fail closed at the earliest failing stage. A request MUST NOT
 ### 4.1 Subscriber Identity
 
 1. **Authoritative Source**: The system MUST derive the authenticated subscriber identity exclusively from the validated Bearer token payload via `UserInfo_.userinfo.id` (designated as `CallerId`).
-2. **Context Immutability**: `CallerId` MUST remain immutable for the entire lifecycle of the HTTP request.
+2. **Context Immutability & Provenance**: `CallerId` and `userRole` MUST originate exclusively from trusted authentication processing of the validated cryptographic token context (JWT issued and signed by `owsec`). They MUST remain immutable for the entire lifecycle of the HTTP request and MUST NEVER be derived from, influenced by, or overridden by incoming request headers, query parameters, or request body fields.
 3. **No Synthetic Role Injection**: The system MUST NOT synthesize `ManagementRole` objects or insert artificial subscriber roles into `FindAllUserRoles()`.
 4. **Mandatory Identity Context**: If `UserInfo_.userinfo.id` is null, empty, or unresolvable, the system MUST terminate authorization immediately and return `HTTP 403 ACCESS_DENIED`.
 5. **No Ambient Identity**: An unauthenticated or anonymous request MUST NOT be evaluated under the subscriber authorization pipeline.
 6. **Principal Classification Gate**: Incoming requests evaluated at `RoleIsAuthorized()` MUST be classified into one of four distinct principal tracks:
-   - **Track 1 (Internal Microservice Principal)**: When a request arrives on the internal router (`Internal_ == true`) accompanied by trusted inter-service credentials validated via `MicroServiceIsValidAPIKEY(*Request)` with a verified `X-INTERNAL-NAME` header from registered ecosystem services (such as `owsec`, `UserPortal`, or `owgw`), the request is recognized as an internal microservice principal. Internal service calls MUST bypass the subscriber authorization pipeline and proceed directly to existing internal-service handler execution and routing in `owprov`. This bypass does not alter or expand existing microservice permissions; any granular inter-service authorization matrix is deferred to a follow-up issue.
+   - **Track 1 (Internal Microservice Principal)**: Established exclusively when a request arrives on the internal router interface (`Internal_ == true`, bound to trusted internal network infrastructure) accompanied by valid inter-service credentials verified via `MicroServiceIsValidAPIKEY(*Request)` with a verified `X-INTERNAL-NAME` header matching a registered ecosystem service (such as `owsec`, `UserPortal`, or `owgw`). Internal service calls MUST bypass the subscriber authorization pipeline and proceed directly to existing internal-service handler execution and routing in `owprov`. If an internal request fails API key or service identity validation, it MUST fail closed immediately (`HTTP 401 Unauthorized` / `HTTP 403 Forbidden`) and MUST NEVER fall through to subscriber (Track 2) or administrative (Track 3) authorization pipelines.
    - **Track 2 (Authenticated Subscriber Principal)**: When a request presents a valid Bearer token and the authentication context explicitly classifies the caller as a subscriber principal (`UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER`), the request MUST enter the dedicated subscriber authorization pipeline. A non-empty `UserInfo_.userinfo.id` alone MUST NOT classify the caller as a subscriber.
    - **Track 3 (Administrative Principal)**: Administrative principals (`ROOT`, `Admin`, `CSR`, `Installer`, `NOC`, `Accounting`) MUST NOT enter the subscriber pipeline and MUST evaluate strictly under administrative RBAC.
    - **Track 4 (Unrecognized / Unknown External Principal)**: Requests that do not qualify as Track 1, Track 2, or Track 3 MUST fail closed immediately with `HTTP 403 ACCESS_DENIED`.
@@ -306,28 +306,38 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
 
 3. **MAC Normalization, Latency, and Concurrency (Self-Service):**
    - The system MUST normalize the candidate MAC address into canonical lowercase 12-character hexadecimal format (via `Utils::NormalizeMac()`) before validation, uniqueness evaluation, or database lookup.
-   - The system MUST verify that the normalized MAC address is unassigned across `SubscriberDeviceDB`, `InventoryDB`, and `SignupDB`. If the address is assigned, malformed, or invalid, the request MUST be rejected.
+   - The system MUST verify that the normalized MAC address is unassigned across `SubscriberDeviceDB`, `InventoryDB`, and `SignupDB`.
+   - **Explicit Failure Semantics for `operation=updateMac`**:
+     | Condition | HTTP Status | Internal Diagnostic Code | Description |
+     |---|---|---|---|
+     | Missing `mac` parameter | `HTTP 400 Bad Request` | `MissingOrInvalidParameters` | Query parameter `mac` was not supplied. |
+     | Malformed MAC syntax | `HTTP 400 Bad Request` | `ConfigBlockInvalid` | Value fails hex/length validation or `Utils::NormalizeMac()`. |
+     | MAC already assigned | `HTTP 400 Bad Request` | `MACAddressExists` / `RecordNotUpdated` | Address already exists in `SubscriberDeviceDB`, `InventoryDB`, or `SignupDB`. |
+     | Valid, unassigned MAC | `HTTP 200 OK` | `Success` | Profile record updated with normalized MAC address. |
    - Uniqueness checks SHOULD evaluate indexed tables first (short-circuiting immediately upon collision) to minimize multi-table latency.
    - Existing business validation checks MAC availability across tables at request time and rejects detected collisions; database-level transactional concurrency and race-free serialization are deferred to Issue #90-Followup.
 
 #### 5.1.4 DELETE `/api/v1/subscriber` (Bare Path)
 1. The system MUST authorize self-deletion on the bare URI path `/api/v1/subscriber` without path parameters.
 2. The deletion operation MUST target `CallerId` directly.
-3. **Active Device Check**: The system MUST verify active claimed devices using the existing canonical business check: `InventoryDB.Count("subscriber", CallerId) == 0 && SubscriberDeviceDB.Count("subscriberId", CallerId) == 0 && venue.devices.empty()`.
+3. **Multi-Venue & Active Device Aggregation Check**: The system MUST verify that no active claimed devices or populated venues remain associated with `CallerId` before permitting deletion:
+   - `InventoryDB.Count("subscriber", CallerId) == 0`
+   - `SubscriberDeviceDB.Count("subscriberId", CallerId) == 0`
+   - **Venue Aggregation Procedure**: The system MUST query all venues associated with the subscriber (`VenueDB.GetRecords(0, 100, venues, " subscriber='" + CallerId + "' ")`). For every retrieved venue, the system MUST verify that its device collection is empty (`venue.devices.empty()`).
 4. **Conditional Deletion**:
-   - If active claimed devices remain associated with the subscriber, the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
-   - If active claimed device count is zero, the system MUST execute subscriber self-deletion.
+   - If active claimed devices remain associated with the subscriber in `InventoryDB`, `SubscriberDeviceDB`, or **any** owned venue contains devices (`!venue.devices.empty()`), the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
+   - If all owned venues contain zero devices (or if the subscriber owns zero venues) and device counts in `InventoryDB` and `SubscriberDeviceDB` are zero, the system MUST delete all subscriber-owned venues in `VenueDB`, and subsequently delete the subscriber record in `SignupDB`.
 
 #### 5.1.5 DELETE `/api/v1/subscriber/{id}` (Parameterized Path)
 1. **UserPortal Integration Context**: UserPortal (`owsub`) proxies subscriber account deletion by invoking `DELETE /api/v1/subscriber/{UserInfo_.userinfo.id}` using the authenticated subscriber's Bearer token.
 2. **Subscriber Consistent Identity Rule**: When invoked by an authenticated subscriber principal (`userRole == SUBSCRIBER`):
    - The path parameter `{id}` MUST match the authenticated caller identity (`{id} == CallerId`).
    - If `{id} != CallerId`, the request MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
-   - If `{id} == CallerId`, authorization succeeds and proceeds to the active device check.
-3. **Active Device Check & Conditional Deletion**:
-   - The system executes the identical active device check: `InventoryDB.Count("subscriber", CallerId) == 0 && SubscriberDeviceDB.Count("subscriberId", CallerId) == 0 && venue.devices.empty()`.
-   - If active claimed devices remain associated with `CallerId`, the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
-   - If active claimed device count is zero, the system MUST execute subscriber self-deletion.
+   - If `{id} == CallerId`, authorization succeeds and proceeds to the active device aggregation check.
+3. **Multi-Venue & Active Device Aggregation Check**:
+   - The system executes the identical multi-venue aggregation check: `InventoryDB.Count("subscriber", CallerId) == 0 && SubscriberDeviceDB.Count("subscriberId", CallerId) == 0`, and iterates all venues matching `subscriber == CallerId` to ensure every venue satisfies `venue.devices.empty()`.
+   - If active claimed devices remain associated with `CallerId` or any owned venue has active devices, the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
+   - If active claimed device count is zero across all sources, the system MUST delete all subscriber-associated venues, followed by deleting the subscriber record.
 4. **Administrative Principal Evaluation**: When invoked by an administrative principal (`ROOT`, `Admin`, `CSR`), the endpoint bypasses the subscriber consistent identity rule and evaluates strictly through administrative RBAC, authorizing deletion of subscriber records according to administrative policy.
 
 ---
@@ -364,7 +374,7 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
      - `deviceGroup` MUST be specified and MUST be `"ap"` or `"olg"`.
      - A subscriber MUST NOT own more than one active OLG gateway.
    - **Hardware Entitlement Scope Boundary**: This RBAC specification enforces strict ownership isolation post-assignment and guarantees an authenticated subscriber cannot view, claim, or mutate devices already assigned to another subscriber. Upstream physical hardware entitlement and proof-of-possession verification (e.g. physical QR code scanning on the router label, optical barcode verification, or hardware push-button pairing challenges) are the operational trust boundary of upstream provisioning clients (Mobile App / installer flow) and are outside the scope of Issue #90.
-5. **Configuration Association Invariant**: Any configuration record associated with a claimed subscriber device in `ConfigurationDB` MUST explicitly set `cfg.subscriber = CallerId` and `cfg.subscriberOnly = true`. Subscriber devices MUST NOT be associated with unowned or shared administrative configurations, and client input cannot override this association.
+5. **Server-Side Configuration Generation on Claim**: On device claim (`POST /api/v1/subscriberDevice/0`), `owprov` server-side automatically creates a dedicated, subscriber-owned configuration record (`cfg.subscriber = CallerId`, `cfg.subscriberOnly = true`) via `CreateConfigurationRecord()`. Any client-supplied `deviceConfiguration` UUID or reference to an existing or administrative configuration template is strictly ignored or rejected; client input can never associate a claimed subscriber device with a pre-existing, shared, or administrative configuration.
 
 #### 5.2.4 PUT `/api/v1/subscriberDevice/{id}` (Administrative Only)
 1. **Subscriber Denial**: Direct device and configuration mutation on `/api/v1/subscriberDevice/{id}` is strictly an administrative endpoint. Any attempt by an authenticated subscriber principal (`userRole == SUBSCRIBER`) to invoke `PUT /api/v1/subscriberDevice/{id}` MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
@@ -461,7 +471,11 @@ Subscriber-Scoped Handler & Business Operation
 1. **Flow A — Unauthenticated Registration Flow**: `POST /api/v1/subscriber` is an unauthenticated-user registration flow executed by UserPortal using trusted internal service authentication (`X-API-KEY` with `X-INTERNAL-NAME`).
 2. **Outside Subscriber RBAC**: It is NOT a subscriber self-service capability and is outside the subscriber RBAC capability set entirely. It MUST NOT enter or be evaluated under the subscriber Bearer-token authorization branch.
 3. **No Subscriber RBAC Requirements**: The system MUST NOT require subscriber identity, Bearer-token validation, `CallerId` ownership assertions, `subscriberId == CallerId` comparisons, or subscriber role lookups for Flow A.
-4. **Internal Service Authentication Responsibility**: Direct external invocation without valid trusted internal service authentication MUST NOT be permitted. Requests arriving on the internal router (`Internal_ == true`) accompanied by trusted inter-service credentials validated via `MicroServiceIsValidAPIKEY(*Request)` with verified `X-INTERNAL-NAME` are classified as Track 1 Internal Microservice Principals at `RoleIsAuthorized()`, bypassing subscriber RBAC checks to allow registration (`POST /api/v1/subscriber`) and email verification (`PUT /api/v1/subscriber?operation=emailVerified`) to proceed to existing service handlers. This bypass does not alter existing internal microservice handler routing or permissions; any granular inter-service authorization matrix is deferred to a follow-up issue.
+4. **Internal Service Authentication Responsibility & Fail-Closed Isolation**: Direct external invocation without valid trusted internal service authentication MUST NOT be permitted. Track 1 Internal Microservice Principal classification at `RoleIsAuthorized()` requires the mandatory conjunction of:
+   - Request arrival strictly on the internal router interface (`Internal_ == true`, bound to internal listening ports).
+   - Valid inter-service credentials verified via `MicroServiceIsValidAPIKEY(*Request)`.
+   - Verified `X-INTERNAL-NAME` header matching a registered ecosystem microservice (`owsec`, `UserPortal`, or `owgw`).
+   Requests satisfying this three-element conjunction bypass subscriber RBAC checks to allow registration (`POST /api/v1/subscriber`) and email verification (`PUT /api/v1/subscriber?operation=emailVerified`) to proceed to existing service handlers. If an incoming internal request fails API key verification or supplies an unverified/mismatched service name, it MUST fail closed immediately (`HTTP 401 Unauthorized` / `HTTP 403 Forbidden`) and MUST NEVER fall through to subscriber (Track 2) or administrative (Track 3) authorization pipelines. Granular inter-service ACL hardening is deferred to Issue #90-Followup (Non-Goal 17).
 
 ---
 
@@ -511,6 +525,7 @@ Enforced for:
 - Malformed request syntax or unparseable JSON payload $\longrightarrow$ `HTTP 400 Bad Request` (`InvalidJSONDocument`).
 - Malformed path parameters or invalid structural representation.
 - Invalid data types, formats, or values outside allowable ranges (e.g., invalid MAC format, invalid serial syntax).
+- MAC collision on profile update: Attempting to assign an already-registered MAC address via `PUT /api/v1/subscriber?operation=updateMac` $\longrightarrow$ `HTTP 400 Bad Request` (`MACAddressExists` / `RecordNotUpdated`).
 - Active claimed devices remaining during subscriber self-deletion (`StillInUse`).
 
 ---
@@ -539,10 +554,10 @@ Enforced for:
 - **AC-SUB-3**: A subscriber calling `GET /api/v1/subscriber` with query parameter `?email=...`, `?macAddress=...`, or `?listOnly=true` receives `HTTP 403 ACCESS_DENIED`.
 - **AC-SUB-4**: A subscriber calling `GET /api/v1/subscriber?signupUUID=<own_id>` successfully retrieves their profile; calling with `?signupUUID=<foreign_id>` receives `HTTP 404 Not Found` (uniform existence masking).
 - **AC-SUB-5**: An authenticated subscriber calling `PUT /api/v1/subscriber?operation=updateMac` with a valid, unassigned MAC successfully updates their profile.
-- **AC-SUB-6**: An authenticated subscriber calling `PUT /api/v1/subscriber` with an operation other than `updateMac` (or an empty operation) receives `HTTP 403 ACCESS_DENIED`.
-- **AC-SUB-7**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with zero active claimed devices successfully deletes their profile.
-- **AC-SUB-8**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with active claimed devices remaining receives `HTTP 400 Bad Request` (`StillInUse`).
-- **AC-SUB-9**: An authenticated subscriber calling parameterized `DELETE /api/v1/subscriber/{id}` where `{id} == CallerId` with zero active claimed devices successfully deletes their profile; if active claimed devices remain, receives `HTTP 400 Bad Request` (`StillInUse`); calling where `{id} != CallerId` receives `HTTP 403 ACCESS_DENIED`.
+- **AC-SUB-6**: An authenticated subscriber calling `PUT /api/v1/subscriber` with an operation other than `updateMac` (or an empty operation) receives `HTTP 403 ACCESS_DENIED`. Calling `PUT /api/v1/subscriber?operation=updateMac` with an already-assigned MAC address receives `HTTP 400 Bad Request` (`MACAddressExists` / `RecordNotUpdated`).
+- **AC-SUB-7**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with zero active claimed devices across all owned venues successfully deletes their profile.
+- **AC-SUB-8**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with active claimed devices remaining in any owned venue receives `HTTP 400 Bad Request` (`StillInUse`).
+- **AC-SUB-9**: An authenticated subscriber calling parameterized `DELETE /api/v1/subscriber/{id}` where `{id} == CallerId` with zero active claimed devices across all owned venues successfully deletes their profile and associated empty venues; if active claimed devices remain associated with the subscriber or any owned venue, receives `HTTP 400 Bad Request` (`StillInUse`); calling where `{id} != CallerId` receives `HTTP 403 ACCESS_DENIED`.
 
 ### 11.2 Subscriber Devices
 - **AC-DEV-1**: An authenticated subscriber calling `GET /api/v1/subscriberDevice` receives only devices where `subscriberId == CallerId`.
@@ -552,6 +567,7 @@ Enforced for:
 - **AC-DEV-5**: A client-supplied `subscriberId` in the body of `POST /api/v1/subscriberDevice/0` that does not match `CallerId` is rejected with `HTTP 403 ACCESS_DENIED`; if absent or matching `CallerId`, the device is claimed with `newDevice.subscriberId = CallerId`.
 - **AC-DEV-6**: Any authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` receives `HTTP 403 ACCESS_DENIED` (administrative-only endpoint; subscriber Wi-Fi configuration mutations route via UserPortal directly to `owgw`).
 - **AC-DEV-7**: An authenticated subscriber calling `DELETE /api/v1/subscriberDevice/{id}` (via UUID or hardware serial number) on an owned device successfully unclaims the device; calling on a foreign or non-existent device receives `HTTP 404 Not Found` (uniform existence masking).
+- **AC-DEV-8**: On device claim via `POST /api/v1/subscriberDevice/0`, client input supplying an existing `deviceConfiguration` UUID or referencing an administrative configuration template is ignored or rejected; `owprov` automatically generates a dedicated subscriber configuration record (`cfg.subscriber = CallerId`, `cfg.subscriberOnly = true`).
 
 ### 11.3 Venues
 - **AC-VEN-1**: An authenticated subscriber calling `GET /api/v1/venue/{id}` on an owned venue (`venue.subscriber == CallerId`) receives the venue record; calling on a foreign venue receives `HTTP 404 Not Found` (uniform existence masking).
@@ -567,6 +583,7 @@ Enforced for:
 ### 11.5 Registration Flow
 - **AC-REG-1**: A direct external request to `POST /api/v1/subscriber` without valid internal service credentials (`X-API-KEY`) is rejected by the authentication/authorization layer.
 - **AC-REG-2**: An internal service call from UserPortal with valid `X-API-KEY` to `POST /api/v1/subscriber` succeeds and initiates the signup workflow.
+- **AC-REG-3**: An incoming request on the internal router interface with an invalid API key, missing internal name, or mismatched service identity receives `HTTP 401 Unauthorized` / `HTTP 403 Forbidden` and fails closed immediately without falling through to Track 2 or Track 3.
 
 ### 11.6 Administrative RBAC Preservation
 - **AC-ADM-1**: Administrative requests (`ROOT`, `Admin`, `CSR`, `Installer`) continue to evaluate through hierarchical `ManagementRole` and `PolicyDB` rules without deviation or regression.
@@ -590,6 +607,7 @@ Test suites MUST provide comprehensive verification across all authorization bou
 |    - Verify missing or unresolvable identity fails closed with 403.     |
 |    - Verify client-supplied subscriberId must match CallerId (403 on    |
 |      mismatch); if omitted, CallerId is used.                           |
+|    - Verify CallerId/userRole cannot be overridden by headers or body.  |
 |                                                                         |
 | 2. Exact-Match Capability Enforcement:                                  |
 |    - Verify zero method aliasing (PUT does not authorize POST/DELETE).  |
@@ -599,6 +617,7 @@ Test suites MUST provide comprehensive verification across all authorization bou
 | 3. Collection Scoping:                                                  |
 |    - Verify GET /subscriberDevice filters strictly to caller's devices. |
 |    - Verify zero operator-wide fallback on empty or foreign filters.    |
+|    - Verify existing pagination limit/offset preserved within caller.   |
 |                                                                         |
 | 4. Resource Ownership & Isolation:                                      |
 |    - Verify owned device/venue GET/DELETE succeeds.                     |
@@ -611,21 +630,25 @@ Test suites MUST provide comprehensive verification across all authorization bou
 |    - Verify non-sentinel paths (/123, /new) fail closed with 403.       |
 |    - Verify claimed config has cfg.subscriber == CallerId and           |
 |      cfg.subscriberOnly == true (never references admin config).        |
+|    - Verify client-supplied deviceConfiguration UUID is rejected/ignored|
 |                                                                         |
 | 6. Profile & Venue Boundaries:                                          |
 |    - Verify GET /subscriber response redaction (notes/tags stripped).   |
 |    - Verify prohibited query parameters on GET /subscriber return 403.  |
 |    - Verify PUT /subscriber permits only operation=updateMac for subs.  |
-|    - Verify bare DELETE /subscriber enforces device-count constraint.   |
+|    - Verify duplicate MAC on updateMac returns 400 Bad Request.         |
+|    - Verify bare DELETE /subscriber enforces multi-venue device check.  |
 |    - Verify parameterized DELETE /subscriber/{id} succeeds when        |
-|      {id} == CallerId (zero devices), returns 400 when devices remain,  |
-|      and returns 403 when {id} != CallerId.                             |
+|      {id} == CallerId (zero devices across all venues), returns 400 when|
+|      devices remain in any venue, and returns 403 when {id} != CallerId.|
 |    - Verify venue POST and DELETE return 403.                           |
 |    - Verify venue PUT restricts modification to metadata (name, desc).  |
 |                                                                         |
 | 7. Registration vs. Self-Service Separation:                            |
 |    - Verify POST /subscriber requires internal X-API-KEY/X-INTERNAL-NAME|
 |    - Verify internal calls bypass subscriber RBAC via Track 1.          |
+|    - Verify invalid API key / internal name fails closed (401/403) with |
+|      zero fall-through to Track 2 (subscriber) or Track 3 (admin).      |
 |    - Verify internal Track 1 calls preserve existing handler routing.   |
 |    - Verify PUT /subscriber?operation=emailVerified allowed for Track 1 |
 |      and rejected with 403 for external subscriber Bearer tokens.       |
