@@ -145,9 +145,9 @@ namespace OpenWifi {
 		if (Worker_.isRunning()) Worker_.join();
 	}
 
-	void KafkaProducer::Produce(const char *Topic, const std::string &Key, const std::string &Payload) {
+	void KafkaProducer::Produce(const char *Topic, const std::string &Key, const std::string &Payload, int32_t Partition) {
 		std::lock_guard G(Mutex_);
-		Queue_.enqueueNotification(new KafkaMessage(Topic, Key, Payload));
+		Queue_.enqueueNotification(new KafkaMessage(Topic, Key, Payload, Partition));
 	}
 
 	inline void KafkaProducer::run() {
@@ -184,7 +184,9 @@ namespace OpenWifi {
 					if (auto Msg = dynamic_cast<KafkaMessage *>(Note.get())) {
 						auto NewMsg = cppkafka::MessageBuilder(Msg->Topic());
 						NewMsg.key(Msg->Key());
-						NewMsg.partition(0);
+						if (Msg->Partition() >= 0) {
+							NewMsg.partition(Msg->Partition());
+						}
 						NewMsg.payload(Msg->Payload());
 						Producer.produce(NewMsg);
 						if (Queue_.size() < 100) {
@@ -456,18 +458,18 @@ namespace OpenWifi {
 	}
 
 	void KafkaManager::PostMessage(const char *topic, const std::string &key,
-								   const std::string & PayLoad, bool WrapMessage) {
+								   const std::string & PayLoad, bool WrapMessage, int32_t Partition) {
 		if (KafkaEnabled_) {
-			ProducerThr_.Produce(topic, key, WrapMessage ? WrapSystemId(PayLoad) : PayLoad);
+			ProducerThr_.Produce(topic, key, WrapMessage ? WrapSystemId(PayLoad) : PayLoad, Partition);
 		}
 	}
 
 	void KafkaManager::PostMessage(const char *topic, const std::string &key,
-					 const Poco::JSON::Object &Object, bool WrapMessage) {
+					 const Poco::JSON::Object &Object, bool WrapMessage, int32_t Partition) {
 		if (KafkaEnabled_) {
 			std::ostringstream ObjectStr;
 			Object.stringify(ObjectStr);
-			ProducerThr_.Produce(topic, key, WrapMessage ? WrapSystemId(ObjectStr.str()) : ObjectStr.str());
+			ProducerThr_.Produce(topic, key, WrapMessage ? WrapSystemId(ObjectStr.str()) : ObjectStr.str(), Partition);
 		}
 	}
 
