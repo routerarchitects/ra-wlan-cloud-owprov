@@ -56,21 +56,21 @@ In-scope functional and security requirements comprise:
 
 ### 3.2 Implementation Priority Framework
 
-To resolve the regression in production without destabilizing existing cross-service subscriber flows, requirements are partitioned into three delivery tiers:
+To resolve the regression in production without destabilizing existing cross-service subscriber flows, the upcoming implementation PR for Issue #90 will deliver and verify functionality across three prioritized tiers:
 
-#### Tier 1: Active Production Subscriber Path (P0 — Mandatory for this PR)
-The active production call path consists of the exact endpoints invoked by UserPortal (`owsub`) during live Mobile App operations. Making these endpoints fully authorized, functionally verified, and covered by end-to-end integration tests is the primary objective of this PR:
+#### Tier 1: Active Production Subscriber Path (P0 — Mandatory Delivery)
+The active production call path consists of the exact endpoints invoked by UserPortal (`owsub`) during live Mobile App operations. Making these endpoints fully authorized, functionally verified, and covered by end-to-end integration tests is the primary objective of the implementation PR:
 1. `GET /api/v1/subscriberDevice`: Collection retrieval used by UserPortal to locate the root gateway (`deviceGroup == "olg"`) for Wi-Fi actions, topology, and parental controls. Must tolerate upstream query parameters (`operatorId`).
 2. `GET /api/v1/subscriberDevice/{mac}`: Individual device lookup during device claim verification.
 3. `POST /api/v1/subscriberDevice/0`: Sentinel creation path for onboarding root gateways and mesh extenders.
 4. `DELETE /api/v1/subscriberDevice/{mac}`: Device unclaim and inventory disassociation.
 5. `DELETE /api/v1/subscriber/{id}`: Subscriber account self-deletion via UserPortal proxy.
 
-#### Tier 2: Defensive & Standalone Endpoints (P1 — In-Code RBAC Capability Retention)
-Endpoints defined in `owprov`'s OpenAPI specification that are not invoked by UserPortal's active Mobile App flow today (e.g. `PUT /api/v1/subscriberDevice/{id}`, profile inspection/update). These endpoints MUST be retained in the static in-code capability matrix and protected with fail-closed ownership/schema rules for platform defense-in-depth and future RESTful migration, but are non-path and non-blocking for live Mobile App execution in this PR.
+#### Tier 2: Defensive & Administrative Endpoints (P1 — Capability Retention)
+Endpoints defined in `owprov`'s OpenAPI specification that are not invoked by UserPortal's active Mobile App flow today (e.g. profile inspection/update). Standalone device mutation (`PUT /api/v1/subscriberDevice/{id}`) is explicitly classified as an administrative-only endpoint (denied fail-closed for subscribers).
 
 #### Tier 3: Internal Microservice Principals (Track 1 / Flow A)
-Endpoints invoked by UserPortal or other ecosystem microservices using trusted internal service credentials (`Internal_ == true`, valid `X-API-KEY` with verified `X-INTERNAL-NAME`), such as `POST /api/v1/subscriber` (signup) and internal venue/location lookups. All internal service calls bypass the subscriber authorization pipeline entirely and are permitted to proceed directly to administrative/service execution.
+Endpoints invoked by UserPortal or other ecosystem microservices using trusted internal service credentials (`Internal_ == true`, valid `X-API-KEY` with verified `X-INTERNAL-NAME`), such as `POST /api/v1/subscriber` (signup) and internal venue/location lookups. All internal service calls bypass the subscriber authorization pipeline entirely and proceed directly to existing internal microservice handler execution.
 
 ### 3.3 UserPortal (owsub) Call Chain Mapping
 
@@ -87,12 +87,12 @@ In production, subscribers interact exclusively with UserPortal (`owsub`) via th
 | **Location / Venue** | `GET/POST/PUT/DELETE /api/v1/subscriber/location` | `GET/PUT /api/v1/venue`<br/>`GET/PUT/DELETE /api/v1/location` | Internal (`X-API-KEY`) *(Bypasses RBAC)* | Tier 3 |
 | **Topology View** | `GET /api/v1/topology` | `GET /api/v1/subscriberDevice`<br/>`GET /api/v1/venue/{id}` | Bearer Token / Internal *(Bypasses RBAC)* | **Tier 1 (P0)** |
 | **Parental Controls**| `POST /api/v1/groups`, `POST /api/v1/schedules` | `GET /api/v1/subscriberDevice` *(resolves gateway serial; pushes firewall to `owgw`)* | Bearer Token | **Tier 1 (P0)** |
-| **Device Mutation**| *(Not called by Mobile App today)* | `PUT /api/v1/subscriberDevice/{id}` | Bearer Token | Tier 2 (P1) |
+| **Device Mutation**| *(Not called by Mobile App today)* | `PUT /api/v1/subscriberDevice/{id}` | Bearer Token | **Denied** *(Admin-only)* |
 
 > [!IMPORTANT]
 > **Production Call Path Invariants:**
-> 1. **Internal Service RBAC Bypass:** All inter-service calls arriving on the internal router with valid internal credentials (`Internal_ == true` with `MicroServiceIsValidAPIKEY(*Request)`) bypass subscriber RBAC entirely and are permitted to execute.
-> 2. **Subscriber Wi-Fi Configuration Flow:** The existing UserPortal flow routes device Wi-Fi configuration mutations through `POST /api/v1/action?action=configure` directly to `owgw`. This PR does not alter that architecture. `PUT /api/v1/subscriberDevice/{id}` is not part of the active live subscriber path and must not block core PR delivery.
+> 1. **Internal Service RBAC Bypass:** All inter-service calls arriving on the internal router with valid internal credentials (`Internal_ == true` with `MicroServiceIsValidAPIKEY(*Request)`) bypass subscriber RBAC entirely and proceed to existing internal microservice handler execution. This bypass does not expand or alter existing service routing or privileges.
+> 2. **Subscriber Wi-Fi Configuration Flow:** The existing UserPortal flow routes device Wi-Fi configuration mutations through `POST /api/v1/action?action=configure` directly to `owgw`. Direct invocation of `PUT /api/v1/subscriberDevice/{id}` by subscribers on `owprov` is denied fail-closed (`HTTP 403 ACCESS_DENIED`).
 
 ### 3.4 Out of Scope
 
@@ -150,7 +150,7 @@ Authorization MUST fail closed at the earliest failing stage. A request MUST NOT
 4. **Mandatory Identity Context**: If `UserInfo_.userinfo.id` is null, empty, or unresolvable, the system MUST terminate authorization immediately and return `HTTP 403 ACCESS_DENIED`.
 5. **No Ambient Identity**: An unauthenticated or anonymous request MUST NOT be evaluated under the subscriber authorization pipeline.
 6. **Principal Classification Gate**: Incoming requests evaluated at `RoleIsAuthorized()` MUST be classified into one of four distinct principal tracks:
-   - **Track 1 (Internal Microservice Principal)**: When a request arrives on the internal router (`Internal_ == true`) accompanied by trusted inter-service credentials validated via `MicroServiceIsValidAPIKEY(*Request)` with a verified `X-INTERNAL-NAME` header from registered ecosystem services (such as `owsec`, `UserPortal`, or `owgw`), the request is recognized as an internal microservice principal. Internal service calls MUST bypass the subscriber authorization pipeline and proceed directly to administrative execution.
+   - **Track 1 (Internal Microservice Principal)**: When a request arrives on the internal router (`Internal_ == true`) accompanied by trusted inter-service credentials validated via `MicroServiceIsValidAPIKEY(*Request)` with a verified `X-INTERNAL-NAME` header from registered ecosystem services (such as `owsec`, `UserPortal`, or `owgw`), the request is recognized as an internal microservice principal. Internal service calls MUST bypass the subscriber authorization pipeline and proceed directly to existing internal-service handler execution and routing in `owprov`. This bypass does not alter or expand existing microservice permissions; any granular inter-service authorization matrix is deferred to a follow-up issue.
    - **Track 2 (Authenticated Subscriber Principal)**: When a request presents a valid Bearer token and the authentication context explicitly classifies the caller as a subscriber principal (`UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER`), the request MUST enter the dedicated subscriber authorization pipeline. A non-empty `UserInfo_.userinfo.id` alone MUST NOT classify the caller as a subscriber.
    - **Track 3 (Administrative Principal)**: Administrative principals (`ROOT`, `Admin`, `CSR`, `Installer`, `NOC`, `Accounting`) MUST NOT enter the subscriber pipeline and MUST evaluate strictly under administrative RBAC.
    - **Track 4 (Unrecognized / Unknown External Principal)**: Requests that do not qualify as Track 1, Track 2, or Track 3 MUST fail closed immediately with `HTTP 403 ACCESS_DENIED`.
@@ -169,7 +169,7 @@ Authorization MUST fail closed at the earliest failing stage. A request MUST NOT
 
 | Resource | `GET` | `POST` | `PUT` | `DELETE` | Capability Rule |
 |---|:---:|:---:|:---:|:---:|---|
-| **`subscriberDevice`** | **Allowed** | **Allowed** | **Allowed** | **Allowed** | Full device self-care lifecycle (`POST` constrained to sentinel `/0`). |
+| **`subscriberDevice`** | **Allowed** | **Allowed** | **Denied** | **Allowed** | Device inspection, sentinel creation (`/0`), and unclaiming. `PUT` is denied fail-closed (`HTTP 403 ACCESS_DENIED`); subscriber Wi-Fi configuration mutations route via UserPortal directly to `owgw`. |
 | **`subscriber`** | **Allowed** | **N/A (Flow A)** | **Allowed** | **Allowed** | Profile inspection, MAC update, and bare self-deletion. `POST` is an unauthenticated registration flow outside subscriber RBAC. |
 | **`venue`** | **Allowed** | **Denied** | **Allowed** | **Denied** | Venue inspection and metadata update only. Creation and deletion are administrative. |
 | **`configuration`** | **Denied** | **Denied** | **Denied** | **Denied** | Administrative-only resource. All subscriber methods denied fail-closed. |
@@ -194,6 +194,7 @@ When an authorized endpoint contains an explicit target resource ID in its URI p
        a) If the target resource does not exist in the database $\longrightarrow$ `HTTP 404 Not Found`.
        b) If the target resource exists in the database but is owned by another subscriber or unassigned (`Device.subscriberId != CallerId` or `Venue.subscriber != CallerId`) $\longrightarrow$ `HTTP 404 Not Found`.
      - **Scope Boundary**: This uniform masking eliminates the primary direct HTTP existence oracle for protected resource identifiers. Potential indirect micro-architectural side channels (e.g. slight latency/timing variations or downstream network diagnostics) are outside the scope of Issue #90.
+     - **Account Self-Deletion Identity Exception**: In contrast to object-locator endpoints, the parameterized account deletion path (`DELETE /api/v1/subscriber/{id}`) represents a self-identity assertion rather than an object lookup. If an authenticated subscriber invokes `DELETE /api/v1/subscriber/{id}` with an `{id}` that does not match `CallerId`, the system MUST return `HTTP 403 ACCESS_DENIED` (Consistent Identity Violation per Section 5.1.5), rather than `404 Not Found`.
      - **Internal Diagnostic Logging**: The system MUST retain distinct internal logging reasons (e.g., `AUTH_DEBUG: Denied - Foreign resource ownership` vs `AUTH_DEBUG: Denied - Resource not found in database`) for operational telemetry, audit trails, and troubleshooting, while ensuring the external HTTP response remains identical (`HTTP 404 Not Found`).
    - For authorized requests (`subscriberId == CallerId`), the pre-loaded entity MUST be passed/memoized within the request context so downstream business handlers do not reload the same resource from the database.
 3. **Point-of-Mutation Ownership Check**:
@@ -257,7 +258,7 @@ The system MUST enforce subscriber authorization across all endpoints in accorda
 | `GET` | `/api/v1/subscriberDevice` | **Allow** | Collection scoped strictly to `WHERE subscriberId = CallerId`; no operator fallback. |
 | `GET` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies target device ownership (`device.subscriberId == CallerId`); uniform `404` on missing or foreign device. |
 | `POST` | `/api/v1/subscriberDevice/0` | **Allow** | Sentinel path `/0` only; forces `newDevice.subscriberId = CallerId`; verifies claim eligibility. |
-| `PUT` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies device ownership (uniform `404` on missing/foreign). (Defensive endpoint; active subscriber Wi-Fi configuration routes via UserPortal to `owgw`). |
+| `PUT` | `/api/v1/subscriberDevice/{id}` | **Denied** | Administrative-only endpoint; direct subscriber device/configuration mutation on `owprov` is denied fail-closed (`HTTP 403 ACCESS_DENIED`). Subscriber Wi-Fi configuration mutations route via UserPortal directly to `owgw`. |
 | `DELETE` | `/api/v1/subscriberDevice/{id}` | **Allow** | Verifies device ownership (uniform `404` on missing/foreign) + executes unclaim workflow. |
 | `GET` | `/api/v1/venue/{id}` | **Allow** | Verifies target venue ownership (`venue.subscriber == CallerId`); uniform `404` on missing or foreign venue. |
 | `PUT` | `/api/v1/venue/{id}` | **Allow** | Verifies venue ownership (uniform `404` on missing/foreign) + positive allowlist. |
@@ -362,12 +363,13 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
      - Serial number MUST satisfy syntax validation (`ValidSerialNumber`).
      - `deviceGroup` MUST be specified and MUST be `"ap"` or `"olg"`.
      - A subscriber MUST NOT own more than one active OLG gateway.
-   - **Hardware Entitlement Scope Boundary**: This RBAC specification enforces strict ownership isolation post-assignment and guarantees an authenticated subscriber cannot view, claim, or mutate devices already assigned to another subscriber. Upstream physical hardware entitlement and proof-of-possession verification (e.g. physical QR code scanning on the router label, optical barcode verification, or hardware push-button pairing challenges) are outside the scope of Issue #90.
-5. **Configuration Record Initialization**: Any configuration record created for a claimed subscriber device in `ConfigurationDB` MUST explicitly set `cfg.subscriber = CallerId` and `cfg.subscriberOnly = true`. Subscriber devices MUST NOT reference unowned or shared administrative configurations.
+   - **Hardware Entitlement Scope Boundary**: This RBAC specification enforces strict ownership isolation post-assignment and guarantees an authenticated subscriber cannot view, claim, or mutate devices already assigned to another subscriber. Upstream physical hardware entitlement and proof-of-possession verification (e.g. physical QR code scanning on the router label, optical barcode verification, or hardware push-button pairing challenges) are the operational trust boundary of upstream provisioning clients (Mobile App / installer flow) and are outside the scope of Issue #90.
+5. **Configuration Association Invariant**: Any configuration record associated with a claimed subscriber device in `ConfigurationDB` MUST explicitly set `cfg.subscriber = CallerId` and `cfg.subscriberOnly = true`. Subscriber devices MUST NOT be associated with unowned or shared administrative configurations, and client input cannot override this association.
 
-#### 5.2.4 PUT `/api/v1/subscriberDevice/{id}` (Defensive Mutation Endpoint)
-1. **Ownership Assertion & Uniform 404 Masking**: The system MUST load the target device (resolving by UUID or hardware serial number) and verify device ownership: `device.subscriberId == CallerId`. If the device does not exist, or if `device.subscriberId != CallerId`, the system MUST return `HTTP 404 Not Found` in accordance with the uniform masking rule (Section 4.3.2).
-2. **Production Architectural Flow Invariant**: In production, subscriber Wi-Fi and device configuration mutations are performed exclusively by UserPortal (`owsub`) dispatching directly to `owgw` (`POST /api/v1/action?action=configure`). Direct mutation on `PUT /api/v1/subscriberDevice/{id}` is not part of the active live subscriber path and is maintained solely as a defensive endpoint with direct resource ownership verification.
+#### 5.2.4 PUT `/api/v1/subscriberDevice/{id}` (Administrative Only)
+1. **Subscriber Denial**: Direct device and configuration mutation on `/api/v1/subscriberDevice/{id}` is strictly an administrative endpoint. Any attempt by an authenticated subscriber principal (`userRole == SUBSCRIBER`) to invoke `PUT /api/v1/subscriberDevice/{id}` MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
+2. **Production Architectural Flow Invariant**: In production, subscribers interact exclusively through UserPortal (`owsub`), which dispatches Wi-Fi configuration mutations directly to `owgw` via `POST /api/v1/action?action=configure`. Neither the live Mobile App nor UserPortal invokes `PUT /api/v1/subscriberDevice/{id}` for subscriber operations; therefore, direct subscriber invocation on `owprov` is completely prohibited.
+3. **Administrative Evaluation**: Administrative principals (`ROOT`, `Admin`, `CSR`) invoking this endpoint evaluate strictly under administrative RBAC.
 
 #### 5.2.5 DELETE `/api/v1/subscriberDevice/{id}` (Unclaiming & Removal)
 1. The system MUST load the target device (resolving by UUID or hardware serial number) and verify ownership: `device.subscriberId == CallerId`. If the device does not exist, or if `device.subscriberId != CallerId`, the system MUST return `HTTP 404 Not Found` in accordance with the uniform masking rule (Section 4.3.2).
@@ -421,7 +423,10 @@ For `PUT /api/v1/venue/{id}`:
      - `name`: User-facing venue name (persisted to `info.name`).
      - `description`: User-facing venue description (persisted to `info.description`).
      - `location`: Linked location UUID string (referencing the subscriber's location record in `LocationDB`).
-2. **Field Enforcement**:
+2. **Linked Location Ownership Verification**:
+   - If the update payload includes a `location` UUID, the system MUST verify that the referenced location record exists in `LocationDB` and directly belongs to the caller (`locationRecord.subscriber == CallerId`).
+   - If the referenced location does not exist, or if `locationRecord.subscriber != CallerId`, the system MUST reject the request with `HTTP 404 Not Found` in accordance with uniform existence masking (Section 4.3.2), preventing cross-subscriber resource association and IDOR probing.
+3. **Field Enforcement**:
    - Any attempt by a subscriber to modify administrative or infrastructure venue properties (including `subscriber`, `entity`, `parent`, `children`, `devices`, `topology`, `managementPolicy`, `deviceRules`, `contacts`, `configurations`, `deviceConfiguration`) is unauthorized and MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
 
 ---
@@ -456,7 +461,7 @@ Subscriber-Scoped Handler & Business Operation
 1. **Flow A — Unauthenticated Registration Flow**: `POST /api/v1/subscriber` is an unauthenticated-user registration flow executed by UserPortal using trusted internal service authentication (`X-API-KEY` with `X-INTERNAL-NAME`).
 2. **Outside Subscriber RBAC**: It is NOT a subscriber self-service capability and is outside the subscriber RBAC capability set entirely. It MUST NOT enter or be evaluated under the subscriber Bearer-token authorization branch.
 3. **No Subscriber RBAC Requirements**: The system MUST NOT require subscriber identity, Bearer-token validation, `CallerId` ownership assertions, `subscriberId == CallerId` comparisons, or subscriber role lookups for Flow A.
-4. **Internal Service Authentication Responsibility**: Direct external invocation without valid trusted internal service authentication MUST NOT be permitted. Requests arriving on the internal router (`Internal_ == true`) accompanied by trusted inter-service credentials validated via `MicroServiceIsValidAPIKEY(*Request)` with verified `X-INTERNAL-NAME` are classified as Track 1 Internal Microservice Principals at `RoleIsAuthorized()`, bypassing subscriber RBAC checks to allow registration (`POST /api/v1/subscriber`) and email verification (`PUT /api/v1/subscriber?operation=emailVerified`) to proceed to existing service handlers.
+4. **Internal Service Authentication Responsibility**: Direct external invocation without valid trusted internal service authentication MUST NOT be permitted. Requests arriving on the internal router (`Internal_ == true`) accompanied by trusted inter-service credentials validated via `MicroServiceIsValidAPIKEY(*Request)` with verified `X-INTERNAL-NAME` are classified as Track 1 Internal Microservice Principals at `RoleIsAuthorized()`, bypassing subscriber RBAC checks to allow registration (`POST /api/v1/subscriber`) and email verification (`PUT /api/v1/subscriber?operation=emailVerified`) to proceed to existing service handlers. This bypass does not alter existing internal microservice handler routing or permissions; any granular inter-service authorization matrix is deferred to a follow-up issue.
 
 ---
 
@@ -485,7 +490,7 @@ The system MUST enforce an operational semantic separation between authorization
 Enforced for:
 - Identity mismatch: A client-supplied `subscriberId` or path identifier does not match the authenticated caller (e.g., `{ "subscriberId": "someone-else" }` or `DELETE /api/v1/subscriber/{foreign_id}` $\longrightarrow$ `HTTP 403 ACCESS_DENIED`).
 - Unauthorized property modification: Attempts by a subscriber to mutate administrative, entity, or infrastructure properties outside permitted metadata.
-- Unauthorized endpoints or operations: Invocations of administrative endpoints (e.g., `POST /api/v1/venue` or `DELETE /api/v1/venue/{id}`).
+- Unauthorized endpoints or operations: Invocations of administrative endpoints (e.g., `POST /api/v1/venue`, `DELETE /api/v1/venue/{id}`, or `PUT /api/v1/subscriberDevice/{id}`).
 - Standalone configuration access: Invocations of `/api/v1/configuration*`.
 - Unsupported subscriber operations: Profile mutations outside `operation=updateMac`.
 - Syntactically recognized unauthorized paths (e.g., `POST /api/v1/subscriberDevice/123`).
@@ -497,7 +502,7 @@ Enforced for:
 
 Enforced for:
 - Non-existent target resource identifiers: Requested device UUID, serial number, or venue ID does not exist in the database $\longrightarrow$ `HTTP 404 Not Found`.
-- Uniform foreign resource masking: Eliminates the primary direct HTTP existence oracle for device serial numbers, device UUIDs, or venue IDs; any access to a foreign or unassigned resource via target resource endpoints (`/api/v1/subscriberDevice/{id}`, `/api/v1/venue/{id}`, or `?signupUUID=<id>`) returns `HTTP 404 Not Found`, identical to a non-existent resource. The distinct diagnostic reason (foreign ownership vs. record not found) is recorded strictly in internal server logs for debugging and audit trails.
+- Uniform foreign resource masking: Eliminates the primary direct HTTP existence oracle for device serial numbers, device UUIDs, or venue IDs; any access to a foreign or unassigned resource via target resource endpoints (`/api/v1/subscriberDevice/{id}`, `/api/v1/venue/{id}`, or `?signupUUID=<id>`), or submitting a foreign location reference on `PUT /api/v1/venue/{id}`, returns `HTTP 404 Not Found`, identical to a non-existent resource. (Note: In contrast, parameterized `DELETE /api/v1/subscriber/{foreign_id}` returns `HTTP 403 ACCESS_DENIED` as an explicit identity-assertion violation rather than 404). The distinct diagnostic reason (foreign ownership vs. record not found) is recorded strictly in internal server logs for debugging and audit trails.
 
 #### HTTP 400 — Request Validation Failure
 > **Rule:** The operation is permitted for the caller, but the request representation itself is invalid, unsupported, or violates domain schema constraints.
@@ -545,15 +550,16 @@ Enforced for:
 - **AC-DEV-3**: An authenticated subscriber calling `POST /api/v1/subscriberDevice/0` with eligible claim data successfully claims the device, with ownership assigned to `CallerId`.
 - **AC-DEV-4**: An authenticated subscriber calling `POST /api/v1/subscriberDevice/{non_zero_id}` receives `HTTP 403 ACCESS_DENIED`.
 - **AC-DEV-5**: A client-supplied `subscriberId` in the body of `POST /api/v1/subscriberDevice/0` that does not match `CallerId` is rejected with `HTTP 403 ACCESS_DENIED`; if absent or matching `CallerId`, the device is claimed with `newDevice.subscriberId = CallerId`.
-- **AC-DEV-6**: An authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` on an owned device verifies ownership (`device.subscriberId == CallerId`); calling on a foreign device or non-existent device receives `HTTP 404 Not Found` (uniform existence masking).
+- **AC-DEV-6**: Any authenticated subscriber calling `PUT /api/v1/subscriberDevice/{id}` receives `HTTP 403 ACCESS_DENIED` (administrative-only endpoint; subscriber Wi-Fi configuration mutations route via UserPortal directly to `owgw`).
 - **AC-DEV-7**: An authenticated subscriber calling `DELETE /api/v1/subscriberDevice/{id}` (via UUID or hardware serial number) on an owned device successfully unclaims the device; calling on a foreign or non-existent device receives `HTTP 404 Not Found` (uniform existence masking).
 
 ### 11.3 Venues
 - **AC-VEN-1**: An authenticated subscriber calling `GET /api/v1/venue/{id}` on an owned venue (`venue.subscriber == CallerId`) receives the venue record; calling on a foreign venue receives `HTTP 404 Not Found` (uniform existence masking).
 - **AC-VEN-2**: An authenticated subscriber calling `PUT /api/v1/venue/{id}` on an owned venue with permitted fields (`name`, `description`, `location`) successfully updates the venue.
-- **AC-VEN-3**: An authenticated subscriber calling `PUT /api/v1/venue/{id}` attempting to modify `subscriber`, `entity`, or administrative settings receives `HTTP 403 ACCESS_DENIED`.
-- **AC-VEN-4**: An authenticated subscriber calling `POST /api/v1/venue` receives `HTTP 403 ACCESS_DENIED`.
-- **AC-VEN-5**: An authenticated subscriber calling `DELETE /api/v1/venue/{id}` receives `HTTP 403 ACCESS_DENIED`.
+- **AC-VEN-3**: An authenticated subscriber calling `PUT /api/v1/venue/{id}` referencing a foreign or non-existent location UUID receives `HTTP 404 Not Found` (uniform existence masking).
+- **AC-VEN-4**: An authenticated subscriber calling `PUT /api/v1/venue/{id}` attempting to modify `subscriber`, `entity`, or administrative settings receives `HTTP 403 ACCESS_DENIED`.
+- **AC-VEN-5**: An authenticated subscriber calling `POST /api/v1/venue` receives `HTTP 403 ACCESS_DENIED`.
+- **AC-VEN-6**: An authenticated subscriber calling `DELETE /api/v1/venue/{id}` receives `HTTP 403 ACCESS_DENIED`.
 
 ### 11.4 Standalone Configuration Boundary
 - **AC-CFG-1**: Any direct subscriber request targeting `/api/v1/configuration*` (`GET`, `POST`, `PUT`, `DELETE`) receives `HTTP 403 ACCESS_DENIED`.
@@ -573,7 +579,7 @@ Enforced for:
 Test suites MUST provide comprehensive verification across all authorization boundaries without redundant test cases.
 
 > [!IMPORTANT]
-> **Test Suite Prioritization:** Automated test execution for this PR MUST prioritize the **Tier 1 Active Production Path** (`GET /api/v1/subscriberDevice`, `POST /api/v1/subscriberDevice/0`, `DELETE /api/v1/subscriberDevice/{mac}`, `GET /api/v1/subscriberDevice/{mac}`, and `DELETE /api/v1/subscriber/{id}`) to guarantee that live Mobile App operations through UserPortal succeed with zero regressions. End-to-end verification of Tier 2 non-path endpoints is secondary.
+> **Test Suite Prioritization:** Automated test execution for the upcoming implementation PR MUST prioritize the **Tier 1 Active Production Path** (`GET /api/v1/subscriberDevice`, `POST /api/v1/subscriberDevice/0`, `DELETE /api/v1/subscriberDevice/{mac}`, `GET /api/v1/subscriberDevice/{mac}`, and `DELETE /api/v1/subscriber/{id}`) to guarantee that live Mobile App operations through UserPortal succeed with zero regressions. End-to-end verification of Tier 2 non-path endpoints is secondary.
 
 ```text
 +-------------------------------------------------------------------------+
@@ -588,19 +594,23 @@ Test suites MUST provide comprehensive verification across all authorization bou
 | 2. Exact-Match Capability Enforcement:                                  |
 |    - Verify zero method aliasing (PUT does not authorize POST/DELETE).  |
 |    - Verify unauthorized resources (configuration, etc.) fail with 403. |
+|    - Verify direct PUT /subscriberDevice/{id} returns 403 for subs.     |
 |                                                                         |
 | 3. Collection Scoping:                                                  |
 |    - Verify GET /subscriberDevice filters strictly to caller's devices. |
 |    - Verify zero operator-wide fallback on empty or foreign filters.    |
 |                                                                         |
 | 4. Resource Ownership & Isolation:                                      |
-|    - Verify owned device/venue GET/PUT/DELETE succeeds.                 |
+|    - Verify owned device/venue GET/DELETE succeeds.                     |
 |    - Verify foreign resource access returns 404 (existence masking).    |
+|    - Verify PUT /venue/{id} referencing foreign location returns 404.   |
 |    - Verify distinct internal diagnostic reason logged for audit.       |
 |                                                                         |
 | 5. Sentinel Creation Enforcement:                                       |
 |    - Verify POST /subscriberDevice/0 claims device for caller.          |
 |    - Verify non-sentinel paths (/123, /new) fail closed with 403.       |
+|    - Verify claimed config has cfg.subscriber == CallerId and           |
+|      cfg.subscriberOnly == true (never references admin config).        |
 |                                                                         |
 | 6. Profile & Venue Boundaries:                                          |
 |    - Verify GET /subscriber response redaction (notes/tags stripped).   |
@@ -616,11 +626,12 @@ Test suites MUST provide comprehensive verification across all authorization bou
 | 7. Registration vs. Self-Service Separation:                            |
 |    - Verify POST /subscriber requires internal X-API-KEY/X-INTERNAL-NAME|
 |    - Verify internal calls bypass subscriber RBAC via Track 1.          |
+|    - Verify internal Track 1 calls preserve existing handler routing.   |
 |    - Verify PUT /subscriber?operation=emailVerified allowed for Track 1 |
 |      and rejected with 403 for external subscriber Bearer tokens.       |
 |                                                                         |
 | 8. Administrative RBAC Regression:                                      |
-|    - Verify ROOT and operator roles retain unchanged authorization.     |
+|    - Verify ROOT, Admin, and CSR roles retain unchanged authorization.  |
 |    - Verify FindAllUserRoles() and PolicyAllows() behavior is preserved.|
 +-------------------------------------------------------------------------+
 ```
@@ -651,12 +662,13 @@ The following items are explicit non-goals for Issue #90:
 8. **No Hardware Proof-of-Possession**: Physical device entitlement and challenge-response protocols (e.g. physical QR code verification, optical barcode scanning, hardware push-button pairing challenges) are upstream physical provisioning concerns outside the scope of Issue #90.
 9. **No Business Workflow Redesign**: Existing handlers retain responsibility for their internal business validations.
 10. **No UserPortal Architectural Flow Redesign**: This PR will not alter the existing UserPortal (`owsub`) call chain. Specifically, the existing flow where UserPortal handles `POST /api/v1/action?action=configure` by dispatching directly to `owgw` will not be altered or redirected in this PR.
-11. **No Live Traffic Dependency on `PUT /subscriberDevice/{id}`**: This PR will not introduce or require live Mobile App or UserPortal traffic on `PUT /api/v1/subscriberDevice/{id}`. Direct resource ownership verification (uniform `404` on missing/foreign) is maintained defensively.
+11. **No Subscriber Device Mutation on `owprov`**: Direct device or configuration mutation on `PUT /api/v1/subscriberDevice/{id}` is not permitted for subscribers (denied fail-closed with `HTTP 403 ACCESS_DENIED`). In production, subscribers configure devices via UserPortal directly to `owgw`.
 12. **No Upstream Contract Modifications**: Existing Mobile App client contracts with UserPortal remain unmodified.
 13. **No Configuration Mutation via `owprov` for Subscribers**: Direct uCentral device configuration creation, parsing, or mutation on `owprov` is not a subscriber capability. All subscriber Wi-Fi and device configuration changes route through UserPortal directly to `owgw` (`POST /api/v1/action?action=configure`).
 14. **No Device Payload Redaction Overhaul**: This PR will not introduce response filtering or property redaction on `GET /api/v1/subscriberDevice/{id}` or `GET /api/v1/subscriberDevice`. Subscribers receive the standard `SubscriberDevice` projection; sensitive operator-only internal metadata does not exist on this entity.
 15. **No Custom Query Parameter Engine**: This PR will not implement duplicate query parameter rejection or custom URI parsing beyond standard POCO `URI::QueryParameters` processing.
 16. **No Schema Removal of `operatorId`**: While `operatorId` has zero authority in subscriber authorization, this PR will not remove or alter `operatorId` columns in database tables or the subscriber profile representation.
+17. **No Internal Microservice Permission Matrix Overhaul**: Existing internal microservice authorization and routing behavior for requests on `Internal_ == true` are preserved without alteration; granular microservice permission hardening is deferred to a follow-up issue.
 
 ---
 
@@ -667,17 +679,17 @@ The following matrix maps requirement areas to specification sections, acceptanc
 | Requirement Area | Specification Section | Acceptance Criteria | Testing Requirement |
 |---|---|---|---|
 | **Subscriber Identity** | Section 4.1, 4.6 | AC-SUB-1, AC-DEV-5 | Identity & Context Suite |
-| **Exact-Match Capabilities** | Section 4.2 | AC-CFG-1, AC-VEN-4, AC-VEN-5 | Capability Enforcement Suite |
+| **Exact-Match Capabilities** | Section 4.2 | AC-CFG-1, AC-DEV-6, AC-VEN-5, AC-VEN-6 | Capability Enforcement Suite |
 | **Collection Scoping** | Section 4.4 | AC-DEV-1 | Collection Scoping Suite |
-| **Resource Ownership** | Section 4.3 | AC-DEV-2, AC-DEV-6, AC-VEN-1 | Ownership & Isolation Suite |
+| **Resource Ownership** | Section 4.3 | AC-DEV-2, AC-DEV-7, AC-VEN-1 | Ownership & Isolation Suite |
 | **Creation Sentinel Path** | Section 5.2.3 | AC-DEV-3, AC-DEV-4 | Sentinel Creation Suite |
-| **Device Defensive Mutation** | Section 5.2.4 | AC-DEV-6 | Ownership & Isolation Suite |
+| **Device Mutation Denial** | Section 5.2.4 | AC-DEV-6 | Capability Enforcement Suite |
 | **Profile Safe Projection** | Section 5.1.2 | AC-SUB-2, AC-SUB-3, AC-SUB-4 | Profile & Venue Suite |
 | **Profile Operations** | Section 5.1.3 | AC-SUB-5, AC-SUB-6 | Profile & Venue Suite |
 | **Subscriber Self-Deletion** | Section 5.1.4, 5.1.5 | AC-SUB-7, AC-SUB-8, AC-SUB-9 | Profile & Venue Suite |
-| **Venue Authorization** | Section 5.3, 6.2 | AC-VEN-1, AC-VEN-2, AC-VEN-3 | Profile & Venue Suite |
+| **Venue Authorization** | Section 5.3, 6.2 | AC-VEN-1, AC-VEN-2, AC-VEN-3, AC-VEN-4 | Profile & Venue Suite |
 | **Configuration API Boundary** | Section 5.4 | AC-CFG-1 | Capability Enforcement Suite |
 | **Registration Flow (Flow A)** | Section 7 | AC-REG-1, AC-REG-2 | Registration Separation Suite |
 | **Administrative Compatibility**| Section 8 | AC-ADM-1 | Administrative Regression Suite |
-| **Error Differentiation (403/404/400)**| Section 9 | AC-DEV-2, AC-DEV-6, AC-SUB-8 | All Suites |
+| **Error Differentiation (403/404/400)**| Section 9 | AC-DEV-2, AC-DEV-6, AC-SUB-8, AC-VEN-3 | All Suites |
 | **Security Requirements** | Section 10 | All ACs | All Suites |
