@@ -17,7 +17,13 @@ This specification establishes a dedicated, fail-closed subscriber authorization
 > [!IMPORTANT]
 > **Strict PR Scope & Reviewer Guidance**:
 > The primary objective of Issue #90 and its upcoming implementation PR is **specifically to restore the active subscriber path exercised by the User Portal (`owsub`) end-to-end**.
-> - **In-Scope Review Priority (Tier 1)**: Review and implementation acceptance MUST evaluate strictly against the core `owprov` endpoints invoked by `owsub` (`GET /subscriberDevice`, `GET /subscriberDevice/{mac}`, `POST /subscriberDevice/0`, `DELETE /subscriberDevice/{mac}`, `DELETE /subscriber/{id}`, and Flow A signup `POST /subscriber`).
+> - **In-Scope Review Priority (Tier 1 Subscriber Authorization)**: Review and implementation acceptance MUST evaluate strictly against the core `owprov` subscriber Bearer-token endpoints invoked by `owsub`:
+>   1. `GET /api/v1/subscriberDevice` (Collection retrieval scoped to `WHERE subscriberId = :CallerId`)
+>   2. `GET /api/v1/subscriberDevice/{mac}` (Device existence/claim verification)
+>   3. `POST /api/v1/subscriberDevice/0` (Device claim onboarding on sentinel path `/0`)
+>   4. `DELETE /api/v1/subscriberDevice/{mac}` (Device unclaim and inventory disassociation)
+>   5. `DELETE /api/v1/subscriber/{id}` (Subscriber account self-deletion via UserPortal proxy)
+> - **Internal Service Non-Regression (Tier 3 Flow A)**: Unauthenticated registration (`POST /api/v1/subscriber`) executes via internal service credentials (`X-API-KEY`) and must be verified for backward compatibility with zero regressions, but is an internal microservice flow outside subscriber RBAC.
 > - **Deferred Follow-Up Scope (Non-Blocking)**: Any endpoint or capability outside this active `owsub` call path (such as direct subscriber venue mutations or bare profile updates) is non-blocking for this PR and is explicitly deferred to follow-up issues. Reviewers should evaluate this PR strictly against the active UserPortal integration contract rather than blocking on out-of-scope non-UserPortal endpoints.
 
 ---
@@ -93,7 +99,7 @@ In production, subscribers interact exclusively with UserPortal (`owsub`) via th
 | **Hardware Action**| `POST /api/v1/action?action={cmd}` | `GET /api/v1/subscriberDevice` *(verifies ownership; dispatches to `owgw`)* | Bearer Token | **Tier 1 (P0)** |
 | **Delete Account** | `DELETE /api/v1/subscriber` | `DELETE /api/v1/subscriber/{id}` | Bearer Token | **Tier 1 (P0)** |
 | **Location / Venue** | `GET/POST/PUT/DELETE /api/v1/subscriber/location` | `GET/PUT /api/v1/venue`<br/>`GET/PUT/DELETE /api/v1/location` | Internal (`X-API-KEY`) *(Bypasses RBAC)* | Tier 3 |
-| **Topology View** | `GET /api/v1/topology` | `GET /api/v1/subscriberDevice`<br/>`GET /api/v1/venue/{id}` | Bearer Token / Internal *(Bypasses RBAC)* | **Tier 1 (P0)** |
+| **Topology View** | `GET /api/v1/topology` | 1. `GET /api/v1/subscriberDevice`<br/>2. `GET /api/v1/venue/{id}` | 1. Bearer Token<br/>2. Internal (`X-API-KEY`) *(Bypasses RBAC)* | 1. **Tier 1 (P0)**<br/>2. Tier 3 |
 | **Parental Controls**| `POST /api/v1/groups`, `POST /api/v1/schedules` | `GET /api/v1/subscriberDevice` *(resolves gateway serial; pushes firewall to `owgw`)* | Bearer Token | **Tier 1 (P0)** |
 | **Device Mutation**| *(Not called by Mobile App today)* | `PUT /api/v1/subscriberDevice/{id}` | Bearer Token | **Denied** *(Admin-only)* |
 
@@ -333,10 +339,11 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
 3. **Multi-Venue & Active Device Aggregation Check**: The system MUST verify that no active claimed devices or populated venues remain associated with `CallerId` before permitting deletion:
    - `InventoryDB.Count("subscriber", CallerId) == 0`
    - `SubscriberDeviceDB.Count("subscriberId", CallerId) == 0`
-   - **Venue Aggregation Procedure**: The system MUST query venues associated with the subscriber using the existing codebase query (`VenueDB.GetRecords(0, 100, venues, " subscriber='" + CallerId + "' ")`). Because a residential subscriber possesses a single home venue, this retrieval limit provides comprehensive coverage for subscriber self-deletion in production; multi-page venue pagination loops are deferred as a non-blocking follow-up optimization. For every retrieved venue, the system MUST verify that its device collection is empty (`venue.devices.empty()`).
+   - **Comprehensive Multi-Venue Pagination Procedure**: The system MUST query all venues associated with the subscriber across all pages using bounded database pagination (`VenueDB.GetRecords(offset, limit, batch, " subscriber='" + CallerId + "' ")`, continuing in batches until all matching venue records are retrieved). For every retrieved venue across all pages, the system MUST verify that its device collection is empty (`venue.devices.empty()`).
+   - **Fail-Closed Retrieval Guard**: If any database query error, retrieval failure, or incomplete pagination occurs during venue evaluation, the operation MUST fail closed immediately and abort account deletion (`HTTP 400 Bad Request` / `HTTP 500 Internal Server Error`), preventing deletion under an ambiguous or partially inspected venue state.
 4. **Conditional Deletion**:
-   - If active claimed devices remain associated with the subscriber in `InventoryDB`, `SubscriberDeviceDB`, or **any** owned venue contains devices (`!venue.devices.empty()`), the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
-   - If all owned venues contain zero devices (or if the subscriber owns zero venues) and device counts in `InventoryDB` and `SubscriberDeviceDB` are zero, the system MUST delete all subscriber-owned venues in `VenueDB`, and subsequently delete the subscriber record in `SignupDB`.
+   - If active claimed devices remain associated with the subscriber in `InventoryDB`, `SubscriberDeviceDB`, or **any** owned venue contains devices (`!venue.devices.empty()`), the system MUST reject the request fail-closed with `HTTP 400 Bad Request` (`StillInUse`).
+   - If all owned venues contain zero devices (or if the subscriber owns zero venues) and device counts in `InventoryDB` and `SubscriberDeviceDB` are zero, the system MUST delete all subscriber-owned venues in `VenueDB` across all paginated batches, and subsequently delete the subscriber record in `SignupDB`.
 
 #### 5.1.5 DELETE `/api/v1/subscriber/{id}` (Parameterized Path)
 1. **UserPortal Integration Context**: UserPortal (`owsub`) proxies subscriber account deletion by invoking `DELETE /api/v1/subscriber/{UserInfo_.userinfo.id}` using the authenticated subscriber's Bearer token.
@@ -345,9 +352,10 @@ The `PUT /api/v1/subscriber` endpoint serves two distinct operational lifecycles
    - If `{id} != CallerId`, the request MUST be rejected fail-closed with `HTTP 403 ACCESS_DENIED`.
    - If `{id} == CallerId`, authorization succeeds and proceeds to the active device aggregation check.
 3. **Multi-Venue & Active Device Aggregation Check**:
-   - The system executes the identical multi-venue aggregation check: `InventoryDB.Count("subscriber", CallerId) == 0 && SubscriberDeviceDB.Count("subscriberId", CallerId) == 0`, and iterates all venues matching `subscriber == CallerId` to ensure every venue satisfies `venue.devices.empty()`.
-   - If active claimed devices remain associated with `CallerId` or any owned venue has active devices, the system MUST reject the request with `HTTP 400 Bad Request` (`StillInUse`).
-   - If active claimed device count is zero across all sources, the system MUST delete all subscriber-associated venues, followed by deleting the subscriber record.
+   - The system executes the identical multi-venue aggregation check: `InventoryDB.Count("subscriber", CallerId) == 0 && SubscriberDeviceDB.Count("subscriberId", CallerId) == 0`, and iterates all venues matching `subscriber == CallerId` across all paginated batches using bounded database pagination until exhausted, ensuring every owned venue satisfies `venue.devices.empty()`.
+   - **Fail-Closed Retrieval Guard**: If any query error or retrieval failure occurs during venue pagination, the operation MUST fail closed immediately and abort account deletion.
+   - If active claimed devices remain associated with `CallerId` or any owned venue has active devices (`!venue.devices.empty()`), the system MUST reject the request fail-closed with `HTTP 400 Bad Request` (`StillInUse`).
+   - If active claimed device count is zero across all sources, the system MUST delete all subscriber-associated venues across all pages, followed by deleting the subscriber record.
 4. **Administrative Principal Evaluation**: When invoked by an administrative principal (`ROOT`, `Admin`, `CSR`), the endpoint bypasses the subscriber consistent identity rule and evaluates strictly through administrative RBAC, authorizing deletion of subscriber records according to administrative policy.
 
 ---
@@ -572,9 +580,9 @@ Enforced for:
 - **AC-SUB-4**: A subscriber calling `GET /api/v1/subscriber?signupUUID=<own_id>` successfully retrieves their profile; calling with `?signupUUID=<foreign_id>` receives `HTTP 404 Not Found` (uniform existence masking).
 - **AC-SUB-5**: An authenticated subscriber calling `PUT /api/v1/subscriber?operation=updateMac` with a valid, unassigned MAC successfully updates their profile.
 - **AC-SUB-6**: An authenticated subscriber calling `PUT /api/v1/subscriber` with an operation other than `updateMac` (or an empty operation) receives `HTTP 403 ACCESS_DENIED`. Calling `PUT /api/v1/subscriber?operation=updateMac` with an already-assigned MAC address receives `HTTP 400 Bad Request` (`MACAddressExists` / `RecordNotUpdated`).
-- **AC-SUB-7**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with zero active claimed devices across all owned venues successfully deletes their profile.
-- **AC-SUB-8**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with active claimed devices remaining in any owned venue receives `HTTP 400 Bad Request` (`StillInUse`).
-- **AC-SUB-9**: An authenticated subscriber calling parameterized `DELETE /api/v1/subscriber/{id}` where `{id} == CallerId` with zero active claimed devices across all owned venues successfully deletes their profile and associated empty venues; if active claimed devices remain associated with the subscriber or any owned venue, receives `HTTP 400 Bad Request` (`StillInUse`); calling where `{id} != CallerId` receives `HTTP 403 ACCESS_DENIED`.
+- **AC-SUB-7**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with zero active claimed devices across all owned venues (verified comprehensively across all paginated venue batches) successfully deletes their profile.
+- **AC-SUB-8**: An authenticated subscriber calling bare `DELETE /api/v1/subscriber` with active claimed devices remaining in any owned venue (or if venue pagination encounters a query failure) receives `HTTP 400 Bad Request` (`StillInUse`) fail-closed.
+- **AC-SUB-9**: An authenticated subscriber calling parameterized `DELETE /api/v1/subscriber/{id}` where `{id} == CallerId` with zero active claimed devices across all owned venues (verified across all paginated venue batches) successfully deletes their profile and associated empty venues; if active claimed devices remain associated with the subscriber or any owned venue (or if venue pagination encounters a query failure), receives `HTTP 400 Bad Request` (`StillInUse`) fail-closed; calling where `{id} != CallerId` receives `HTTP 403 ACCESS_DENIED`.
 
 ### 11.2 Subscriber Devices
 - **AC-DEV-1**: An authenticated subscriber calling `GET /api/v1/subscriberDevice` receives only devices where `subscriberId == CallerId`.
