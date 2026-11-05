@@ -3,15 +3,20 @@
 //	License copy: https://github.com/Telecominfraproject/wlan-cloud-ucentralgw/blob/master/LICENSE
 //
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "Poco/AutoPtr.h"
+#include "Poco/Checksum.h"
 #include "Poco/ConsoleChannel.h"
 #include "Poco/JSON/Object.h"
 #include "Poco/JSON/Parser.h"
@@ -439,43 +444,20 @@ static void test_service_events_explicit_partition_0() {
 // SECTION D: Multi-Partition & Key Distribution Tests
 // =========================================================================
 
-// Murmur2 hash simulator (standard librdkafka default key partitioner algorithm)
-static uint32_t murmur2(const void *key, int len, uint32_t seed = 0x9747b28c) {
-	const uint32_t m = 0x5bd1e995;
-	const int r = 24;
-	uint32_t h = seed ^ len;
-	const unsigned char *data = (const unsigned char *)key;
-
-	while (len >= 4) {
-		uint32_t k = *(uint32_t *)data;
-		k *= m;
-		k ^= k >> r;
-		k *= m;
-		h *= m;
-		h ^= k;
-		data += 4;
-		len -= 4;
-	}
-
-	switch (len) {
-		case 3: h ^= data[2] << 16; [[fallthrough]];
-		case 2: h ^= data[1] << 8;  [[fallthrough]];
-		case 1: h ^= data[0];
-		        h *= m;
-	};
-
-	h ^= h >> 13;
-	h *= m;
-	h ^= h >> 15;
-	return h;
+// CRC32 hash simulator matching librdkafka's default 'consistent_random' partitioner
+// (which uses CRC32 checksum for non-empty message keys to determine target partition)
+static uint32_t librdkafka_crc32(const std::string &key) {
+	Poco::Checksum checksum(Poco::Checksum::TYPE_CRC32);
+	checksum.update(key);
+	return checksum.checksum();
 }
 
 static int32_t compute_partition(const std::string &key, int32_t num_partitions) {
-	uint32_t hash = murmur2(key.data(), (int)key.size()) & 0x7fffffff;
-	return (int32_t)(hash % num_partitions);
+	uint32_t hash = librdkafka_crc32(key);
+	return static_cast<int32_t>(hash % num_partitions);
 }
 
-// Test D1: Partition mapping consistency and distribution across partitions
+// Test D1: Partition mapping consistency and distribution across partitions using librdkafka default (consistent_random CRC32)
 static void test_key_hashing_consistency_and_distribution() {
 	const int32_t num_partitions = 4;
 
@@ -504,7 +486,7 @@ static void test_key_hashing_consistency_and_distribution() {
 	TEST_ASSERT(partitions_hit.size() > 1,
 				"20 distinct venue keys must distribute across more than 1 partition");
 
-	std::cout << "  PASS: test_key_hashing_consistency_and_distribution" << std::endl;
+	std::cout << "  PASS: test_key_hashing_consistency_and_distribution (consistent_random CRC32)" << std::endl;
 }
 
 // Test D2: Broker-backed multi-partition integration test (when broker is available)
@@ -517,37 +499,147 @@ static void test_broker_backed_producer_partitioning() {
 
 	std::cout << "  Running broker-backed producer partitioning test against: " << broker << std::endl;
 
-	cppkafka::Configuration config({
-		{"metadata.broker.list", std::string(broker)},
-		{"client.id", "partitioning_test_producer"}
-	});
-
 	try {
-		cppkafka::Producer producer(config);
+		const char *topicEnv = std::getenv("KAFKA_PARTITION_TEST_TOPIC");
+		const std::string topic = (topicEnv && !std::string(topicEnv).empty()) ? topicEnv : KafkaTopics::PROVISIONING_CHANGE;
 
-		// Produce messages with different keys and unassigned partition
-		for (int i = 0; i < 5; ++i) {
-			std::string key = "Venue:broker-venue-" + std::to_string(i);
-			std::string payload = "{\"test_index\":" + std::to_string(i) + "}";
+		// 1. Verify multi-partition topology on the broker using a consumer handle
+		cppkafka::Configuration consumerConfig({
+			{"metadata.broker.list", std::string(broker)},
+			{"client.id", "partitioning_test_verifier_consumer"},
+			{"group.id", "partitioning_verifier_" + std::to_string(std::time(nullptr))},
+			{"enable.auto.commit", false},
+			{"enable.partition.eof", false}
+		});
 
-			cppkafka::MessageBuilder builder("test_producer_partitioning");
-			builder.key(key);
-			builder.payload(payload);
-			producer.produce(builder);
+		cppkafka::Consumer consumer(consumerConfig);
+		auto topicMeta = consumer.get_metadata(consumer.get_topic(topic));
+		const auto &partitions = topicMeta.get_partitions();
+
+		// Issue C fix: Do not silently skip multi-partition check; topic MUST have >1 partition
+		TEST_ASSERT(partitions.size() > 1,
+					"Topic '" + topic + "' must have at least 2 partitions on broker for multi-partition testing (found: "
+					+ std::to_string(partitions.size()) + ")");
+
+		// Query current high watermark offsets for all partitions and assign consumer directly
+		cppkafka::TopicPartitionList tpl;
+		for (const auto &p : partitions) {
+			auto offsets = consumer.query_offsets(cppkafka::TopicPartition(topic, p.get_id()));
+			int64_t high = std::get<1>(offsets);
+			tpl.emplace_back(topic, p.get_id(), high);
 		}
-		producer.flush();
+		consumer.assign(tpl);
 
-		// Produce explicit partition 0 message (e.g. service_events)
-		cppkafka::MessageBuilder explicitBuilder("test_producer_partitioning");
-		explicitBuilder.key("service_endpoint");
-		explicitBuilder.partition(0);
-		explicitBuilder.payload("{\"event\":\"join\"}");
-		producer.produce(explicitBuilder);
-		producer.flush();
+		// 2. Start the production OWPROV KafkaProducer worker thread
+		KafkaManager()->KafkaEnabled_ = true;
+		KafkaManager()->Producer().Start();
+		TEST_ASSERT(KafkaManager()->Producer().IsRunning(), "Production KafkaProducer worker must be running");
 
-		std::cout << "  PASS: test_broker_backed_producer_partitioning (successfully produced to broker)" << std::endl;
+		std::string token = std::to_string(std::time(nullptr)) + "_" + MicroServiceCreateUUID();
+
+		// 3. Post production messages through KafkaManager()->PostMessage()
+		// 3a. Same venue key: modification & removal (must land on identical partition)
+		std::string sameVenueKey = "Venue:same-venue-" + token;
+		std::string modPayload = "{\"operation\":\"modification\",\"token\":\"" + token + "\"}";
+		std::string remPayload = "{\"operation\":\"removal\",\"token\":\"" + token + "\"}";
+		KafkaManager()->PostMessage(topic.c_str(), sameVenueKey, modPayload, true);
+		KafkaManager()->PostMessage(topic.c_str(), sameVenueKey, remPayload, true);
+
+		// 3b. Explicit partition 0 (service_events contract)
+		std::string svcKey = "https://owprov-internal:17005/" + token;
+		std::string svcPayload = "{\"event\":\"join\",\"token\":\"" + token + "\"}";
+		KafkaManager()->PostMessage(topic.c_str(), svcKey, svcPayload, false, 0);
+
+		// 3c. Multiple distinct venue keys (must distribute across multiple partitions)
+		const int numDistinct = 6;
+		std::vector<std::string> distinctKeys;
+		for (int i = 0; i < numDistinct; ++i) {
+			std::string dKey = "Venue:distinct-" + token + "-" + std::to_string(i);
+			distinctKeys.push_back(dKey);
+			std::string dPayload = "{\"operation\":\"modification\",\"index\":" + std::to_string(i) + ",\"token\":\"" + token + "\"}";
+			KafkaManager()->PostMessage(topic.c_str(), dKey, dPayload, true);
+		}
+
+		const int totalExpectedMessages = 2 + 1 + numDistinct; // 9 messages
+
+		// 4. Issue A fix: Drain the production queue before calling Stop()
+		auto drainStart = std::chrono::steady_clock::now();
+		while (KafkaManager()->Producer().Queue_.size() > 0 &&
+			   std::chrono::steady_clock::now() - drainStart < std::chrono::seconds(5)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		TEST_ASSERT(KafkaManager()->Producer().Queue_.empty(),
+					"Production KafkaProducer queue must drain completely before stopping");
+
+		// Allow the worker thread to finish flushing all enqueued messages to the broker
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+		KafkaManager()->Producer().Stop();
+		KafkaManager()->KafkaEnabled_ = false;
+
+		// 5. Issue B fix: Verify actual production messages consumed from the broker
+		std::map<std::string, std::vector<int32_t>> observed_partitions;
+		int received_count = 0;
+		auto pollStart = std::chrono::steady_clock::now();
+
+		while (received_count < totalExpectedMessages &&
+			   std::chrono::steady_clock::now() - pollStart < std::chrono::seconds(10)) {
+			cppkafka::Message msg = consumer.poll(std::chrono::milliseconds(200));
+			if (!msg) continue;
+			if (msg.get_error()) {
+				if (msg.get_error().get_error() == RD_KAFKA_RESP_ERR__PARTITION_EOF) continue;
+				TEST_ASSERT(false, "Broker error while consuming production messages: " + msg.get_error().to_string());
+			}
+
+			std::string payload = msg.get_payload() ? std::string(msg.get_payload()) : "";
+			if (payload.find(token) == std::string::npos) {
+				continue; // Message from a different run or external producer
+			}
+
+			std::string key = msg.get_key() ? std::string(msg.get_key()) : "";
+			observed_partitions[key].push_back(msg.get_partition());
+			received_count++;
+		}
+
+		consumer.unsubscribe();
+		consumer.unassign();
+
+		// Assert all production messages were delivered to and retrieved from the broker
+		TEST_ASSERT(received_count == totalExpectedMessages,
+					"Expected " + std::to_string(totalExpectedMessages) +
+					" production messages from broker, but received " + std::to_string(received_count));
+
+		// Assert same-key affinity on production messages: modification and removal must land on exact same partition
+		TEST_ASSERT(observed_partitions[sameVenueKey].size() == 2,
+					"Expected 2 messages for sameVenueKey from production producer");
+		TEST_ASSERT(observed_partitions[sameVenueKey][0] == observed_partitions[sameVenueKey][1],
+					"Production producer: modification and removal for the same venue MUST land on the same partition (got: "
+					+ std::to_string(observed_partitions[sameVenueKey][0]) + " and "
+					+ std::to_string(observed_partitions[sameVenueKey][1]) + ")");
+
+		// Assert explicit partition 0 routing contract on production message
+		TEST_ASSERT(!observed_partitions[svcKey].empty(),
+					"Production producer: explicit partition 0 message must be received");
+		TEST_ASSERT(observed_partitions[svcKey][0] == 0,
+					"Production producer: explicit partition 0 message must land on partition 0 (got: "
+					+ std::to_string(observed_partitions[svcKey][0]) + ")");
+
+		// Assert cross-partition distribution of distinct keys on production messages
+		std::set<int32_t> distinct_parts;
+		for (const auto &dKey : distinctKeys) {
+			TEST_ASSERT(!observed_partitions[dKey].empty(),
+						"Production message for key " + dKey + " must be received");
+			distinct_parts.insert(observed_partitions[dKey][0]);
+		}
+		TEST_ASSERT(distinct_parts.size() > 1,
+					"Production producer: distinct venue keys must distribute across multiple partitions on broker (spanned "
+					+ std::to_string(distinct_parts.size()) + " of " + std::to_string(partitions.size()) + " partitions)");
+
+		std::cout << "  PASS: test_broker_backed_producer_partitioning (verified "
+				  << received_count << " production messages across "
+				  << distinct_parts.size() << " broker partitions)" << std::endl;
 	} catch (const std::exception &e) {
-		std::cout << "  WARNING: test_broker_backed_producer_partitioning error: " << e.what() << std::endl;
+		TEST_ASSERT(false, std::string("Broker-backed producer partitioning test failed: ") + e.what());
 	}
 }
 
