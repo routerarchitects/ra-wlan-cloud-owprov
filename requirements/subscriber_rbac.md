@@ -14,6 +14,12 @@ The primary objective is to enable authenticated subscribers to securely execute
 
 This specification establishes a dedicated, fail-closed subscriber authorization pipeline evaluated at the `RESTAPIHandler::RoleIsAuthorized()` choke point prior to administrative role resolution, leaving existing administrative RBAC policies and workflows completely intact.
 
+> [!IMPORTANT]
+> **Strict PR Scope & Reviewer Guidance**:
+> The primary objective of Issue #90 and its upcoming implementation PR is **specifically to restore the active subscriber path exercised by the User Portal (`owsub`) end-to-end**.
+> - **In-Scope Review Priority (Tier 1)**: Review and implementation acceptance MUST evaluate strictly against the core `owprov` endpoints invoked by `owsub` (`GET /subscriberDevice`, `GET /subscriberDevice/{mac}`, `POST /subscriberDevice/0`, `DELETE /subscriberDevice/{mac}`, `DELETE /subscriber/{id}`, and Flow A signup `POST /subscriber`).
+> - **Deferred Follow-Up Scope (Non-Blocking)**: Any endpoint or capability outside this active `owsub` call path (such as direct subscriber venue mutations or bare profile updates) is non-blocking for this PR and is explicitly deferred to follow-up issues. Reviewers should evaluate this PR strictly against the active UserPortal integration contract rather than blocking on out-of-scope non-UserPortal endpoints.
+
 ---
 
 ## 2. Background
@@ -59,15 +65,18 @@ In-scope functional and security requirements comprise:
 To resolve the regression in production without destabilizing existing cross-service subscriber flows, the upcoming implementation PR for Issue #90 will deliver and verify functionality across three prioritized tiers:
 
 #### Tier 1: Active Production Subscriber Path (P0 — Mandatory Delivery)
-The active production call path consists of the exact endpoints invoked by UserPortal (`owsub`) during live Mobile App operations. Making these endpoints fully authorized, functionally verified, and covered by end-to-end integration tests is the primary objective of the implementation PR:
+The active production call path consists of the exact endpoints invoked by UserPortal (`owsub`) during live Mobile App operations. Making these endpoints fully authorized, functionally verified, and covered by end-to-end integration tests is the primary objective and sole mandatory acceptance criteria of the implementation PR:
 1. `GET /api/v1/subscriberDevice`: Collection retrieval used by UserPortal to locate the root gateway (`deviceGroup == "olg"`) for Wi-Fi actions, topology, and parental controls. Must tolerate upstream query parameters (`operatorId`).
 2. `GET /api/v1/subscriberDevice/{mac}`: Individual device lookup during device claim verification.
 3. `POST /api/v1/subscriberDevice/0`: Sentinel creation path for onboarding root gateways and mesh extenders.
 4. `DELETE /api/v1/subscriberDevice/{mac}`: Device unclaim and inventory disassociation.
 5. `DELETE /api/v1/subscriber/{id}`: Subscriber account self-deletion via UserPortal proxy.
+6. `POST /api/v1/subscriber` (Flow A / Track 1): Unauthenticated signup workflow using internal service credentials (`X-API-KEY`), which must bypass subscriber RBAC.
 
-#### Tier 2: Defensive & Administrative Endpoints (P1 — Capability Retention)
-Endpoints defined in `owprov`'s OpenAPI specification that are not invoked by UserPortal's active Mobile App flow today (e.g. profile inspection/update). Standalone device mutation (`PUT /api/v1/subscriberDevice/{id}`) is explicitly classified as an administrative-only endpoint (denied fail-closed for subscribers).
+#### Tier 2: Defensive & Non-UserPortal Endpoints (P1 — Deferred to Follow-Up Issues)
+Endpoints defined in `owprov`'s OpenAPI specification that are not invoked by UserPortal's active Mobile App flow today (e.g. direct subscriber profile inspection/update on bare paths, or direct subscriber venue mutations on `PUT /api/v1/venue/{id}`). While documented herein for architectural completeness:
+- **Non-Blocking Delivery**: Implementation, testing, and comprehensive hardening of Tier 2 endpoints are **explicitly deferred to follow-up issues** to prevent blocking the primary goal of restoring live subscriber operations.
+- **Administrative Classification**: Standalone device mutation (`PUT /api/v1/subscriberDevice/{id}`) is explicitly classified as an administrative-only endpoint (denied fail-closed with `HTTP 403 ACCESS_DENIED` for subscribers).
 
 #### Tier 3: Internal Microservice Principals (Track 1 / Flow A)
 Endpoints invoked by UserPortal or other ecosystem microservices using trusted internal service credentials (`Internal_ == true`, valid `X-API-KEY` with verified `X-INTERNAL-NAME`), such as `POST /api/v1/subscriber` (signup) and internal venue/location lookups. All internal service calls bypass the subscriber authorization pipeline entirely and proceed directly to existing internal microservice handler execution.
@@ -97,6 +106,7 @@ In production, subscribers interact exclusively with UserPortal (`owsub`) via th
 ### 3.4 Out of Scope
 
 The following areas are explicitly excluded from the scope of Issue #90:
+- **Non-UserPortal Endpoints (Deferred to Follow-Up Issues)**: Direct subscriber endpoints not invoked by `owsub` in the active production call chain (such as direct subscriber venue modifications on `PUT /api/v1/venue/{id}` or bare profile updates) are secondary and explicitly deferred to follow-up issues, ensuring this PR remains strictly focused on making the live subscriber path operational.
 - **Standalone Configuration Endpoints**: Direct subscriber access to `/api/v1/configuration*` is administrative-only and denied fail-closed.
 - **Administrative RBAC Redesign**: Modifications to administrative role structures, policy inheritance, entity hierarchy, or staff permissions.
 - **Hardware Proof-of-Possession**: Physical hardware entitlement, challenge-response verification, or supply-chain validation during device claiming.
@@ -596,7 +606,7 @@ Enforced for:
 Test suites MUST provide comprehensive verification across all authorization boundaries without redundant test cases.
 
 > [!IMPORTANT]
-> **Test Suite Prioritization:** Automated test execution for the upcoming implementation PR MUST prioritize the **Tier 1 Active Production Path** (`GET /api/v1/subscriberDevice`, `POST /api/v1/subscriberDevice/0`, `DELETE /api/v1/subscriberDevice/{mac}`, `GET /api/v1/subscriberDevice/{mac}`, and `DELETE /api/v1/subscriber/{id}`) to guarantee that live Mobile App operations through UserPortal succeed with zero regressions. End-to-end verification of Tier 2 non-path endpoints is secondary.
+> **Test Suite Prioritization & Review Boundary:** Automated test execution and PR acceptance for the upcoming implementation PR MUST prioritize the **Tier 1 Active Production Path** (`GET /api/v1/subscriberDevice`, `POST /api/v1/subscriberDevice/0`, `DELETE /api/v1/subscriberDevice/{mac}`, `GET /api/v1/subscriberDevice/{mac}`, and `DELETE /api/v1/subscriber/{id}`) to guarantee that live Mobile App operations through UserPortal succeed with zero regressions. End-to-end verification and hardening of Tier 2 non-UserPortal endpoints are explicitly non-blocking and deferred to follow-up issues.
 
 ```text
 +-------------------------------------------------------------------------+
@@ -692,6 +702,7 @@ The following items are explicit non-goals for Issue #90:
 15. **No Custom Query Parameter Engine**: This PR will not implement duplicate query parameter rejection or custom URI parsing beyond standard POCO `URI::QueryParameters` processing.
 16. **No Schema Removal of `operatorId`**: While `operatorId` has zero authority in subscriber authorization, this PR will not remove or alter `operatorId` columns in database tables or the subscriber profile representation.
 17. **No Internal Microservice Permission Matrix Overhaul**: Existing internal microservice authorization and routing behavior for requests on `Internal_ == true` are preserved without alteration; granular microservice permission hardening is deferred to a follow-up issue.
+18. **No Blocking on Deferred / Non-UserPortal Endpoints**: Delivery and review criteria for Issue #90 are strictly defined by the active `owsub` call path (Tier 1). Any edge cases, hardening, or requirements on non-UserPortal endpoints (Tier 2) are explicitly non-blocking for this PR and deferred to follow-up issues.
 
 ---
 
