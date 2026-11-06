@@ -25,6 +25,7 @@
 #define private public
 #define protected public
 #include "framework/KafkaManager.h"
+#include "framework/EventBusManager.h"
 #undef private
 #undef protected
 
@@ -86,6 +87,33 @@ namespace OpenWifi {
 
 	std::string MicroServiceDataDirectory() {
 		return "/tmp";
+	}
+
+	static std::atomic<bool> g_MockRedisRefreshed = false;
+	static std::atomic<bool> g_MockRedisDeleted = false;
+
+	void MicroServiceRefreshRedisRegistration() {
+		g_MockRedisRefreshed = true;
+	}
+
+	void MicroServiceDeleteRedisRegistration() {
+		g_MockRedisDeleted = true;
+	}
+
+	std::uint64_t MicroServiceDaemonBusTimer() {
+		return 50; // 50 milliseconds for fast loop execution in tests
+	}
+
+	std::string MicroServiceMakeSystemEventMessage(const char *Type) {
+		Poco::JSON::Object Obj;
+		Obj.set(KafkaTopics::ServiceEvents::Fields::EVENT, Type);
+		Obj.set(KafkaTopics::ServiceEvents::Fields::ID, (Poco::Int64)g_MockSystemId);
+		Obj.set(KafkaTopics::ServiceEvents::Fields::TYPE, "owprov");
+		Obj.set(KafkaTopics::ServiceEvents::Fields::PUBLIC, g_MockPrivateEndPoint);
+		Obj.set(KafkaTopics::ServiceEvents::Fields::PRIVATE, g_MockPrivateEndPoint);
+		std::ostringstream OS;
+		Obj.stringify(OS);
+		return OS.str();
 	}
 
 	SubSystemServer::SubSystemServer(const std::string &Name, const std::string &LoggingPrefix,
@@ -405,39 +433,76 @@ static void test_empty_or_invalid_id_rejected() {
 // SECTION C: service_events Regression Tests
 // =========================================================================
 
-// Test C1: service_events routes explicitly to partition 0
+// Test C1: service_events routes explicitly to partition 0 via production EventBusManager
 static void test_service_events_explicit_partition_0() {
 	KafkaManager()->KafkaEnabled_ = true;
 	KafkaManager()->ProducerThr_.Queue_.clear();
+	g_MockRedisRefreshed = false;
+	g_MockRedisDeleted = false;
 
-	std::string endpoint = MicroServicePrivateEndPoint();
-	std::string joinMsg = "{\"event\":\"join\",\"endpoint\":\"" + endpoint + "\"}";
-	std::string keepAliveMsg = "{\"event\":\"keep-alive\",\"endpoint\":\"" + endpoint + "\"}";
-	std::string leaveMsg = "{\"event\":\"leave\",\"endpoint\":\"" + endpoint + "\"}";
+	// 1. Start EventBusManager background worker thread which runs EventBusManager::run()
+	EventBusManager()->Start();
 
-	// Emulate EventBusManager::run publishing calls
-	KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, endpoint, joinMsg, false, 0);
-	KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, endpoint, keepAliveMsg, false, 0);
-	KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, endpoint, leaveMsg, false, 0);
+	// Wait for EVENT_JOIN and at least one EVENT_KEEP_ALIVE to be enqueued
+	auto startTime = std::chrono::steady_clock::now();
+	while (KafkaManager()->ProducerThr_.Queue_.size() < 2 &&
+		   std::chrono::steady_clock::now() - startTime < std::chrono::seconds(2)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
 
-	TEST_ASSERT(KafkaManager()->ProducerThr_.Queue_.size() == 3, "Exactly 3 service_events messages must be enqueued");
+	// 2. Stop EventBusManager, which causes loop exit and emits EVENT_LEAVE
+	EventBusManager()->Stop();
 
-	std::vector<std::string> expectedPayloads = {joinMsg, keepAliveMsg, leaveMsg};
-	for (const auto &expPayload : expectedPayloads) {
+	TEST_ASSERT(g_MockRedisRefreshed, "EventBusManager must refresh Redis registration");
+	TEST_ASSERT(g_MockRedisDeleted, "EventBusManager must delete Redis registration upon stopping");
+
+	size_t queueSize = KafkaManager()->ProducerThr_.Queue_.size();
+	TEST_ASSERT(queueSize >= 3, "EventBusManager must have published at least JOIN, KEEP_ALIVE, and LEAVE (got "
+				+ std::to_string(queueSize) + ")");
+
+	std::vector<std::pair<std::string, std::string>> eventsSeen; // (event, payload)
+
+	while (!KafkaManager()->ProducerThr_.Queue_.empty()) {
 		Poco::AutoPtr<Poco::Notification> n(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
 		auto m = dynamic_cast<KafkaMessage *>(n.get());
 		TEST_ASSERT(m != nullptr, "Notification must be KafkaMessage");
 		TEST_ASSERT(std::string(m->Topic()) == KafkaTopics::SERVICE_EVENTS,
 					"Topic must be service_events");
-		TEST_ASSERT(m->Key() == endpoint, "Key must be MicroServicePrivateEndPoint()");
-		TEST_ASSERT(m->Partition() == 0, "service_events MUST be routed explicitly to partition 0");
-		TEST_ASSERT(m->Payload() == expPayload, "Payload must match expected service event message");
+		TEST_ASSERT(m->Key() == MicroServicePrivateEndPoint(),
+					"Key must be MicroServicePrivateEndPoint()");
+
+		// CRITICAL CONTRACT CHECK: partition MUST be explicitly 0
+		TEST_ASSERT(m->Partition() == 0,
+					"EventBusManager MUST explicitly route service_events to partition 0 (got: "
+					+ std::to_string(m->Partition()) + ")");
+
+		// Parse payload and record event type
+		Poco::JSON::Parser parser;
+		auto parsed = parser.parse(m->Payload()).extract<Poco::JSON::Object::Ptr>();
+		TEST_ASSERT(parsed->has(KafkaTopics::ServiceEvents::Fields::EVENT), "service_events payload must contain 'event' field");
+		std::string eventType = parsed->get(KafkaTopics::ServiceEvents::Fields::EVENT).toString();
+		eventsSeen.emplace_back(eventType, m->Payload());
 	}
+
+	// Verify lifecycle sequence from production EventBusManager: JOIN first, LEAVE last
+	TEST_ASSERT(eventsSeen.front().first == KafkaTopics::ServiceEvents::EVENT_JOIN,
+				"First event from EventBusManager must be 'join'");
+	TEST_ASSERT(eventsSeen.back().first == KafkaTopics::ServiceEvents::EVENT_LEAVE,
+				"Final event from EventBusManager must be 'leave'");
+
+	bool foundKeepAlive = false;
+	for (size_t i = 1; i < eventsSeen.size() - 1; ++i) {
+		if (eventsSeen[i].first == KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE) {
+			foundKeepAlive = true;
+			break;
+		}
+	}
+	TEST_ASSERT(foundKeepAlive, "EventBusManager must have published 'keep-alive'");
 
 	KafkaManager()->KafkaEnabled_ = false;
 	KafkaManager()->ProducerThr_.Queue_.clear();
 
-	std::cout << "  PASS: test_service_events_explicit_partition_0" << std::endl;
+	std::cout << "  PASS: test_service_events_explicit_partition_0 (verified EventBusManager lifecycle: JOIN, KEEP_ALIVE, LEAVE all on partition 0)" << std::endl;
 }
 
 // =========================================================================
@@ -489,7 +554,7 @@ static void test_key_hashing_consistency_and_distribution() {
 	std::cout << "  PASS: test_key_hashing_consistency_and_distribution (consistent_random CRC32)" << std::endl;
 }
 
-// Test D2: Broker-backed multi-partition integration test (when broker is available)
+// Test D2: Broker-backed multi-partition integration test (when broker and isolated test topic are available)
 static void test_broker_backed_producer_partitioning() {
 	const char *broker = std::getenv("KAFKA_BROKERLIST");
 	if (!broker || std::string(broker).empty()) {
@@ -497,12 +562,17 @@ static void test_broker_backed_producer_partitioning() {
 		return;
 	}
 
-	std::cout << "  Running broker-backed producer partitioning test against: " << broker << std::endl;
+	const char *topicEnv = std::getenv("KAFKA_PARTITION_TEST_TOPIC");
+	if (!topicEnv || std::string(topicEnv).empty()) {
+		std::cout << "  SKIPPED: test_broker_backed_producer_partitioning (KAFKA_PARTITION_TEST_TOPIC not set - isolated test topic required)" << std::endl;
+		return;
+	}
+	const std::string topic = topicEnv;
+
+	std::cout << "  Running broker-backed producer partitioning test against: " << broker
+			  << " on isolated test topic: " << topic << std::endl;
 
 	try {
-		const char *topicEnv = std::getenv("KAFKA_PARTITION_TEST_TOPIC");
-		const std::string topic = (topicEnv && !std::string(topicEnv).empty()) ? topicEnv : KafkaTopics::PROVISIONING_CHANGE;
-
 		// 1. Verify multi-partition topology on the broker using a consumer handle
 		cppkafka::Configuration consumerConfig({
 			{"metadata.broker.list", std::string(broker)},
@@ -538,7 +608,7 @@ static void test_broker_backed_producer_partitioning() {
 		std::string token = std::to_string(std::time(nullptr)) + "_" + MicroServiceCreateUUID();
 
 		// 3. Post production messages through KafkaManager()->PostMessage()
-		// 3a. Same venue key: modification & removal (must land on identical partition)
+		// 3a. Same venue key: modification & removal (must land on identical partition in strict FIFO order)
 		std::string sameVenueKey = "Venue:same-venue-" + token;
 		std::string modPayload = "{\"operation\":\"modification\",\"token\":\"" + token + "\"}";
 		std::string remPayload = "{\"operation\":\"removal\",\"token\":\"" + token + "\"}";
@@ -578,7 +648,12 @@ static void test_broker_backed_producer_partitioning() {
 		KafkaManager()->KafkaEnabled_ = false;
 
 		// 5. Issue B fix: Verify actual production messages consumed from the broker
-		std::map<std::string, std::vector<int32_t>> observed_partitions;
+		struct ConsumedRecord {
+			std::string operation;
+			int32_t partition;
+			int64_t offset;
+		};
+		std::map<std::string, std::vector<ConsumedRecord>> recordsByKey;
 		int received_count = 0;
 		auto pollStart = std::chrono::steady_clock::now();
 
@@ -597,7 +672,19 @@ static void test_broker_backed_producer_partitioning() {
 			}
 
 			std::string key = msg.get_key() ? std::string(msg.get_key()) : "";
-			observed_partitions[key].push_back(msg.get_partition());
+			std::string op;
+			if (payload.find("\"operation\":\"modification\"") != std::string::npos ||
+				payload.find("\"operation\": \"modification\"") != std::string::npos) {
+				op = "modification";
+			} else if (payload.find("\"operation\":\"removal\"") != std::string::npos ||
+					   payload.find("\"operation\": \"removal\"") != std::string::npos) {
+				op = "removal";
+			} else if (payload.find("\"event\":\"join\"") != std::string::npos ||
+					   payload.find("\"event\": \"join\"") != std::string::npos) {
+				op = "join";
+			}
+
+			recordsByKey[key].push_back({op, msg.get_partition(), msg.get_offset()});
 			received_count++;
 		}
 
@@ -609,34 +696,51 @@ static void test_broker_backed_producer_partitioning() {
 					"Expected " + std::to_string(totalExpectedMessages) +
 					" production messages from broker, but received " + std::to_string(received_count));
 
-		// Assert same-key affinity on production messages: modification and removal must land on exact same partition
-		TEST_ASSERT(observed_partitions[sameVenueKey].size() == 2,
-					"Expected 2 messages for sameVenueKey from production producer");
-		TEST_ASSERT(observed_partitions[sameVenueKey][0] == observed_partitions[sameVenueKey][1],
-					"Production producer: modification and removal for the same venue MUST land on the same partition (got: "
-					+ std::to_string(observed_partitions[sameVenueKey][0]) + " and "
-					+ std::to_string(observed_partitions[sameVenueKey][1]) + ")");
+		// Assert same-key affinity and chronological ordering on production messages
+		const auto &sameVenueRecords = recordsByKey[sameVenueKey];
+		TEST_ASSERT(sameVenueRecords.size() == 2,
+					"Expected exactly 2 messages for sameVenueKey from production producer");
+
+		const auto &modRecord = sameVenueRecords[0];
+		const auto &remRecord = sameVenueRecords[1];
+
+		// Verify chronological operation sequence
+		TEST_ASSERT(modRecord.operation == "modification",
+					"First consumed message for venue must be 'modification', got: " + modRecord.operation);
+		TEST_ASSERT(remRecord.operation == "removal",
+					"Second consumed message for venue must be 'removal', got: " + remRecord.operation);
+
+		// Verify partition equality
+		TEST_ASSERT(modRecord.partition == remRecord.partition,
+					"Production producer: modification and removal for the same venue MUST land on the exact same partition (got: "
+					+ std::to_string(modRecord.partition) + " and " + std::to_string(remRecord.partition) + ")");
+
+		// Verify partition-local Kafka offset ordering (FIFO ordering contract)
+		TEST_ASSERT(modRecord.offset < remRecord.offset,
+					"Production producer: modification offset (" + std::to_string(modRecord.offset) +
+					") must be strictly less than removal offset (" + std::to_string(remRecord.offset) +
+					") to guarantee FIFO partition-local ordering");
 
 		// Assert explicit partition 0 routing contract on production message
-		TEST_ASSERT(!observed_partitions[svcKey].empty(),
+		TEST_ASSERT(!recordsByKey[svcKey].empty(),
 					"Production producer: explicit partition 0 message must be received");
-		TEST_ASSERT(observed_partitions[svcKey][0] == 0,
+		TEST_ASSERT(recordsByKey[svcKey][0].partition == 0,
 					"Production producer: explicit partition 0 message must land on partition 0 (got: "
-					+ std::to_string(observed_partitions[svcKey][0]) + ")");
+					+ std::to_string(recordsByKey[svcKey][0].partition) + ")");
 
 		// Assert cross-partition distribution of distinct keys on production messages
 		std::set<int32_t> distinct_parts;
 		for (const auto &dKey : distinctKeys) {
-			TEST_ASSERT(!observed_partitions[dKey].empty(),
+			TEST_ASSERT(!recordsByKey[dKey].empty(),
 						"Production message for key " + dKey + " must be received");
-			distinct_parts.insert(observed_partitions[dKey][0]);
+			distinct_parts.insert(recordsByKey[dKey][0].partition);
 		}
 		TEST_ASSERT(distinct_parts.size() > 1,
 					"Production producer: distinct venue keys must distribute across multiple partitions on broker (spanned "
 					+ std::to_string(distinct_parts.size()) + " of " + std::to_string(partitions.size()) + " partitions)");
 
 		std::cout << "  PASS: test_broker_backed_producer_partitioning (verified "
-				  << received_count << " production messages across "
+				  << received_count << " production messages: FIFO offset order preserved across "
 				  << distinct_parts.size() << " broker partitions)" << std::endl;
 	} catch (const std::exception &e) {
 		TEST_ASSERT(false, std::string("Broker-backed producer partitioning test failed: ") + e.what());

@@ -324,6 +324,7 @@ set_tests_properties(kafka_callback_deadlock_test
 add_executable(kafka_producer_partitioning_test
         tests/framework_tests/KafkaProducerPartitioning_test.cpp
         src/framework/KafkaManager.cpp
+        src/framework/EventBusManager.cpp
         src/RESTObjects/RESTAPI_ProvObjects.cpp
         src/RESTObjects/RESTAPI_SecurityObjects.cpp
 )
