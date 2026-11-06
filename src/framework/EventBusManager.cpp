@@ -20,10 +20,13 @@ namespace OpenWifi {
 		// proceed afterward. These calls remain synchronous, so slow Redis responses
 		// can delay Kafka events. openwifi.redis.timeout configures connection and
 		// receive timeouts, not a strict end-to-end operation deadline.
+		//
+		// service_events explicitly targets partition 0 as its topic policy to
+		// preserve the existing single-partition delivery policy and partition-local ordering.
 		MicroServiceRefreshRedisRegistration();
 		auto Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_JOIN));
 		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(), Msg,
-									false);
+									false, 0);
 		while (Running_) {
 			if(!Poco::Thread::trySleep((unsigned long)MicroServiceDaemonBusTimer())) {
                 break;
@@ -31,12 +34,12 @@ namespace OpenWifi {
 			MicroServiceRefreshRedisRegistration();
 			Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_KEEP_ALIVE));
 			KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(),
-										Msg, false);
+										Msg, false, 0);
 		}
 		MicroServiceDeleteRedisRegistration();
 		Msg = (MicroServiceMakeSystemEventMessage(KafkaTopics::ServiceEvents::EVENT_LEAVE));
 		KafkaManager()->PostMessage(KafkaTopics::SERVICE_EVENTS, MicroServicePrivateEndPoint(), Msg,
-									false);
+									false, 0);
 	};
 
 	void EventBusManager::Start() {
