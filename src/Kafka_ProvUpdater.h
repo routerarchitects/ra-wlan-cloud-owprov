@@ -56,7 +56,8 @@ namespace OpenWifi {
 		Payload.set("operation", Ops[op]);
 
 		std::string Key = fmt::format("{}:{}", OT, obj.info.id);
-		KafkaManager()->PostMessage(KafkaTopics::PROVISIONING_CHANGE, Key, Payload);
+		KafkaManager()->PostMessage(KafkaTopics::PROVISIONING_CHANGE, Key, Payload, true,
+									KAFKA_PARTITION_UNASSIGNED);
 
 		return true;
 	}

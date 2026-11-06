@@ -131,14 +131,18 @@ using namespace OpenWifi;
 // SECTION A: Producer Partitioning Tests
 // =========================================================================
 
-// Test A1: KafkaMessage partition defaults to KAFKA_PARTITION_UNASSIGNED and respects explicit partition
+// Test A1: KafkaMessage partition defaults to KAFKA_PARTITION_DEFAULT (0) and respects explicit partition
 static void test_kafka_message_partition_defaults_and_explicit() {
 	KafkaMessage msgDefault("test_topic", "key1", "payload1");
 	TEST_ASSERT(std::string(msgDefault.Topic()) == "test_topic", "Topic must match constructor argument");
 	TEST_ASSERT(msgDefault.Key() == "key1", "Key must match constructor argument");
 	TEST_ASSERT(msgDefault.Payload() == "payload1", "Payload must match constructor argument");
-	TEST_ASSERT(msgDefault.Partition() == KAFKA_PARTITION_UNASSIGNED,
-				"KafkaMessage default partition must be KAFKA_PARTITION_UNASSIGNED (-1)");
+	TEST_ASSERT(msgDefault.Partition() == KAFKA_PARTITION_DEFAULT,
+				"KafkaMessage default partition must be KAFKA_PARTITION_DEFAULT (0)");
+
+	KafkaMessage msgUnassigned("test_topic", "key_u", "payload_u", KAFKA_PARTITION_UNASSIGNED);
+	TEST_ASSERT(msgUnassigned.Partition() == KAFKA_PARTITION_UNASSIGNED,
+				"KafkaMessage explicit unassigned partition must be KAFKA_PARTITION_UNASSIGNED (-1)");
 
 	KafkaMessage msgExplicit0("service_events", "endpoint1", "join_payload", 0);
 	TEST_ASSERT(msgExplicit0.Partition() == 0, "Explicit partition 0 must be preserved");
@@ -153,31 +157,39 @@ static void test_kafka_message_partition_defaults_and_explicit() {
 static void test_kafka_producer_produce_queueing() {
 	KafkaProducer producer;
 
-	// 1. Default partition
-	producer.Produce("topic_auto", "key_auto", "payload_auto");
-	// 2. Explicit partition 0
+	// 1. Default partition (should default to KAFKA_PARTITION_DEFAULT = 0)
+	producer.Produce("topic_default", "key_default", "payload_default");
+	// 2. Explicit unassigned partition (-1)
+	producer.Produce("topic_auto", "key_auto", "payload_auto", KAFKA_PARTITION_UNASSIGNED);
+	// 3. Explicit partition 0
 	producer.Produce("topic_part0", "key_part0", "payload_part0", 0);
-	// 3. Explicit partition 2
+	// 4. Explicit partition 2
 	producer.Produce("topic_part2", "key_part2", "payload_part2", 2);
 
 	// Drain and verify
 	Poco::AutoPtr<Poco::Notification> note1(producer.Queue_.dequeueNotification());
 	auto msg1 = dynamic_cast<KafkaMessage *>(note1.get());
 	TEST_ASSERT(msg1 != nullptr, "Notification 1 must be KafkaMessage");
-	TEST_ASSERT(msg1->Partition() == KAFKA_PARTITION_UNASSIGNED, "Produce with default partition must be unassigned (-1)");
-	TEST_ASSERT(msg1->Key() == "key_auto", "Key must be key_auto");
+	TEST_ASSERT(msg1->Partition() == KAFKA_PARTITION_DEFAULT, "Produce with default partition must be KAFKA_PARTITION_DEFAULT (0)");
+	TEST_ASSERT(msg1->Key() == "key_default", "Key must be key_default");
 
 	Poco::AutoPtr<Poco::Notification> note2(producer.Queue_.dequeueNotification());
 	auto msg2 = dynamic_cast<KafkaMessage *>(note2.get());
 	TEST_ASSERT(msg2 != nullptr, "Notification 2 must be KafkaMessage");
-	TEST_ASSERT(msg2->Partition() == 0, "Produce with partition 0 must preserve partition 0");
-	TEST_ASSERT(msg2->Key() == "key_part0", "Key must be key_part0");
+	TEST_ASSERT(msg2->Partition() == KAFKA_PARTITION_UNASSIGNED, "Produce with KAFKA_PARTITION_UNASSIGNED must be -1");
+	TEST_ASSERT(msg2->Key() == "key_auto", "Key must be key_auto");
 
 	Poco::AutoPtr<Poco::Notification> note3(producer.Queue_.dequeueNotification());
 	auto msg3 = dynamic_cast<KafkaMessage *>(note3.get());
 	TEST_ASSERT(msg3 != nullptr, "Notification 3 must be KafkaMessage");
-	TEST_ASSERT(msg3->Partition() == 2, "Produce with partition 2 must preserve partition 2");
-	TEST_ASSERT(msg3->Key() == "key_part2", "Key must be key_part2");
+	TEST_ASSERT(msg3->Partition() == 0, "Produce with partition 0 must preserve partition 0");
+	TEST_ASSERT(msg3->Key() == "key_part0", "Key must be key_part0");
+
+	Poco::AutoPtr<Poco::Notification> note4(producer.Queue_.dequeueNotification());
+	auto msg4 = dynamic_cast<KafkaMessage *>(note4.get());
+	TEST_ASSERT(msg4 != nullptr, "Notification 4 must be KafkaMessage");
+	TEST_ASSERT(msg4->Partition() == 2, "Produce with partition 2 must preserve partition 2");
+	TEST_ASSERT(msg4->Key() == "key_part2", "Key must be key_part2");
 
 	TEST_ASSERT(producer.Queue_.size() == 0, "Producer queue must be empty after draining");
 
@@ -189,52 +201,75 @@ static void test_kafka_manager_post_message_forwarding() {
 	KafkaManager()->KafkaEnabled_ = true;
 	KafkaManager()->ProducerThr_.Queue_.clear();
 
-	// String overload without wrap, default partition
+	// String overload without wrap, default partition (should default to KAFKA_PARTITION_DEFAULT = 0)
 	KafkaManager()->PostMessage("test_topic_str", "key_str", "raw_payload", false);
+
+	// String overload without wrap, explicit unassigned partition
+	KafkaManager()->PostMessage("test_topic_unassigned", "key_unassigned", "unassigned_payload", false, KAFKA_PARTITION_UNASSIGNED);
 
 	// String overload with wrap and explicit partition 0
 	KafkaManager()->PostMessage("service_events", "endpoint_bcast", "{\"event\":\"join\"}", true, 0);
 
-	// JSON overload without wrap, default partition
+	// JSON overload without wrap, default partition (should default to KAFKA_PARTITION_DEFAULT = 0)
 	Poco::JSON::Object jsonNoWrap;
 	jsonNoWrap.set("field", "value1");
 	KafkaManager()->PostMessage("topic_json", "key_json", jsonNoWrap, false);
+
+	// JSON overload without wrap, explicit unassigned partition
+	Poco::JSON::Object jsonUnassigned;
+	jsonUnassigned.set("field", "value_u");
+	KafkaManager()->PostMessage("topic_json_u", "key_json_u", jsonUnassigned, false, KAFKA_PARTITION_UNASSIGNED);
 
 	// JSON overload with wrap and explicit partition 1
 	Poco::JSON::Object jsonWrap;
 	jsonWrap.set("field", "value2");
 	KafkaManager()->PostMessage("topic_json_wrap", "key_json_wrap", jsonWrap, true, 1);
 
-	// Dequeue 1: raw string, unassigned partition
+	// Dequeue 1: raw string, default partition 0
 	Poco::AutoPtr<Poco::Notification> n1(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
 	auto m1 = dynamic_cast<KafkaMessage *>(n1.get());
-	TEST_ASSERT(m1 != nullptr && m1->Partition() == KAFKA_PARTITION_UNASSIGNED,
-				"Message 1 must have unassigned partition");
+	TEST_ASSERT(m1 != nullptr && m1->Partition() == KAFKA_PARTITION_DEFAULT,
+				"Message 1 must have default partition 0");
 	TEST_ASSERT(m1->Payload() == "raw_payload", "Message 1 payload must be unwrapped raw_payload");
 
-	// Dequeue 2: wrapped string, partition 0
+	// Dequeue 2: raw string, explicit unassigned partition (-1)
 	Poco::AutoPtr<Poco::Notification> n2(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
 	auto m2 = dynamic_cast<KafkaMessage *>(n2.get());
-	TEST_ASSERT(m2 != nullptr && m2->Partition() == 0,
-				"Message 2 must have explicit partition 0");
-	TEST_ASSERT(m2->Payload().find("\"system\"") != std::string::npos,
-				"Message 2 payload must be wrapped with system info");
+	TEST_ASSERT(m2 != nullptr && m2->Partition() == KAFKA_PARTITION_UNASSIGNED,
+				"Message 2 must have unassigned partition (-1)");
+	TEST_ASSERT(m2->Payload() == "unassigned_payload", "Message 2 payload must be unassigned_payload");
 
-	// Dequeue 3: json unwrapped, unassigned partition
+	// Dequeue 3: wrapped string, partition 0
 	Poco::AutoPtr<Poco::Notification> n3(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
 	auto m3 = dynamic_cast<KafkaMessage *>(n3.get());
-	TEST_ASSERT(m3 != nullptr && m3->Partition() == KAFKA_PARTITION_UNASSIGNED,
-				"Message 3 must have unassigned partition");
-	TEST_ASSERT(m3->Payload().find("\"field\":\"value1\"") != std::string::npos,
-				"Message 3 payload must contain JSON fields");
+	TEST_ASSERT(m3 != nullptr && m3->Partition() == 0,
+				"Message 3 must have explicit partition 0");
+	TEST_ASSERT(m3->Payload().find("\"system\"") != std::string::npos,
+				"Message 3 payload must be wrapped with system info");
 
-	// Dequeue 4: json wrapped, partition 1
+	// Dequeue 4: json unwrapped, default partition 0
 	Poco::AutoPtr<Poco::Notification> n4(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
 	auto m4 = dynamic_cast<KafkaMessage *>(n4.get());
-	TEST_ASSERT(m4 != nullptr && m4->Partition() == 1,
-				"Message 4 must have explicit partition 1");
-	TEST_ASSERT(m4->Payload().find("\"system\"") != std::string::npos,
-				"Message 4 payload must be wrapped with system info");
+	TEST_ASSERT(m4 != nullptr && m4->Partition() == KAFKA_PARTITION_DEFAULT,
+				"Message 4 must have default partition 0");
+	TEST_ASSERT(m4->Payload().find("\"field\":\"value1\"") != std::string::npos,
+				"Message 4 payload must contain JSON fields");
+
+	// Dequeue 5: json unwrapped, explicit unassigned partition (-1)
+	Poco::AutoPtr<Poco::Notification> n5(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
+	auto m5 = dynamic_cast<KafkaMessage *>(n5.get());
+	TEST_ASSERT(m5 != nullptr && m5->Partition() == KAFKA_PARTITION_UNASSIGNED,
+				"Message 5 must have unassigned partition (-1)");
+	TEST_ASSERT(m5->Payload().find("\"field\":\"value_u\"") != std::string::npos,
+				"Message 5 payload must contain JSON fields");
+
+	// Dequeue 6: json wrapped, partition 1
+	Poco::AutoPtr<Poco::Notification> n6(KafkaManager()->ProducerThr_.Queue_.dequeueNotification());
+	auto m6 = dynamic_cast<KafkaMessage *>(n6.get());
+	TEST_ASSERT(m6 != nullptr && m6->Partition() == 1,
+				"Message 6 must have explicit partition 1");
+	TEST_ASSERT(m6->Payload().find("\"system\"") != std::string::npos,
+				"Message 6 payload must be wrapped with system info");
 
 	KafkaManager()->KafkaEnabled_ = false;
 	KafkaManager()->ProducerThr_.Queue_.clear();
@@ -674,8 +709,8 @@ static void test_broker_backed_producer_partitioning() {
 		std::string sameVenueKey = "Venue:same-venue-" + token;
 		std::string modPayload = "{\"operation\":\"modification\",\"token\":\"" + token + "\"}";
 		std::string remPayload = "{\"operation\":\"removal\",\"token\":\"" + token + "\"}";
-		KafkaManager()->PostMessage(topic.c_str(), sameVenueKey, modPayload, true);
-		KafkaManager()->PostMessage(topic.c_str(), sameVenueKey, remPayload, true);
+		KafkaManager()->PostMessage(topic.c_str(), sameVenueKey, modPayload, true, KAFKA_PARTITION_UNASSIGNED);
+		KafkaManager()->PostMessage(topic.c_str(), sameVenueKey, remPayload, true, KAFKA_PARTITION_UNASSIGNED);
 
 		// 3b. Explicit partition 0 (service_events contract)
 		std::string svcKey = "https://owprov-internal:17005/" + token;
@@ -689,7 +724,7 @@ static void test_broker_backed_producer_partitioning() {
 			std::string dKey = "Venue:distinct-" + token + "-" + std::to_string(i);
 			distinctKeys.push_back(dKey);
 			std::string dPayload = "{\"operation\":\"modification\",\"index\":" + std::to_string(i) + ",\"token\":\"" + token + "\"}";
-			KafkaManager()->PostMessage(topic.c_str(), dKey, dPayload, true);
+			KafkaManager()->PostMessage(topic.c_str(), dKey, dPayload, true, KAFKA_PARTITION_UNASSIGNED);
 		}
 
 		const int totalExpectedMessages = 2 + 1 + numDistinct; // 9 messages

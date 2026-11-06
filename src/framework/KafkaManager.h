@@ -26,11 +26,12 @@ namespace OpenWifi {
 		Broadcast
 	};
 
+	inline constexpr int32_t KAFKA_PARTITION_DEFAULT = 0;
 	inline constexpr int32_t KAFKA_PARTITION_UNASSIGNED = -1;
 
 	class KafkaMessage : public Poco::Notification {
 	  public:
-		KafkaMessage(const char * Topic, const std::string &Key, const std::string &Payload, int32_t Partition = KAFKA_PARTITION_UNASSIGNED)
+		KafkaMessage(const char * Topic, const std::string &Key, const std::string &Payload, int32_t Partition = KAFKA_PARTITION_DEFAULT)
 			: Topic_(Topic), Key_(Key), Payload_(Payload), Partition_(Partition) {}
 
 		inline const char * Topic() const { return Topic_; }
@@ -42,7 +43,7 @@ namespace OpenWifi {
 		const char *Topic_;
 		std::string Key_;
 		std::string Payload_;
-		int32_t Partition_ = KAFKA_PARTITION_UNASSIGNED;
+		int32_t Partition_ = KAFKA_PARTITION_DEFAULT;
 	};
 
 	class KafkaProducer : public Poco::Runnable {
@@ -50,7 +51,7 @@ namespace OpenWifi {
 		void run() override;
 		void Start();
 		void Stop();
-		void Produce(const char *Topic, const std::string &Key, const std::string & Payload, int32_t Partition = KAFKA_PARTITION_UNASSIGNED);
+		void Produce(const char *Topic, const std::string &Key, const std::string & Payload, int32_t Partition = KAFKA_PARTITION_DEFAULT);
 
 		[[nodiscard]] std::string GetClientId() const;
 		[[nodiscard]] static std::string GenerateClientId(const std::string &BaseClientId,
@@ -122,9 +123,9 @@ namespace OpenWifi {
 		void Stop() override;
 
 		void PostMessage(const char *topic, const std::string &key,
-						 const std::string &PayLoad, bool WrapMessage = true, int32_t Partition = KAFKA_PARTITION_UNASSIGNED);
+						 const std::string &PayLoad, bool WrapMessage = true, int32_t Partition = KAFKA_PARTITION_DEFAULT);
 		void PostMessage(const char *topic, const std::string &key,
-						 const Poco::JSON::Object &Object, bool WrapMessage = true, int32_t Partition = KAFKA_PARTITION_UNASSIGNED);
+						 const Poco::JSON::Object &Object, bool WrapMessage = true, int32_t Partition = KAFKA_PARTITION_DEFAULT);
 
 		[[nodiscard]] std::string WrapSystemId(const std::string & PayLoad);
 		[[nodiscard]] inline bool Enabled() const { return KafkaEnabled_; }
