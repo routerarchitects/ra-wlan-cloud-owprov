@@ -242,6 +242,68 @@ static void test_kafka_manager_post_message_forwarding() {
 	std::cout << "  PASS: test_kafka_manager_post_message_forwarding" << std::endl;
 }
 
+// Test A4: Invalid negative partition values (< -1) are rejected and dropped
+static void test_invalid_negative_partition_values_rejected() {
+	KafkaProducer producer;
+
+	// Valid partitions: -1 (unassigned) and >= 0
+	producer.Produce("valid_topic", "key", "payload", KAFKA_PARTITION_UNASSIGNED);
+	TEST_ASSERT(producer.Queue_.size() == 1, "KAFKA_PARTITION_UNASSIGNED must be accepted");
+
+	producer.Produce("valid_topic", "key", "payload", 0);
+	TEST_ASSERT(producer.Queue_.size() == 2, "Partition 0 must be accepted");
+
+	producer.Produce("valid_topic", "key", "payload", 5);
+	TEST_ASSERT(producer.Queue_.size() == 3, "Partition 5 must be accepted");
+
+	// Invalid negative partitions (< -1) must be rejected and dropped
+	producer.Produce("invalid_topic", "key", "payload", -2);
+	TEST_ASSERT(producer.Queue_.size() == 3, "Partition -2 must be rejected and not enqueued");
+
+	producer.Produce("invalid_topic", "key", "payload", -10);
+	TEST_ASSERT(producer.Queue_.size() == 3, "Partition -10 must be rejected and not enqueued");
+
+	producer.Produce("invalid_topic", "key", "payload", -999);
+	TEST_ASSERT(producer.Queue_.size() == 3, "Partition -999 must be rejected and not enqueued");
+
+	producer.Produce("invalid_topic", "key", "payload", INT32_MIN);
+	TEST_ASSERT(producer.Queue_.size() == 3, "Partition INT32_MIN must be rejected and not enqueued");
+
+	// Also verify KafkaManager::PostMessage overloads reject < -1
+	KafkaManager()->KafkaEnabled_ = true;
+	KafkaManager()->ProducerThr_.Queue_.clear();
+
+	// String overload rejection
+	KafkaManager()->PostMessage("test_topic", "key", "payload", false, -2);
+	TEST_ASSERT(KafkaManager()->ProducerThr_.Queue_.size() == 0,
+				"PostMessage(string) must reject partition -2");
+
+	KafkaManager()->PostMessage("test_topic", "key", "payload", false, -50);
+	TEST_ASSERT(KafkaManager()->ProducerThr_.Queue_.size() == 0,
+				"PostMessage(string) must reject partition -50");
+
+	// JSON overload rejection
+	Poco::JSON::Object jsonMsg;
+	jsonMsg.set("test", "val");
+	KafkaManager()->PostMessage("test_topic", "key", jsonMsg, false, -2);
+	TEST_ASSERT(KafkaManager()->ProducerThr_.Queue_.size() == 0,
+				"PostMessage(JSON) must reject partition -2");
+
+	// Valid partitions still accepted via PostMessage
+	KafkaManager()->PostMessage("test_topic", "key", "payload", false, KAFKA_PARTITION_UNASSIGNED);
+	TEST_ASSERT(KafkaManager()->ProducerThr_.Queue_.size() == 1,
+				"PostMessage must accept KAFKA_PARTITION_UNASSIGNED");
+
+	KafkaManager()->PostMessage("test_topic", "key", "payload", false, 0);
+	TEST_ASSERT(KafkaManager()->ProducerThr_.Queue_.size() == 2,
+				"PostMessage must accept explicit partition 0");
+
+	KafkaManager()->KafkaEnabled_ = false;
+	KafkaManager()->ProducerThr_.Queue_.clear();
+
+	std::cout << "  PASS: test_invalid_negative_partition_values_rejected" << std::endl;
+}
+
 // =========================================================================
 // SECTION B: provisioning_change Tests
 // =========================================================================
@@ -758,6 +820,7 @@ int main() {
 	test_kafka_message_partition_defaults_and_explicit();
 	test_kafka_producer_produce_queueing();
 	test_kafka_manager_post_message_forwarding();
+	test_invalid_negative_partition_values_rejected();
 
 	// Section B
 	test_venue_modification_and_removal_key_contract();

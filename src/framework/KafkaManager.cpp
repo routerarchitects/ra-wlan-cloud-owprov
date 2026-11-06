@@ -146,6 +146,11 @@ namespace OpenWifi {
 	}
 
 	void KafkaProducer::Produce(const char *Topic, const std::string &Key, const std::string &Payload, int32_t Partition) {
+		if (Partition < KAFKA_PARTITION_UNASSIGNED) {
+			Poco::Logger &Logger_ = Poco::Logger::has("KAFKA-PRODUCER") ? Poco::Logger::get("KAFKA-PRODUCER") : Poco::Logger::create("KAFKA-PRODUCER", KafkaManager()->Logger().getChannel());
+			poco_warning(Logger_, fmt::format("Dropping message for topic '{}': invalid partition value {} (must be >= 0 or KAFKA_PARTITION_UNASSIGNED (-1))", Topic, Partition));
+			return;
+		}
 		std::lock_guard G(Mutex_);
 		Queue_.enqueueNotification(new KafkaMessage(Topic, Key, Payload, Partition));
 	}
@@ -182,6 +187,10 @@ namespace OpenWifi {
 				}
 				try {
 					if (auto Msg = dynamic_cast<KafkaMessage *>(Note.get())) {
+						if (Msg->Partition() < KAFKA_PARTITION_UNASSIGNED) {
+							poco_warning(Logger_, fmt::format("Dropping message for topic '{}': invalid partition value {}", Msg->Topic(), Msg->Partition()));
+							continue;
+						}
 						auto NewMsg = cppkafka::MessageBuilder(Msg->Topic());
 						NewMsg.key(Msg->Key());
 						if (Msg->Partition() >= 0) {
