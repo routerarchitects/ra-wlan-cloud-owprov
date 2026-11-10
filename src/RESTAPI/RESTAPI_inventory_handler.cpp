@@ -41,14 +41,6 @@ namespace OpenWifi {
 
 		Poco::JSON::Object Answer;
 		std::string Arg;
-		std::string DeviceCmd;
-		if (HasParameter("deviceCommand", DeviceCmd) || HasParameter("command", DeviceCmd)) {
-			Answer.set("authorized", true);
-			Answer.set("command", DeviceCmd);
-			Answer.set("serialNumber", SerialNumber);
-			Existing.to_json(Answer);
-			return ReturnObject(Answer);
-		}
 		if (GetBoolParameter("config", false)) {
 			bool Explain = GetBoolParameter("explain", false);
 
@@ -526,11 +518,6 @@ namespace OpenWifi {
 		if (RawObject->has("deviceType") && !NewObject.deviceType.empty() &&
 			NewObject.deviceType != Existing.deviceType) {
 			Existing.deviceType = NewObject.deviceType;
-		}
-
-		if ((RawObject->has("platform") || RawObject->has("deviceGroup")) &&
-			!NewObject.platform.empty() && NewObject.platform != Existing.platform) {
-			Existing.platform = NewObject.platform;
 		}
 
 		std::vector<std::string> Errors;
