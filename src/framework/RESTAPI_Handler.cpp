@@ -25,11 +25,19 @@ namespace OpenWifi {
 			return false;
 		}
 
+		std::string TargetOperation = Method;
+		std::string CommandName;
+		if ((Resource == "inventory" || Resource == "deviceCommand") &&
+			(HasParameter("deviceCommand", CommandName) || HasParameter("command", CommandName))) {
+			Resource = "deviceCommand";
+			TargetOperation = (CommandName.empty() || CommandName == "true") ? "READ" : CommandName;
+		}
+
 		Logger_.information(fmt::format(
-			"AUTH_DEBUG: User='{}' UserRole='{}' Path='{}' Method='{}' Resource='{}'",
+			"AUTH_DEBUG: User='{}' UserRole='{}' Path='{}' Method='{}' Resource='{}' TargetOperation='{}'",
 			UserInfo_.userinfo.id,
 			SecurityObjects::UserTypeToString(UserInfo_.userinfo.userRole), Path, Method,
-			Resource));
+			Resource, TargetOperation));
 
 		if (Resource == "user" &&
 			(Method == Poco::Net::HTTPRequest::HTTP_POST ||
@@ -67,8 +75,8 @@ namespace OpenWifi {
 				}
 				AuthCache::GetInstance()->SetPolicy(role.managementPolicy, Policy);
 			}
-			bool res = PolicyAllows(Policy, Resource, Method);
-			Logger_.information(fmt::format("AUTH_DEBUG: PolicyAllows(policy='{}', resource='{}', method='{}') -> {}", Policy.info.id, Resource, Method, res));
+			bool res = PolicyAllows(Policy, Resource, TargetOperation);
+			Logger_.information(fmt::format("AUTH_DEBUG: PolicyAllows(policy='{}', resource='{}', method='{}') -> {}", Policy.info.id, Resource, TargetOperation, res));
 			return res;
 		};
 
@@ -76,7 +84,7 @@ namespace OpenWifi {
 		std::string TargetEntity, TargetVenue;
 		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
 			Logger_.information(fmt::format("AUTH_DEBUG: ResolveTargetContext returned false for Path='{}'", Path));
-			if (HasScopeConstraint(Resource, Method)) {
+			if (HasScopeConstraint(Resource, TargetOperation)) {
 				Reason = "Scope resolution failed for constrained operation; access denied.";
 				Logger_.information(fmt::format("AUTH_DEBUG: Denied - HasScopeConstraint is true but ResolveTargetContext failed"));
 				return false;
@@ -109,7 +117,7 @@ namespace OpenWifi {
 			}
 		}
 
-		if (IsScopeAuthorized(TargetEntity, TargetVenue, Resource, Method, &Reason)) {
+		if (IsScopeAuthorized(TargetEntity, TargetVenue, Resource, TargetOperation, &Reason)) {
 			return true;
 		}
 
@@ -594,7 +602,7 @@ namespace OpenWifi {
 			 Resource == "map" || Resource == "variables" || Resource == "variable" || Resource == "serviceClass" ||
 			 Resource == "operator" || Resource == "overrides" || Resource == "subscriber" ||
 			 Resource == "subscriberDevice" || Resource == "op_contact" ||
-			 Resource == "op_location");
+			 Resource == "op_location" || Resource == "deviceCommand");
 
 		if (!IsScoped) {
 			return false;
@@ -645,7 +653,10 @@ namespace OpenWifi {
 	bool RESTAPIHandler::PolicyAllows(const ProvObjects::ManagementPolicy &Policy,
 									  const std::string &Resource, const std::string &Method) {
 		std::string AccessRequired;
-		if (Method == Poco::Net::HTTPRequest::HTTP_GET)
+		const bool IsDeviceCommand = (Poco::icompare(Resource, "deviceCommand") == 0);
+		if (IsDeviceCommand) {
+			AccessRequired = Poco::toUpper(Method);
+		} else if (Method == Poco::Net::HTTPRequest::HTTP_GET)
 			AccessRequired = "READ";
 		else if (Method == Poco::Net::HTTPRequest::HTTP_POST)
 			AccessRequired = "CREATE";
@@ -660,19 +671,36 @@ namespace OpenWifi {
 			bool ResourceMatches = false;
 			for (const auto &res : entry.resources) {
 				if (Poco::icompare(res, Resource) == 0 || res == "*" ||
-					((Resource == "variable" || Resource == "variables") && Poco::icompare(res, "configuration") == 0) ||
-					(Resource == "map" && (Poco::icompare(res, "venue") == 0 || Poco::icompare(res, "entity") == 0)) ||
-					(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
-					(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
-					(Resource == "overrides" && Poco::icompare(res, "inventory") == 0) ||
-					(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
-					(Resource == "op_location" && Poco::icompare(res, "location") == 0)) {
+					(!IsDeviceCommand && (
+						((Resource == "variable" || Resource == "variables") && Poco::icompare(res, "configuration") == 0) ||
+						(Resource == "map" && (Poco::icompare(res, "venue") == 0 || Poco::icompare(res, "entity") == 0)) ||
+						(Resource == "serviceClass" && (Poco::icompare(res, "operator") == 0 || Poco::icompare(res, "entity") == 0)) ||
+						(Resource == "subscriberDevice" && Poco::icompare(res, "inventory") == 0) ||
+						(Resource == "overrides" && Poco::icompare(res, "inventory") == 0) ||
+						(Resource == "op_contact" && Poco::icompare(res, "contact") == 0) ||
+						(Resource == "op_location" && Poco::icompare(res, "location") == 0)))) {
 					ResourceMatches = true;
 					break;
 				}
 			}
 			if (!ResourceMatches)
 				continue;
+
+			if (IsDeviceCommand) {
+				for (const auto &acc : entry.access) {
+					const std::string UpperAcc = Poco::toUpper(acc);
+					if (UpperAcc == "FULL" || UpperAcc == AccessRequired ||
+						((AccessRequired == "BLINK" || AccessRequired == "LEDS") && (UpperAcc == "BLINK" || UpperAcc == "LEDS")) ||
+						((AccessRequired == "WIFI_SCAN" || AccessRequired == "WIFISCAN") && (UpperAcc == "WIFI_SCAN" || UpperAcc == "WIFISCAN")) ||
+						((AccessRequired == "FACTORY_RESET" || AccessRequired == "FACTORY" || AccessRequired == "FACTORYRESET") &&
+						 (UpperAcc == "FACTORY_RESET" || UpperAcc == "FACTORY" || UpperAcc == "FACTORYRESET")) ||
+						((AccessRequired == "RE_ENROLL" || AccessRequired == "REENROLL") &&
+						 (UpperAcc == "RE_ENROLL" || UpperAcc == "REENROLL"))) {
+						return true;
+					}
+				}
+				continue;
+			}
 
 			for (const auto &acc : entry.access) {
 				if (acc == "FULL" || acc == AccessRequired ||
@@ -813,6 +841,9 @@ namespace OpenWifi {
 			return "entity";
 		if (Path.find("/api/v1/venue") != std::string::npos)
 			return "venue";
+		if (Path.find("/deviceCommand") != std::string::npos ||
+			Path.find("/device_command") != std::string::npos)
+			return "deviceCommand";
 		if (Path.find("/api/v1/inventory") != std::string::npos)
 			return "inventory";
 		if (Path.find("/api/v1/subscriberDevice") != std::string::npos ||
