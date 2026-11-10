@@ -26,19 +26,24 @@ namespace OpenWifi {
 		Broadcast
 	};
 
+	inline constexpr int32_t KAFKA_PARTITION_DEFAULT = 0;
+	inline constexpr int32_t KAFKA_PARTITION_UNASSIGNED = -1;
+
 	class KafkaMessage : public Poco::Notification {
 	  public:
-		KafkaMessage(const char * Topic, const std::string &Key, const std::string &Payload)
-			: Topic_(Topic), Key_(Key), Payload_(Payload) {}
+		KafkaMessage(const char * Topic, const std::string &Key, const std::string &Payload, int32_t Partition = KAFKA_PARTITION_DEFAULT)
+			: Topic_(Topic), Key_(Key), Payload_(Payload), Partition_(Partition) {}
 
-		inline const char * Topic() { return Topic_; }
-		inline const std::string &Key() { return Key_; }
-		inline const std::string &Payload() { return Payload_; }
+		inline const char * Topic() const { return Topic_; }
+		inline const std::string &Key() const { return Key_; }
+		inline const std::string &Payload() const { return Payload_; }
+		inline int32_t Partition() const { return Partition_; }
 
 	  private:
 		const char *Topic_;
 		std::string Key_;
 		std::string Payload_;
+		int32_t Partition_ = KAFKA_PARTITION_DEFAULT;
 	};
 
 	class KafkaProducer : public Poco::Runnable {
@@ -46,7 +51,7 @@ namespace OpenWifi {
 		void run() override;
 		void Start();
 		void Stop();
-		void Produce(const char *Topic, const std::string &Key, const std::string & Payload);
+		void Produce(const char *Topic, const std::string &Key, const std::string & Payload, int32_t Partition = KAFKA_PARTITION_DEFAULT);
 
 		[[nodiscard]] std::string GetClientId() const;
 		[[nodiscard]] static std::string GenerateClientId(const std::string &BaseClientId,
@@ -118,9 +123,9 @@ namespace OpenWifi {
 		void Stop() override;
 
 		void PostMessage(const char *topic, const std::string &key,
-						 const std::string &PayLoad, bool WrapMessage = true);
+						 const std::string &PayLoad, bool WrapMessage = true, int32_t Partition = KAFKA_PARTITION_DEFAULT);
 		void PostMessage(const char *topic, const std::string &key,
-						 const Poco::JSON::Object &Object, bool WrapMessage = true);
+						 const Poco::JSON::Object &Object, bool WrapMessage = true, int32_t Partition = KAFKA_PARTITION_DEFAULT);
 
 		[[nodiscard]] std::string WrapSystemId(const std::string & PayLoad);
 		[[nodiscard]] inline bool Enabled() const { return KafkaEnabled_; }
