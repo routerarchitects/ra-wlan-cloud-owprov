@@ -957,12 +957,12 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole"};
+			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole", "deviceCommand"};
 			E1.access = {"FULL"}; P.entries.push_back(E1);
 
 			PolicyDB().CreateRecord(P);
 		} else {
-			EnsureResourceInPolicy("Admin", {"contact", "location", "managementRole"}, "FULL");
+			EnsureResourceInPolicy("Admin", {"contact", "location", "managementRole", "deviceCommand"}, "FULL");
 		}
 		if (!PolicyDB().Exists("name", "CSR")) {
 			ProvObjects::ManagementPolicy P;
