@@ -52,6 +52,10 @@ namespace OpenWifi {
 			return true;
 		}
 
+		if (Resource == "authorization") {
+			return true;
+		}
+
 		std::string UserId = UserInfo_.userinfo.id;
 		std::vector<ProvObjects::ManagementRole> Roles;
 		FindAllUserRoles(UserId, Roles);
@@ -227,8 +231,12 @@ namespace OpenWifi {
 			}
 		}
 
+		const bool IsInventoryCreate =
+			(Method == Poco::Net::HTTPRequest::HTTP_POST &&
+			 Path.find("/api/v1/inventory") != std::string::npos);
+
 		const bool HasBoundObjectId =
-			!Id.empty() &&
+			!Id.empty() && !IsInventoryCreate &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0));
 
 		Logger_.information(fmt::format("RESOLVE_DEBUG: Path='{}' Method='{}' Id='{}' HasBoundObjectId={}", Path, Method, Id, HasBoundObjectId));
@@ -616,7 +624,11 @@ namespace OpenWifi {
 			}
 		}
 
-		if (!Id.empty() &&
+		const bool IsInventoryCreate =
+			(Method == Poco::Net::HTTPRequest::HTTP_POST &&
+			 Resource == "inventory");
+
+		if (!Id.empty() && !IsInventoryCreate &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0))) {
 			return true;
 		}
@@ -852,6 +864,8 @@ namespace OpenWifi {
 			return "overrides";
 		if (Path.find("/api/v1/iptocountry") != std::string::npos)
 			return "iptocountry";
+		if (Path.find("/api/v1/authorization") != std::string::npos)
+			return "authorization";
 		if (Path.find("/api/v1/systemConfiguration") != std::string::npos)
 			return "systemConfiguration";
 		return "";
