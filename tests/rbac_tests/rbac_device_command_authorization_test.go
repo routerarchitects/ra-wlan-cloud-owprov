@@ -142,7 +142,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		payload := map[string]interface{}{
 			"serialNumber": serial,
 			"name":         fmt.Sprintf("dev-%s", serial),
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 		}
 		if venueID != "" {
 			payload["venue"] = venueID

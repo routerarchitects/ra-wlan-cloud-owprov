@@ -30,6 +30,25 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 	}
 
 	ts := time.Now().UnixNano()
+	macCounter := uint64(ts & 0xFFFFFF)
+	nextSerial := func() string {
+		macCounter++
+		return fmt.Sprintf("60cf84%06x", macCounter&0xFFFFFF)
+	}
+
+	// Discover the live UserID for adminToken directly from /authorization/deviceCommand
+	// (works across mock_owsec where TOKEN_ADMIN_OPERATOR_A maps to 0000...0003 and real owsec)
+	if probeStatus, probeBody, probeErr := client.DoRequest("POST", "/authorization/deviceCommand", adminToken, map[string]interface{}{
+		"serialNumber": nextSerial(),
+		"action":       "REBOOT",
+	}); probeErr == nil && probeStatus == http.StatusOK {
+		var probeResp struct {
+			UserID string `json:"userId"`
+		}
+		if json.Unmarshal(probeBody, &probeResp) == nil && probeResp.UserID != "" {
+			adminUserId = probeResp.UserID
+		}
+	}
 	createEntity := func(name string) (string, func()) {
 		s, b, e := client.DoRequest("POST", "/entity/0", rootToken, map[string]interface{}{
 			"name":   name,
@@ -130,16 +149,12 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		}
 	}
 
-	nextSerial := func() string {
-		return fmt.Sprintf("60cf84%06x", time.Now().UnixNano()&0xFFFFFF)
-	}
-
 	t.Run("Reject query entity vs different body entity", func(t *testing.T) {
 		serial := nextSerial()
 		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestEntityMismatch",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"entity":       entityBId,
 		}, serial, "mismatch")
 	})
@@ -149,7 +164,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestCrossFieldEntityToVenue",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"venue":        venueBId,
 		}, serial, "mismatch")
 	})
@@ -159,7 +174,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestCrossFieldSameEntityVenue",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"venue":        venueAId,
 		}, serial, "mismatch")
 	})
@@ -169,7 +184,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s", serial), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestDirectEntityB",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"entity":       entityBId,
 		}, serial, "")
 	})
@@ -179,7 +194,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s", serial), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestDirectVenueB",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"venue":        venueBId,
 		}, serial, "")
 	})
@@ -189,7 +204,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s", serial), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestUnassigned",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 		}, serial, "")
 	})
 
@@ -198,7 +213,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		status, body, err := client.DoRequest("POST", fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), adminToken, map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestValidMatching",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"entity":       entityAId,
 		})
 		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
@@ -217,7 +232,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serial, venueAId), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestVenueMismatchOtherTenant",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"venue":        venueBId,
 		}, serial, "mismatch")
 
@@ -225,7 +240,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serialSameEnt, venueAId), map[string]interface{}{
 			"serialNumber": serialSameEnt,
 			"name":         "F1TestVenueMismatchSibling",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"venue":        venueA2Id,
 		}, serialSameEnt, "mismatch")
 	})
@@ -235,7 +250,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serial, venueAId), map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestVenueToEntityB",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"entity":       entityBId,
 		}, serial, "mismatch")
 
@@ -243,7 +258,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serialParentEnt, venueAId), map[string]interface{}{
 			"serialNumber": serialParentEnt,
 			"name":         "F1TestVenueToEntityA",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"entity":       entityAId,
 		}, serialParentEnt, "mismatch")
 	})
@@ -253,7 +268,7 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		status, body, err := client.DoRequest("POST", fmt.Sprintf("/inventory/%s", serial), adminToken, map[string]interface{}{
 			"serialNumber": serial,
 			"name":         "F1TestValidVenue",
-			"deviceType":   "AP",
+			"deviceType":   "edgecore_eap101",
 			"venue":        venueAId,
 		})
 		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
