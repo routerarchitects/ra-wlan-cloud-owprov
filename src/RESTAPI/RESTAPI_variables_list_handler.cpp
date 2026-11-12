@@ -14,8 +14,8 @@ namespace OpenWifi {
 	void RESTAPI_variables_list_handler::DoGet() {
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
-		// 1. Root users and internal microservice requests (Internal_ == true) bypass scoping
-		if (isRoot || Internal_) {
+		// 1. Root users and pure internal service-to-service requests bypass scoping
+		if (isRoot || IsInternalServiceOnly()) {
 			return ListHandler<VariablesDB>("variableBlocks", DB_, *this);
 		}
 

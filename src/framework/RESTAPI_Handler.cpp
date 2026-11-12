@@ -12,6 +12,11 @@ namespace OpenWifi {
 
 	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path, const std::string &Method,
 										  std::string &Reason) {
+		// 0. Pure service-to-service calls without delegated user credentials bypass user RBAC
+		if (IsInternalServiceOnly()) {
+			return true;
+		}
+
 		// 1. Bypass check only if user is root
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 			return true;

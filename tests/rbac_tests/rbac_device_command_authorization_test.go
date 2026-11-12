@@ -264,7 +264,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 	defer cleanupPolFull()
 
 	polPartialId, cleanupPolPartial := createPolicy(fmt.Sprintf("devcmd-partial-%d", ts), []map[string]interface{}{
-		{"resources": []string{"deviceCommand"}, "access": []string{"REBOOT", "BLINK", "WIFI_SCAN", "FACTORY_RESET", "RE_ENROLL"}},
+		{"resources": []string{"deviceCommand"}, "access": []string{"REBOOT", "CONFIGURE", "BLINK", "WIFI_SCAN", "FACTORY_RESET", "RE_ENROLL"}},
 	})
 	defer cleanupPolPartial()
 
@@ -377,7 +377,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		cleanupRolePartial := assignRole(entityAId, "", polPartialId, adminUserId)
 		defer cleanupRolePartial()
 
-		allowedActions := []string{"REBOOT", "BLINK", "leds", "WIFI_SCAN", "wifiscan", "FACTORY_RESET", "factory", "RE_ENROLL", "reenroll"}
+		allowedActions := []string{"REBOOT", "CONFIGURE", "configure", "BLINK", "leds", "WIFI_SCAN", "wifiscan", "FACTORY_RESET", "factory", "RE_ENROLL", "reenroll"}
 		for _, act := range allowedActions {
 			s, resp, b := callAuthz(adminToken, entADeviceSerial, act)
 			if s != http.StatusOK || !resp.Allowed || resp.Reason != "ALLOWED" {

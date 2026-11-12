@@ -13,8 +13,8 @@ namespace OpenWifi {
 
 	static std::string CanonicalDeviceCommandAction(const std::string &action) {
 		const std::string upper = Poco::toUpper(action);
-		if (upper == "REBOOT" || upper == "TELEMETRY" || upper == "UPGRADE" ||
-			upper == "TRACE" || upper == "RTTY" || upper == "SCRIPT") {
+		if (upper == "REBOOT" || upper == "CONFIGURE" || upper == "TELEMETRY" ||
+			upper == "UPGRADE" || upper == "TRACE" || upper == "RTTY" || upper == "SCRIPT") {
 			return upper;
 		}
 		if (upper == "BLINK" || upper == "LEDS") {
@@ -83,10 +83,10 @@ namespace OpenWifi {
 			}
 		}
 
-		// On internal server, or when both X-API-KEY and Authorization are supplied on the
-		// public server, validate the Bearer user token explicitly so X-API-KEY never
-		// overrides the caller's Bearer identity.
-		if (Internal_ || (Request->has("X-API-KEY") && Request->has("Authorization")) ||
+		// On the public server when both X-API-KEY and Authorization are supplied, or when
+		// UserInfo_ is still empty (e.g. internal call missing Bearer token), validate Bearer
+		// explicitly so X-API-KEY never overrides or bypasses caller identity.
+		if ((!Internal_ && Request->has("X-API-KEY") && Request->has("Authorization")) ||
 			UserInfo_.userinfo.id.empty()) {
 			std::string Token;
 			try {

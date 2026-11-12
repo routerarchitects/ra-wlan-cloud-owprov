@@ -905,110 +905,6 @@ namespace OpenWifi {
 			ServiceClassDB_->CreateRecord(DefSer);
 		}
 
-		constexpr const char *kAdminDeviceCommandMigrationId = "admin_policy_deviceCommand";
-		constexpr int kAdminDeviceCommandMigrationVersion = 1;
-
-		auto FormatMigrationParams = [&](const std::string &sql) -> std::string {
-			if (dbType_ != OpenWifi::DBType::pgsql) {
-				return sql;
-			}
-			std::string converted;
-			converted.reserve(sql.size() + 8);
-			int idx = 1;
-			for (const char ch : sql) {
-				if (ch == '?') {
-					converted += '$';
-					converted += std::to_string(idx++);
-				} else {
-					converted += ch;
-				}
-			}
-			return converted;
-		};
-
-		auto EnsurePolicyMigrationsTable = [&]() -> bool {
-			if (!Pool_) {
-				return false;
-			}
-			try {
-				Poco::Data::Session Session = Pool_->get();
-				Session << "CREATE TABLE IF NOT EXISTS policy_migrations ("
-				           "id VARCHAR(128) PRIMARY KEY, "
-				           "version INT NOT NULL, "
-				           "applied_at BIGINT NOT NULL)",
-				    Poco::Data::Keywords::now;
-				return true;
-			} catch (const Poco::Exception &E) {
-				poco_error(Logger(), "Failed to ensure policy_migrations table: " + E.displayText());
-			}
-			return false;
-		};
-
-		auto HasPolicyMigration = [&](const std::string &migrationId, int minVersion) -> std::optional<bool> {
-			if (!Pool_) {
-				return std::nullopt;
-			}
-			try {
-				Poco::Data::Session Session = Pool_->get();
-				Poco::Data::Statement Select(Session);
-				std::uint64_t count = 0;
-				std::string idParam = migrationId;
-				int versionParam = minVersion;
-				Select << FormatMigrationParams(
-				              "SELECT COUNT(*) FROM policy_migrations WHERE id = ? AND version >= ?"),
-				    Poco::Data::Keywords::into(count),
-				    Poco::Data::Keywords::use(idParam),
-				    Poco::Data::Keywords::use(versionParam);
-				Select.execute();
-				return count > 0;
-			} catch (const Poco::Exception &E) {
-				poco_error(Logger(), fmt::format("Failed to query policy migration '{}': {}", migrationId, E.displayText()));
-			}
-			return std::nullopt;
-		};
-
-		auto RecordPolicyMigration = [&](const std::string &migrationId, int version) -> bool {
-			if (!Pool_) {
-				return false;
-			}
-			try {
-				Poco::Data::Session Session = Pool_->get();
-				std::string idParam = migrationId;
-				int versionParam = version;
-				auto appliedAt = static_cast<std::int64_t>(Utils::Now());
-
-				std::uint64_t existingCount = 0;
-				Poco::Data::Statement CheckStmt(Session);
-				CheckStmt << FormatMigrationParams("SELECT COUNT(*) FROM policy_migrations WHERE id = ?"),
-				    Poco::Data::Keywords::into(existingCount),
-				    Poco::Data::Keywords::use(idParam);
-				CheckStmt.execute();
-
-				if (existingCount == 0) {
-					Poco::Data::Statement InsertStmt(Session);
-					InsertStmt << FormatMigrationParams(
-					                  "INSERT INTO policy_migrations (id, version, applied_at) VALUES (?, ?, ?)"),
-					    Poco::Data::Keywords::use(idParam),
-					    Poco::Data::Keywords::use(versionParam),
-					    Poco::Data::Keywords::use(appliedAt);
-					InsertStmt.execute();
-				} else {
-					Poco::Data::Statement UpdateStmt(Session);
-					UpdateStmt << FormatMigrationParams(
-					                  "UPDATE policy_migrations SET version = ?, applied_at = ? WHERE id = ? AND version < ?"),
-					    Poco::Data::Keywords::use(versionParam),
-					    Poco::Data::Keywords::use(appliedAt),
-					    Poco::Data::Keywords::use(idParam),
-					    Poco::Data::Keywords::use(versionParam);
-					UpdateStmt.execute();
-				}
-				return true;
-			} catch (const Poco::Exception &E) {
-				poco_error(Logger(), fmt::format("Failed to record policy migration '{}' v{}: {}", migrationId, version, E.displayText()));
-			}
-			return false;
-		};
-
 		auto EnsureResourceInPolicy = [&](const std::string &policyName, const std::vector<std::string> &resourcesToAdd, const std::string &accessLevel) -> bool {
 			ProvObjects::ManagementPolicy P;
 			if (!PolicyDB().GetRecord("name", policyName, P)) {
@@ -1055,8 +951,6 @@ namespace OpenWifi {
 			return true;
 		};
 
-		const bool migrationsReady = EnsurePolicyMigrationsTable();
-
 		if (!PolicyDB().Exists("name", "Admin")) {
 			ProvObjects::ManagementPolicy P;
 			P.info.id = MicroServiceCreateUUID();
@@ -1068,21 +962,9 @@ namespace OpenWifi {
 			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole", "deviceCommand"};
 			E1.access = {"FULL"}; P.entries.push_back(E1);
 
-			if (PolicyDB().CreateRecord(P) && migrationsReady) {
-				RecordPolicyMigration(kAdminDeviceCommandMigrationId, kAdminDeviceCommandMigrationVersion);
-			}
+			PolicyDB().CreateRecord(P);
 		} else {
 			EnsureResourceInPolicy("Admin", {"contact", "location", "managementRole"}, "FULL");
-			if (migrationsReady) {
-				const auto applied = HasPolicyMigration(kAdminDeviceCommandMigrationId, kAdminDeviceCommandMigrationVersion);
-				if (applied.has_value() && !*applied) {
-					if (EnsureResourceInPolicy("Admin", {"deviceCommand"}, "FULL")) {
-						if (RecordPolicyMigration(kAdminDeviceCommandMigrationId, kAdminDeviceCommandMigrationVersion)) {
-							poco_information(Logger(), fmt::format("Applied one-time policy migration '{}' v{}.", kAdminDeviceCommandMigrationId, kAdminDeviceCommandMigrationVersion));
-						}
-					}
-				}
-			}
 		}
 		if (!PolicyDB().Exists("name", "CSR")) {
 			ProvObjects::ManagementPolicy P;
