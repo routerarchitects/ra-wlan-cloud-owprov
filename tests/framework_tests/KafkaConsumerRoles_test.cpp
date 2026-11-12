@@ -180,16 +180,19 @@ static void test_auto_offset_reset_semantics() {
 
 // Test 7: Topic registration and unregistration routing
 static void test_topic_registration_and_unregistration() {
-	Types::TopicNotifyFunction cb = [](const std::string &, const std::string &) {};
+	KafkaConsumer::AckCallback grp_cb = [](const std::string &, const std::string &, std::string &) {
+		return Types::KafkaHandlerOutcome::Success;
+	};
+	Types::TopicNotifyFunction bcast_cb = [](const std::string &, const std::string &) {};
 
 	// Register connection on GroupConsumer
 	uint64_t id_conn = KafkaManager()->RegisterTopicWatcher(
-		KafkaTopics::CONNECTION, cb, KafkaConsumerType::Group);
+		KafkaTopics::CONNECTION, grp_cb, KafkaConsumerType::Group);
 	TEST_ASSERT(id_conn > 0, "Registration must return positive ID");
 
 	// Register service_events on BroadcastConsumer
 	uint64_t id_se = KafkaManager()->RegisterTopicWatcher(
-		KafkaTopics::SERVICE_EVENTS, cb, KafkaConsumerType::Broadcast);
+		KafkaTopics::SERVICE_EVENTS, bcast_cb, KafkaConsumerType::Broadcast);
 	TEST_ASSERT(id_se > 0, "Registration must return positive ID");
 
 	auto grp_topics = KafkaManager()->GroupConsumer().Topics();
@@ -395,10 +398,11 @@ static void run_dynamic_subscription_test_for_role(KafkaConsumerType type,
 	struct WatcherSink {
 		std::mutex mtx;
 		std::set<std::string> received;
-		Types::TopicNotifyFunction callback() {
-			return [this](const std::string &, const std::string &msg) {
+		KafkaConsumer::AckCallback callback() {
+			return [this](const std::string &, const std::string &msg, std::string &) {
 				std::lock_guard g(mtx);
 				received.insert(msg);
+				return Types::KafkaHandlerOutcome::Success;
 			};
 		}
 		bool has(const std::string &target) {

@@ -8,63 +8,70 @@
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
 #include "framework/ow_constants.h"
+#include "fmt/format.h"
 
 namespace OpenWifi {
 
 	int AutoDiscovery::Start() {
 		poco_information(Logger(), "Starting...");
 		Running_ = true;
-		Types::TopicNotifyFunction F = [this](const std::string &Key, const std::string &Payload) {
-			this->ConnectionReceived(Key, Payload);
-		};
 		ConnectionWatcherId_ = KafkaManager()->RegisterTopicWatcher(
-			KafkaTopics::CONNECTION, F, KafkaConsumerType::Group);
-		Worker_.start(*this);
+			KafkaTopics::CONNECTION,
+			[this](const std::string &Key, const std::string &Payload, std::string &FailureReason) {
+				return this->ConnectionReceived(Key, Payload, &FailureReason);
+			},
+			KafkaConsumerType::Group);
 		return 0;
-	};
+	}
 
 	void AutoDiscovery::Stop() {
 		poco_information(Logger(), "Stopping...");
 		Running_ = false;
-		KafkaManager()->UnregisterTopicWatcher(
-			KafkaTopics::CONNECTION, ConnectionWatcherId_, KafkaConsumerType::Group);
-		Queue_.wakeUpAll();
-		Worker_.join();
+		if (ConnectionWatcherId_ != 0) {
+			KafkaManager()->UnregisterTopicWatcher(KafkaTopics::CONNECTION, ConnectionWatcherId_, KafkaConsumerType::Group);
+			ConnectionWatcherId_ = 0;
+		}
 		poco_information(Logger(), "Stopped...");
-	};
+	}
+
+	namespace {
+		void ReadStringField(const Poco::JSON::Object::Ptr &Obj, const char *Field, std::string &Out) {
+			if (!Obj->has(Field)) return;
+			const auto &Val = Obj->get(Field);
+			if (!Val.isString()) {
+				throw Poco::BadCastException(fmt::format("JSON field '{}' must be a string", Field));
+			}
+			Out = Val.convert<std::string>();
+		}
+	}
 
     void AutoDiscovery::ProcessPing(const Poco::JSON::Object::Ptr & P, std::string &FW, std::string &SN,
                                     std::string &Compat, std::string &Conn, std::string &locale) {
-        if (P->has(uCentralProtocol::CONNECTIONIP))
-            Conn = P->get(uCentralProtocol::CONNECTIONIP).toString();
-        if (P->has(uCentralProtocol::FIRMWARE))
-            FW = P->get(uCentralProtocol::FIRMWARE).toString();
-        if (P->has(uCentralProtocol::SERIALNUMBER))
-            SN = P->get(uCentralProtocol::SERIALNUMBER).toString();
-        if (P->has(uCentralProtocol::COMPATIBLE))
-            Compat = P->get(uCentralProtocol::COMPATIBLE).toString();
-        if (P->has("locale")) {
-            locale = P->get("locale").toString();
-        }
+        ReadStringField(P, uCentralProtocol::CONNECTIONIP, Conn);
+        ReadStringField(P, uCentralProtocol::FIRMWARE, FW);
+        ReadStringField(P, uCentralProtocol::SERIALNUMBER, SN);
+        ReadStringField(P, uCentralProtocol::COMPATIBLE, Compat);
+        ReadStringField(P, "locale", locale);
     }
 
     void AutoDiscovery::ProcessConnect(const Poco::JSON::Object::Ptr &P, std::string &FW, std::string &SN,
                                        std::string &Compat, std::string &Conn, std::string &locale) {
-        if (P->has(uCentralProtocol::CONNECTIONIP))
-            Conn = P->get(uCentralProtocol::CONNECTIONIP).toString();
-        if (P->has(uCentralProtocol::FIRMWARE))
-            FW = P->get(uCentralProtocol::FIRMWARE).toString();
+        ReadStringField(P, uCentralProtocol::CONNECTIONIP, Conn);
+        ReadStringField(P, uCentralProtocol::FIRMWARE, FW);
         if (P->has(uCentralProtocol::SERIALNUMBER))
-            SN = P->get(uCentralProtocol::SERIALNUMBER).toString();
-        else if (P->has(uCentralProtocol::SERIAL))
-            SN = P->get(uCentralProtocol::SERIAL).toString();
-        if (P->has("locale")) {
-            locale = P->get("locale").toString();
-        }
-        if(P->has(uCentralProtocol::CAPABILITIES)) {
+            ReadStringField(P, uCentralProtocol::SERIALNUMBER, SN);
+        else
+            ReadStringField(P, uCentralProtocol::SERIAL, SN);
+        ReadStringField(P, "locale", locale);
+        if (P->has(uCentralProtocol::CAPABILITIES)) {
+            if (!P->isObject(uCentralProtocol::CAPABILITIES)) {
+                throw Poco::BadCastException("JSON field 'capabilities' must be an object");
+            }
             auto CapObj = P->getObject(uCentralProtocol::CAPABILITIES);
-            if (CapObj->has(uCentralProtocol::COMPATIBLE))
-                Compat = CapObj->get(uCentralProtocol::COMPATIBLE).toString();
+            if (!CapObj) {
+                throw Poco::BadCastException("JSON field 'capabilities' is null");
+            }
+            ReadStringField(CapObj, uCentralProtocol::COMPATIBLE, Compat);
         }
     }
 
@@ -77,48 +84,93 @@ namespace OpenWifi {
             SN = P->get(uCentralProtocol::SERIALNUMBER).toString();
     }
 
-    void AutoDiscovery::run() {
-		Poco::AutoPtr<Poco::Notification> Note(Queue_.waitDequeueNotification());
-		Utils::SetThreadName("auto-discovery");
-		while (Note && Running_) {
-			auto Msg = dynamic_cast<DiscoveryMessage *>(Note.get());
-			if (Msg != nullptr) {
-				try {
-					Poco::JSON::Parser Parser;
-					auto Object = Parser.parse(Msg->Payload()).extract<Poco::JSON::Object::Ptr>();
-                    bool    Connected=true;
-                    bool isConnection=false;
+	Types::KafkaHandlerOutcome AutoDiscovery::ConnectionReceived(const std::string &Key, const std::string &Payload, std::string *FailureReason) {
+		poco_trace(Logger(), Poco::format("Device(%s): Connection/Ping message.", Key));
 
-					if (Object->has(uCentralProtocol::PAYLOAD)) {
-                        auto PayloadObj = Object->getObject(uCentralProtocol::PAYLOAD);
-                        std::string ConnectedIP, SerialNumber, Compatible, Firmware, Locale ;
-                        if (PayloadObj->has(uCentralProtocol::PING)) {
-                            auto PingObj = PayloadObj->getObject("ping");
-                            ProcessPing(PingObj, Firmware, SerialNumber, Compatible, ConnectedIP, Locale);
-                        } else if(PayloadObj->has("capabilities")) {
-                            isConnection=true;
-                            ProcessConnect(PayloadObj, Firmware, SerialNumber, Compatible, ConnectedIP, Locale);
-                        } else if(PayloadObj->has("disconnection")) {
-                            //  we ignore disconnection in provisioning
-                            Connected=false;
-                            ProcessConnect(PayloadObj, Firmware, SerialNumber, Compatible, ConnectedIP, Locale);
-                        } else {
-                            poco_debug(Logger(),fmt::format("Unknown message on 'connection' topic: {}",Msg->Payload()));
-                        }
-
-                        if (!SerialNumber.empty() && Connected) {
-                            StorageService()->InventoryDB().CreateFromConnection(
-                                    SerialNumber, ConnectedIP, Compatible, Locale, isConnection);
-                        }
-                    }
-				} catch (const Poco::Exception &E) {
-                    std::cout << "EX:" << Msg->Payload() << std::endl;
-					Logger().log(E);
-				} catch (...) {
-				}
+		auto fail = [&](Types::KafkaHandlerOutcome Outcome, std::string Msg, bool Warn = false) {
+			if (Warn) {
+				poco_warning(Logger(), Msg);
 			} else {
+				poco_error(Logger(), Msg);
 			}
-			Note = Queue_.waitDequeueNotification();
+			if (FailureReason) {
+				*FailureReason = std::move(Msg);
+			}
+			return Outcome;
+		};
+
+		bool isConnection = false;
+		std::string ConnectedIP, SerialNumber, Compatible, Firmware, Locale;
+		try {
+			Poco::JSON::Parser Parser;
+			auto Parsed = Parser.parse(Payload);
+			if (Parsed.type() != typeid(Poco::JSON::Object::Ptr)) {
+				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+					fmt::format("Invalid non-object JSON payload on 'connection' topic, Key: {}", Key));
+			}
+			auto Object = Parsed.extract<Poco::JSON::Object::Ptr>();
+			if (!Object || !Object->has(uCentralProtocol::PAYLOAD) || !Object->isObject(uCentralProtocol::PAYLOAD)) {
+				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+					fmt::format("Missing/invalid payload on 'connection' topic, Key: {}", Key));
+			}
+			auto PayloadObj = Object->getObject(uCentralProtocol::PAYLOAD);
+			if (!PayloadObj) {
+				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+					fmt::format("Null payload on 'connection' topic, Key: {}", Key));
+			}
+
+			if (PayloadObj->has(uCentralProtocol::PING)) {
+				if (!PayloadObj->isObject(uCentralProtocol::PING)) {
+					return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+						fmt::format("Invalid non-object 'ping' field on 'connection' topic, Key: {}", Key));
+				}
+				auto PingObj = PayloadObj->getObject("ping");
+				if (!PingObj) {
+					return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+						fmt::format("Null 'ping' object on 'connection' topic, Key: {}", Key));
+				}
+				ProcessPing(PingObj, Firmware, SerialNumber, Compatible, ConnectedIP, Locale);
+			} else if (PayloadObj->has("capabilities")) {
+				isConnection = true;
+				ProcessConnect(PayloadObj, Firmware, SerialNumber, Compatible, ConnectedIP, Locale);
+			} else if (PayloadObj->has("disconnection")) {
+				return Types::KafkaHandlerOutcome::Success;
+			} else {
+				poco_information(Logger(), fmt::format("Ignored unknown event on 'connection' topic: {}", Payload));
+				return Types::KafkaHandlerOutcome::Success;
+			}
+
+			if (SerialNumber.empty()) {
+				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+					fmt::format("Missing serial number on 'connection' topic, Key: {}", Key));
+			}
+		} catch (const Poco::Exception &E) {
+			return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+				fmt::format("Invalid 'connection' JSON payload, Key: {}: {}", Key, E.displayText()));
+		} catch (const std::exception &E) {
+			return fail(Types::KafkaHandlerOutcome::RetryableFailure,
+				fmt::format("ConnectionReceived parse error: {}", E.what()));
+		} catch (...) {
+			return fail(Types::KafkaHandlerOutcome::RetryableFailure,
+				"ConnectionReceived parse unknown error");
+		}
+
+		try {
+			if (!StorageService()->InventoryDB().CreateFromConnection(SerialNumber, ConnectedIP, Compatible, Locale, isConnection)) {
+				return fail(Types::KafkaHandlerOutcome::RetryableFailure,
+					fmt::format("CreateFromConnection failed for serial: {}", SerialNumber), true);
+			}
+
+			return Types::KafkaHandlerOutcome::Success;
+		} catch (const Poco::Exception &E) {
+			return fail(Types::KafkaHandlerOutcome::RetryableFailure,
+				fmt::format("ConnectionReceived error: {}", E.displayText()));
+		} catch (const std::exception &E) {
+			return fail(Types::KafkaHandlerOutcome::RetryableFailure,
+				fmt::format("ConnectionReceived error: {}", E.what()));
+		} catch (...) {
+			return fail(Types::KafkaHandlerOutcome::RetryableFailure,
+				"ConnectionReceived unknown error");
 		}
 	}
 

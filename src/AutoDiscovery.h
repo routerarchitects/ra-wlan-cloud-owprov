@@ -7,25 +7,11 @@
 #include "framework/OpenWifiTypes.h"
 #include "framework/SubSystemServer.h"
 
-#include "Poco/Notification.h"
-#include "Poco/NotificationQueue.h"
 #include "Poco/JSON/Object.h"
 
 namespace OpenWifi {
 
-	class DiscoveryMessage : public Poco::Notification {
-	  public:
-		explicit DiscoveryMessage(const std::string &Key, const std::string &Payload)
-			: Key_(Key), Payload_(Payload) {}
-		const std::string &Key() { return Key_; }
-		const std::string &Payload() { return Payload_; }
-
-	  private:
-		std::string Key_;
-		std::string Payload_;
-	};
-
-	class AutoDiscovery : public SubSystemServer, Poco::Runnable {
+	class AutoDiscovery : public SubSystemServer {
 	  public:
 		static auto instance() {
 			static auto instance_ = new AutoDiscovery;
@@ -34,17 +20,10 @@ namespace OpenWifi {
 
 		int Start() override;
 		void Stop() override;
-		void ConnectionReceived(const std::string &Key, const std::string &Payload) {
-			std::lock_guard G(Mutex_);
-			poco_trace(Logger(), Poco::format("Device(%s): Connection/Ping message.", Key));
-			Queue_.enqueueNotification(new DiscoveryMessage(Key, Payload));
-		}
-		void run() override;
+		Types::KafkaHandlerOutcome ConnectionReceived(const std::string &Key, const std::string &Payload, std::string *FailureReason = nullptr);
 
 	  private:
 		uint64_t ConnectionWatcherId_ = 0;
-		Poco::NotificationQueue Queue_;
-		Poco::Thread Worker_;
 		std::atomic_bool Running_ = false;
 
         void ProcessPing(const Poco::JSON::Object::Ptr & P, std::string &FW, std::string &SN,

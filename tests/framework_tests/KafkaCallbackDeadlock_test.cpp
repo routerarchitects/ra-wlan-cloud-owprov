@@ -197,9 +197,9 @@ static bool read_pipe_token(int fd, char &out_token, int timeout_ms) {
 	std::atomic<bool> unregister_returned{false};
 	std::atomic<uint64_t> registered_id{0};
 
-	Types::TopicNotifyFunction cb = [&](const std::string &, const std::string &msg) {
+	KafkaConsumer::AckCallback cb = [&](const std::string &, const std::string &msg, std::string &) {
 		// Filter by unique payload so stale messages from prior runs are ignored
-		if (msg != expected_payload) return;
+		if (msg != expected_payload) return Types::KafkaHandlerOutcome::Success;
 
 		callback_entered.store(true);
 
@@ -227,6 +227,7 @@ static bool read_pipe_token(int fd, char &out_token, int timeout_ms) {
 			::close(write_fd);
 			::_exit(3); // Exit immediately to avoid hanging child or parent
 		}
+		return Types::KafkaHandlerOutcome::Success;
 	};
 
 	registered_id.store(
@@ -441,14 +442,15 @@ static void test_reentrant_callback_self_deadlock_probe() {
 	std::atomic<bool> gate_open{false};
 	std::atomic<uint64_t> watcher_id{0};
 
-	Types::TopicNotifyFunction blocking_cb = [&](const std::string &, const std::string &msg) {
+	KafkaConsumer::AckCallback blocking_cb = [&](const std::string &, const std::string &msg, std::string &) {
 		// Filter by unique payload so stale messages from prior runs are ignored
-		if (msg != expected_payload) return;
+		if (msg != expected_payload) return Types::KafkaHandlerOutcome::Success;
 
 		callback_entered.store(true);
 		// Block here — run() holds ConsumerMutex_ while waiting for gate
 		std::unique_lock<std::mutex> lk(gate_mtx);
 		gate_cv.wait(lk, [&] { return gate_open.load(); });
+		return Types::KafkaHandlerOutcome::Success;
 	};
 
 	watcher_id.store(

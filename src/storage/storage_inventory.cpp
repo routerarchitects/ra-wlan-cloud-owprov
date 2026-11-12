@@ -186,8 +186,10 @@ namespace OpenWifi {
 			if (modified) {
 				ExistingDevice.info.modified = Utils::Now();
                 ExistingDevice.connected = Utils::Now();
-				StorageService()->InventoryDB().UpdateRecord("id", ExistingDevice.info.id,
-															 ExistingDevice);
+				if (!StorageService()->InventoryDB().UpdateRecord("id", ExistingDevice.info.id, ExistingDevice)) {
+					Logger().error(Poco::format("Could not update %s in inventory.", SerialNumber));
+					return false;
+				}
 			}
 
 			// Push ownership properties in a single GW PUT, only on connect (not ping).
@@ -206,6 +208,7 @@ namespace OpenWifi {
 				}
 			}
 
+			return true;
 		}
 		return false;
 	}
