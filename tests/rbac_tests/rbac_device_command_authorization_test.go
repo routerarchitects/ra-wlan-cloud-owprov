@@ -426,4 +426,50 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			t.Fatalf("Expected direct child entity FULL role to allow REBOOT, got status=%d resp=%+v body=%s", s, resp, string(b))
 		}
 	})
+
+	// 8. Internal endpoint strictly requires X-INTERNAL-NAME and valid X-API-KEY (no Bearer fallback)
+	t.Run("Internal endpoint rejects Bearer token without valid X-INTERNAL-NAME and X-API-KEY", func(t *testing.T) {
+		internalBaseURL := getEnvOrDefault("OWPROV_INTERNAL_URL", strings.Replace(baseURL, ":16005", ":17005", 1))
+		if internalBaseURL == baseURL {
+			t.Skip("Skipping internal endpoint check: could not derive internal URL from OWPROV_URL")
+		}
+
+		payload := map[string]interface{}{
+			"serialNumber": entADeviceSerial,
+			"action":       "REBOOT",
+		}
+
+		s, b, err := doRequestWithHeaders(internalBaseURL+"/authorization/deviceCommand", map[string]string{
+			"Authorization": rootToken,
+		}, payload)
+		if err != nil {
+			t.Skipf("Internal endpoint %s unreachable in this environment: %v", internalBaseURL, err)
+		}
+		if s != http.StatusUnauthorized && s != http.StatusForbidden {
+			t.Fatalf("Expected 401/403 on internal endpoint without X-INTERNAL-NAME and X-API-KEY, got %d body=%s", s, string(b))
+		}
+
+		s, b, err = doRequestWithHeaders(internalBaseURL+"/authorization/deviceCommand", map[string]string{
+			"Authorization":   rootToken,
+			"X-INTERNAL-NAME": "owgw-test",
+			"X-API-KEY":       "invalid-service-key",
+		}, payload)
+		if err != nil {
+			t.Fatalf("Request with invalid service key failed unexpectedly: %v", err)
+		}
+		if s != http.StatusUnauthorized && s != http.StatusForbidden {
+			t.Fatalf("Expected 401/403 on internal endpoint with invalid X-API-KEY, got %d body=%s", s, string(b))
+		}
+
+		s, b, err = doRequestWithHeaders(internalBaseURL+"/authorization/deviceCommand", map[string]string{
+			"Authorization": rootToken,
+			"X-API-KEY":     "invalid-service-key",
+		}, payload)
+		if err != nil {
+			t.Fatalf("Request missing X-INTERNAL-NAME failed unexpectedly: %v", err)
+		}
+		if s != http.StatusUnauthorized && s != http.StatusForbidden {
+			t.Fatalf("Expected 401/403 on internal endpoint without X-INTERNAL-NAME, got %d body=%s", s, string(b))
+		}
+	})
 }

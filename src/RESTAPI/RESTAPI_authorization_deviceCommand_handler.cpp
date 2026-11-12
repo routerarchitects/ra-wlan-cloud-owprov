@@ -73,6 +73,16 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
+		// On the internal server, strictly require valid service credentials (X-INTERNAL-NAME
+		// and X-API-KEY) before evaluating the caller's Bearer user token — never fall back.
+		if (Internal_) {
+			if (Request->get("X-INTERNAL-NAME", "").empty() ||
+				Request->get("X-API-KEY", "").empty() ||
+				!MicroServiceIsValidAPIKEY(*Request)) {
+				return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
+			}
+		}
+
 		// On internal server, or when both X-API-KEY and Authorization are supplied on the
 		// public server, validate the Bearer user token explicitly so X-API-KEY never
 		// overrides the caller's Bearer identity.

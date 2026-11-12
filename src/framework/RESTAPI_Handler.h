@@ -806,9 +806,12 @@ namespace OpenWifi {
 #endif
 	inline bool RESTAPIHandler::IsAuthorized(bool &Expired, [[maybe_unused]] bool &Contacted,
 											 bool Sub) {
-		if (Internal_ && Request->has("X-INTERNAL-NAME")) {
-			auto Allowed = MicroServiceIsValidAPIKEY(*Request);
+		if (Internal_) {
 			Contacted = true;
+			const auto InternalName = Request->get("X-INTERNAL-NAME", "");
+			const auto ApiKey = Request->get("X-API-KEY", "");
+			auto Allowed = !InternalName.empty() && !ApiKey.empty() &&
+						   MicroServiceIsValidAPIKEY(*Request);
 			if (!Allowed) {
 				if (Server_.LogBadTokens(false)) {
 					poco_debug(Logger_,
@@ -818,18 +821,17 @@ namespace OpenWifi {
 										   Request->getURI()));
 				}
 			} else {
-				auto Id = Request->get("X-INTERNAL-NAME", "unknown");
-				REST_Requester_ = Id;
+				REST_Requester_ = InternalName;
 				if (Server_.LogIt(Request->getMethod(), true)) {
 					poco_debug(Logger_,
 							   fmt::format("I-REQ-ALLOWED({}): TID={} User='{}' Method={} Path={}",
 										   Utils::FormatIPv6(Request->clientAddress().toString()),
-										   TransactionId_, Id, Request->getMethod(),
+										   TransactionId_, InternalName, Request->getMethod(),
 										   Request->getURI()));
 				}
 			}
 			return Allowed;
-		} else if (!Internal_ && Request->has("X-API-KEY")) {
+		} else if (Request->has("X-API-KEY")) {
 			SessionToken_ = Request->get("X-API-KEY", "");
 			bool suspended = false;
 #ifdef TIP_SECURITY_SERVICE
