@@ -315,7 +315,7 @@ jobs:
 
           echo "Waiting for mock_owsec (port 16001)..."
           for i in {1..20}; do
-            if curl -k -s --fail --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
+            if curl -k -s --fail --max-time 2 "https://localhost:16001/api/v1/validateToken?token=root-test-token" > /dev/null 2>&1; then
               echo "mock_owsec is UP!"
               break
             fi

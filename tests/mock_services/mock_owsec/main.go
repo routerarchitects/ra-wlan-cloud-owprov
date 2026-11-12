@@ -457,15 +457,20 @@ func (s *MockStore) handleOAuth2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *MockStore) handleValidateToken(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
+	query := r.URL.Query()
+	hasTokenParam := query.Has("token") || query.Has("apikey") || query.Has("apiKey")
+	token := query.Get("token")
 	if token == "" {
-		token = r.URL.Query().Get("apikey")
+		token = query.Get("apikey")
+	}
+	if token == "" {
+		token = query.Get("apiKey")
 	}
 
 	// Clean Bearer prefix if present
 	token = strings.TrimPrefix(token, "Bearer ")
 
-	if token == "" || strings.HasPrefix(token, "invalid") {
+	if (hasTokenParam && token == "") || strings.HasPrefix(token, "invalid") {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
