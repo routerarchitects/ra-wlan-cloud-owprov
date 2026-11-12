@@ -149,73 +149,62 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 		}
 	}
 
+	newInventoryPayload := func(serial, name, entityID, venueID string) map[string]interface{} {
+		payload := map[string]interface{}{
+			"serialNumber": serial,
+			"name":         name,
+			"deviceType":   "edgecore_eap101",
+			"devClass":     "any",
+		}
+		if entityID != "" {
+			payload["entity"] = entityID
+		}
+		if venueID != "" {
+			payload["venue"] = venueID
+		}
+		return payload
+	}
+
 	t.Run("Reject query entity vs different body entity", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestEntityMismatch",
-			"deviceType":   "edgecore_eap101",
-			"entity":       entityBId,
-		}, serial, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId),
+			newInventoryPayload(serial, "F1TestEntityMismatch", entityBId, ""), serial, "mismatch")
 	})
 
 	t.Run("Reject cross-field query entity vs body venue in other tenant", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestCrossFieldEntityToVenue",
-			"deviceType":   "edgecore_eap101",
-			"venue":        venueBId,
-		}, serial, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId),
+			newInventoryPayload(serial, "F1TestCrossFieldEntityToVenue", "", venueBId), serial, "mismatch")
 	})
 
 	t.Run("Reject cross-field query entity vs body venue even in same entity", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestCrossFieldSameEntityVenue",
-			"deviceType":   "edgecore_eap101",
-			"venue":        venueAId,
-		}, serial, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId),
+			newInventoryPayload(serial, "F1TestCrossFieldSameEntityVenue", "", venueAId), serial, "mismatch")
 	})
 
 	t.Run("Reject unauthorized body entity without query params", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s", serial), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestDirectEntityB",
-			"deviceType":   "edgecore_eap101",
-			"entity":       entityBId,
-		}, serial, "")
+		assertRejected(t, fmt.Sprintf("/inventory/%s", serial),
+			newInventoryPayload(serial, "F1TestDirectEntityB", entityBId, ""), serial, "")
 	})
 
 	t.Run("Reject unauthorized body venue without query params", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s", serial), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestDirectVenueB",
-			"deviceType":   "edgecore_eap101",
-			"venue":        venueBId,
-		}, serial, "")
+		assertRejected(t, fmt.Sprintf("/inventory/%s", serial),
+			newInventoryPayload(serial, "F1TestDirectVenueB", "", venueBId), serial, "")
 	})
 
 	t.Run("Reject unassigned non-root creation", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s", serial), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestUnassigned",
-			"deviceType":   "edgecore_eap101",
-		}, serial, "")
+		assertRejected(t, fmt.Sprintf("/inventory/%s", serial),
+			newInventoryPayload(serial, "F1TestUnassigned", "", ""), serial, "")
 	})
 
 	t.Run("Allow creation in authorized entity with matching or omitted query param", func(t *testing.T) {
 		serial := nextSerial()
-		status, body, err := client.DoRequest("POST", fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), adminToken, map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestValidMatching",
-			"deviceType":   "edgecore_eap101",
-			"entity":       entityAId,
-		})
+		status, body, err := client.DoRequest("POST", fmt.Sprintf("/inventory/%s?entity=%s", serial, entityAId), adminToken,
+			newInventoryPayload(serial, "F1TestValidMatching", entityAId, ""))
 		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
 			t.Fatalf("Expected 200/201 for valid matching entity create, got %d err=%v body=%s", status, err, string(body))
 		}
@@ -229,48 +218,28 @@ func TestInventoryCreateScopeAuthorization(t *testing.T) {
 
 	t.Run("Reject query venue vs different body venue (cross-venue)", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serial, venueAId), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestVenueMismatchOtherTenant",
-			"deviceType":   "edgecore_eap101",
-			"venue":        venueBId,
-		}, serial, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serial, venueAId),
+			newInventoryPayload(serial, "F1TestVenueMismatchOtherTenant", "", venueBId), serial, "mismatch")
 
 		serialSameEnt := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serialSameEnt, venueAId), map[string]interface{}{
-			"serialNumber": serialSameEnt,
-			"name":         "F1TestVenueMismatchSibling",
-			"deviceType":   "edgecore_eap101",
-			"venue":        venueA2Id,
-		}, serialSameEnt, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serialSameEnt, venueAId),
+			newInventoryPayload(serialSameEnt, "F1TestVenueMismatchSibling", "", venueA2Id), serialSameEnt, "mismatch")
 	})
 
 	t.Run("Reject cross-field query venue vs body entity", func(t *testing.T) {
 		serial := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serial, venueAId), map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestVenueToEntityB",
-			"deviceType":   "edgecore_eap101",
-			"entity":       entityBId,
-		}, serial, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serial, venueAId),
+			newInventoryPayload(serial, "F1TestVenueToEntityB", entityBId, ""), serial, "mismatch")
 
 		serialParentEnt := nextSerial()
-		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serialParentEnt, venueAId), map[string]interface{}{
-			"serialNumber": serialParentEnt,
-			"name":         "F1TestVenueToEntityA",
-			"deviceType":   "edgecore_eap101",
-			"entity":       entityAId,
-		}, serialParentEnt, "mismatch")
+		assertRejected(t, fmt.Sprintf("/inventory/%s?venue=%s", serialParentEnt, venueAId),
+			newInventoryPayload(serialParentEnt, "F1TestVenueToEntityA", entityAId, ""), serialParentEnt, "mismatch")
 	})
 
 	t.Run("Allow creation in authorized venue only", func(t *testing.T) {
 		serial := nextSerial()
-		status, body, err := client.DoRequest("POST", fmt.Sprintf("/inventory/%s", serial), adminToken, map[string]interface{}{
-			"serialNumber": serial,
-			"name":         "F1TestValidVenue",
-			"deviceType":   "edgecore_eap101",
-			"venue":        venueAId,
-		})
+		status, body, err := client.DoRequest("POST", fmt.Sprintf("/inventory/%s", serial), adminToken,
+			newInventoryPayload(serial, "F1TestValidVenue", "", venueAId))
 		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
 			t.Fatalf("Expected 200/201 for valid venue create, got %d err=%v body=%s", status, err, string(body))
 		}
