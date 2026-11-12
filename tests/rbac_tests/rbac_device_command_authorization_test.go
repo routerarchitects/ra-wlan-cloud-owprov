@@ -197,10 +197,36 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		}
 	}
 
-	// Provision isolated tenant topology: Parent Entity A -> Child Entity A, Venues A1/A2, Entity B
+	createOperatorEntity := func(name, regID string) (string, func()) {
+		s, b, e := client.DoRequest("POST", "/operator/0", rootToken, map[string]interface{}{
+			"name":           name,
+			"registrationId": regID,
+		})
+		if e != nil || (s != http.StatusOK && s != http.StatusCreated) {
+			t.Fatalf("Failed to create operator %s: status=%d err=%v body=%s", name, s, e, string(b))
+		}
+		var resp struct {
+			ID       string `json:"id"`
+			EntityID string `json:"entityId"`
+		}
+		_ = json.Unmarshal(b, &resp)
+		if resp.ID == "" || resp.EntityID == "" {
+			t.Fatalf("Operator created without id/entityId: %s", string(b))
+		}
+		return resp.EntityID, func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/operator/%s", resp.ID), rootToken, nil)
+		}
+	}
+
+	// Provision isolated tenant topology: Entity A, Operator Parent -> Child Entity, Venues A1/A2, Entity B
 	entityAId, cleanupEntA := createEntity(fmt.Sprintf("devcmd-ent-a-%d", ts), "0000-0000-0000")
 	defer cleanupEntA()
-	entityAChildId, cleanupEntAChild := createEntity(fmt.Sprintf("devcmd-ent-a-child-%d", ts), entityAId)
+	opParentEntityId, cleanupOpParent := createOperatorEntity(
+		fmt.Sprintf("devcmd-op-parent-%d", ts),
+		fmt.Sprintf("reg-devcmd-%d", ts),
+	)
+	defer cleanupOpParent()
+	entityAChildId, cleanupEntAChild := createEntity(fmt.Sprintf("devcmd-ent-a-child-%d", ts), opParentEntityId)
 	defer cleanupEntAChild()
 	entityBId, cleanupEntB := createEntity(fmt.Sprintf("devcmd-ent-b-%d", ts), "0000-0000-0000")
 	defer cleanupEntB()
@@ -401,7 +427,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 
 	// 7. F4: Entity ownership strictness (no parent->child inheritance)
 	t.Run("F4 Entity-owned devices require exact entity role without ancestor inheritance", func(t *testing.T) {
-		cleanupParentRole := assignRole(entityAId, "", polFullId, adminUserId)
+		cleanupParentRole := assignRole(opParentEntityId, "", polFullId, adminUserId)
 		defer cleanupParentRole()
 
 		// Parent entity role alone must NOT authorize child entity device
