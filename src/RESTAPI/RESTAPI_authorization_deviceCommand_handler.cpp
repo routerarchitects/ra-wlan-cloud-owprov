@@ -11,9 +11,33 @@
 
 namespace OpenWifi {
 
+	static std::string CanonicalDeviceCommandAction(const std::string &action) {
+		const std::string upper = Poco::toUpper(action);
+		if (upper == "REBOOT" || upper == "TELEMETRY" || upper == "UPGRADE" ||
+			upper == "TRACE" || upper == "RTTY" || upper == "SCRIPT") {
+			return upper;
+		}
+		if (upper == "BLINK" || upper == "LEDS") {
+			return "BLINK";
+		}
+		if (upper == "WIFI_SCAN" || upper == "WIFISCAN") {
+			return "WIFI_SCAN";
+		}
+		if (upper == "FACTORY_RESET" || upper == "FACTORY" || upper == "FACTORYRESET") {
+			return "FACTORY_RESET";
+		}
+		if (upper == "RE_ENROLL" || upper == "REENROLL") {
+			return "RE_ENROLL";
+		}
+		return "";
+	}
+
 	static bool PolicyGrantsDeviceCommand(const ProvObjects::ManagementPolicy &policy,
 										  const std::string &action) {
-		const std::string UpperAction = Poco::toUpper(action);
+		const std::string CanonicalAction = CanonicalDeviceCommandAction(action);
+		if (CanonicalAction.empty()) {
+			return false;
+		}
 		for (const auto &entry : policy.entries) {
 			bool resourceMatches = false;
 			for (const auto &res : entry.resources) {
@@ -27,13 +51,7 @@ namespace OpenWifi {
 
 			for (const auto &acc : entry.access) {
 				const std::string upperAcc = Poco::toUpper(acc);
-				if (upperAcc == "FULL" || upperAcc == UpperAction ||
-					((UpperAction == "BLINK" || UpperAction == "LEDS") && (upperAcc == "BLINK" || upperAcc == "LEDS")) ||
-					((UpperAction == "WIFI_SCAN" || UpperAction == "WIFISCAN") && (upperAcc == "WIFI_SCAN" || upperAcc == "WIFISCAN")) ||
-					((UpperAction == "FACTORY_RESET" || UpperAction == "FACTORY" || UpperAction == "FACTORYRESET") &&
-					 (upperAcc == "FACTORY_RESET" || upperAcc == "FACTORY" || upperAcc == "FACTORYRESET")) ||
-					((UpperAction == "RE_ENROLL" || UpperAction == "REENROLL") &&
-					 (upperAcc == "RE_ENROLL" || upperAcc == "REENROLL"))) {
+				if (upperAcc == "FULL" || CanonicalDeviceCommandAction(upperAcc) == CanonicalAction) {
 					return true;
 				}
 			}
@@ -55,8 +73,11 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
-		// On internal server, service key was verified but user token must be validated explicitly
-		if (UserInfo_.userinfo.id.empty()) {
+		// On internal server, or when both X-API-KEY and Authorization are supplied on the
+		// public server, validate the Bearer user token explicitly so X-API-KEY never
+		// overrides the caller's Bearer identity.
+		if (Internal_ || (Request->has("X-API-KEY") && Request->has("Authorization")) ||
+			UserInfo_.userinfo.id.empty()) {
 			std::string Token;
 			try {
 				Poco::Net::OAuth20Credentials Auth(*Request);
@@ -69,6 +90,7 @@ namespace OpenWifi {
 				return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
 			}
 
+			UserInfo_ = SecurityObjects::UserInfoAndPolicy{};
 			bool Expired = false, Contacted = false;
 			if (!AuthClient()->IsAuthorized(Token, UserInfo_, TransactionId_, Expired, Contacted, false)) {
 				if (Expired) {
@@ -79,6 +101,7 @@ namespace OpenWifi {
 				}
 				return UnAuthorized(RESTAPI::Errors::SECURITY_SERVICE_UNREACHABLE);
 			}
+			REST_Requester_ = UserInfo_.userinfo.email;
 		}
 
 		std::string UserId = UserInfo_.userinfo.id;
@@ -86,7 +109,13 @@ namespace OpenWifi {
 			return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
 		}
 
-		Utils::NormalizeMac(SerialNumber);
+		if (!Utils::NormalizeMac(SerialNumber)) {
+			return BadRequest(RESTAPI::Errors::InvalidSerialNumber);
+		}
+		if (CanonicalDeviceCommandAction(Action).empty()) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+							  fmt::format("Unsupported deviceCommand action '{}'.", Action));
+		}
 		const std::string UpperAction = Poco::toUpper(Action);
 
 		Poco::JSON::Object Answer;
@@ -96,21 +125,21 @@ namespace OpenWifi {
 		Answer.set("serialNumber", SerialNumber);
 		Answer.set("userId", UserId);
 
-		// 1. Root user exemption: bypass if userRole is ROOT
-		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
-			Answer.set("allowed", true);
-			Answer.set("reason", "ALLOWED");
-			Answer.set("details", "Root user has full administrative command authority.");
-			return ReturnObject(Answer);
-		}
-
-		// 2. Look up target device in inventory
+		// 1. Look up target device in inventory before checking permissions
 		ProvObjects::InventoryTag Device;
 		if (!StorageService()->InventoryDB().GetRecord("serialNumber", SerialNumber, Device)) {
 			Answer.set("reason", "DEVICE_NOT_FOUND");
 			Answer.set("details",
 					   fmt::format("Device with serialNumber '{}' was not found in inventory.",
 								   SerialNumber));
+			return ReturnObject(Answer);
+		}
+
+		// 2. Root user exemption: bypass if userRole is ROOT
+		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
+			Answer.set("allowed", true);
+			Answer.set("reason", "ALLOWED");
+			Answer.set("details", "Root user has full administrative command authority.");
 			return ReturnObject(Answer);
 		}
 
@@ -137,27 +166,14 @@ namespace OpenWifi {
 				}
 			}
 
-			// 4B. If no venue role, fallback to parent Entity Role
+			// 4B. If no venue role, fallback to the venue's owning Entity Role
 			if (!MatchingRole) {
 				ProvObjects::Venue V;
 				if (StorageService()->VenueDB().GetRecord("id", Device.venue, V) && !V.entity.empty()) {
 					for (const auto &role : Roles) {
-						if (role.venue.empty()) {
-							if (role.entity == V.entity) {
-								MatchingRole = &role;
-								break;
-							}
-							std::set<std::string> AllowedVenues;
-							ProvObjects::Entity EntRec;
-							if (StorageService()->EntityDB().GetRecord("id", role.entity, EntRec)) {
-								for (const auto &vId : EntRec.venues) {
-									GetDescendantVenues(vId, AllowedVenues);
-								}
-							}
-							if (AllowedVenues.find(Device.venue) != AllowedVenues.end()) {
-								MatchingRole = &role;
-								break;
-							}
+						if (role.venue.empty() && role.entity == V.entity) {
+							MatchingRole = &role;
+							break;
 						}
 					}
 				}
@@ -166,17 +182,9 @@ namespace OpenWifi {
 		// 5. Branch B: Device belongs directly to an Entity
 		else if (!Device.entity.empty()) {
 			for (const auto &role : Roles) {
-				if (role.venue.empty()) {
-					if (role.entity == Device.entity) {
-						MatchingRole = &role;
-						break;
-					}
-					std::set<std::string> DescendantEntities;
-					GetDescendantEntities(role.entity, DescendantEntities);
-					if (DescendantEntities.find(Device.entity) != DescendantEntities.end()) {
-						MatchingRole = &role;
-						break;
-					}
+				if (role.venue.empty() && role.entity == Device.entity) {
+					MatchingRole = &role;
+					break;
 				}
 			}
 		}
@@ -192,10 +200,15 @@ namespace OpenWifi {
 			return ReturnObject(Answer);
 		}
 
-		// 7. Evaluate Policy on the matched role
+		// 7. Evaluate Policy on the matched role (via AuthCache, populating cache on miss)
 		ProvObjects::ManagementPolicy Policy;
-		if (AuthCache::GetInstance()->GetPolicy(MatchingRole->managementPolicy, Policy) ||
+		bool policyLoaded = AuthCache::GetInstance()->GetPolicy(MatchingRole->managementPolicy, Policy);
+		if (!policyLoaded &&
 			StorageService()->PolicyDB().GetRecord("id", MatchingRole->managementPolicy, Policy)) {
+			AuthCache::GetInstance()->SetPolicy(MatchingRole->managementPolicy, Policy);
+			policyLoaded = true;
+		}
+		if (policyLoaded) {
 
 			const std::string PolicyDisplayName =
 				Policy.info.name.empty() ? Policy.info.id : Policy.info.name;

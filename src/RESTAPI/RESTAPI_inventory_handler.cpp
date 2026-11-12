@@ -243,13 +243,8 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::ValidNonRootUUID);
 		}
 
-		if (!NewObject.venue.empty() &&
-			!StorageService()->VenueDB().Exists("id", NewObject.venue)) {
-			return BadRequest(RESTAPI::Errors::VenueMustExist);
-		}
-
+		ProvObjects::Venue venueRecord;
 		if (!NewObject.venue.empty()) {
-			ProvObjects::Venue venueRecord;
 			if (!StorageService()->VenueDB().GetRecord("id", NewObject.venue, venueRecord)) {
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
@@ -260,6 +255,31 @@ namespace OpenWifi {
 
 		if (!NewObject.venue.empty() && !NewObject.entity.empty()) {
 			return BadRequest(RESTAPI::Errors::NotBoth);
+		}
+
+		const auto QueryEntity = GetParameter("entity", "");
+		const auto QueryVenue = GetParameter("venue", "");
+		if ((!QueryEntity.empty() && (NewObject.entity != QueryEntity || !NewObject.venue.empty())) ||
+			(!QueryVenue.empty() && (NewObject.venue != QueryVenue || !NewObject.entity.empty()))) {
+			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters,
+							  "Query parameter scope (entity/venue) does not match request body.");
+		}
+
+		if (UserInfo_.userinfo.userRole != SecurityObjects::ROOT) {
+			if (NewObject.venue.empty() && NewObject.entity.empty()) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED,
+									"Entity or venue scope is required to create inventory.");
+			}
+
+			std::string AuthReason;
+			const std::string TargetEntity =
+				!NewObject.venue.empty()
+					? (venueRecord.entity.empty() ? FindParentEntity(venueRecord) : venueRecord.entity)
+					: NewObject.entity;
+			if (!IsScopeAuthorized(TargetEntity, NewObject.venue, "inventory",
+								   Poco::Net::HTTPRequest::HTTP_POST, &AuthReason)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED, AuthReason);
+			}
 		}
 
 		if (!NewObject.location.empty() &&

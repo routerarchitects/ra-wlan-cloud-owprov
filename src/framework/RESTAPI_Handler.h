@@ -137,7 +137,7 @@ namespace OpenWifi {
 
 				std::string Reason;
 				if (!RoleIsAuthorized(RequestIn.getURI(), Request->getMethod(), Reason)) {
-					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED, Reason);
 				}
 
 				if (Request->getMethod() == Poco::Net::HTTPRequest::HTTP_GET)
@@ -425,12 +425,17 @@ namespace OpenWifi {
 			Poco::JSON::Stringifier::stringify(ErrorObject, Answer);
 		}
 
-		inline void UnAuthorized(const OpenWifi::RESTAPI::Errors::msg &E) {
+		inline void UnAuthorized(const OpenWifi::RESTAPI::Errors::msg &E,
+								 const std::string &Extra = "") {
 			PrepareResponse(Poco::Net::HTTPResponse::HTTP_FORBIDDEN);
 			Poco::JSON::Object ErrorObject;
 			ErrorObject.set("ErrorCode", E.err_num);
 			ErrorObject.set("ErrorDetails", Request->getMethod());
-			ErrorObject.set("ErrorDescription", fmt::format("{}: {}", E.err_num, E.err_txt));
+			if (Extra.empty())
+				ErrorObject.set("ErrorDescription", fmt::format("{}: {}", E.err_num, E.err_txt));
+			else
+				ErrorObject.set("ErrorDescription",
+								fmt::format("{}: {} ({})", E.err_num, E.err_txt, Extra));
 			std::ostream &Answer = Response->send();
 			Poco::JSON::Stringifier::stringify(ErrorObject, Answer);
 		}
@@ -752,7 +757,8 @@ namespace OpenWifi {
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method,
-								  std::string &TargetEntity, std::string &TargetVenue);
+								  std::string &TargetEntity, std::string &TargetVenue,
+								  std::string *ErrorReason = nullptr);
 		bool IsScopeAuthorized(const std::string &TargetEntity, const std::string &TargetVenue,
 							   const std::string &Resource, const std::string &Method,
 							   std::string *Reason = nullptr);

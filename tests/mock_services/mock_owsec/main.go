@@ -465,6 +465,49 @@ func (s *MockStore) handleValidateToken(w http.ResponseWriter, r *http.Request) 
 	// Clean Bearer prefix if present
 	token = strings.TrimPrefix(token, "Bearer ")
 
+	if token == "" || strings.HasPrefix(token, "invalid") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ErrorCode":        401,
+			"ErrorDescription": "Invalid token",
+		})
+		return
+	}
+
+	if strings.HasPrefix(token, "expired") {
+		expiredCreated := time.Now().Add(-2 * time.Hour).Unix()
+		expiredAt := time.Now().Add(-1 * time.Hour).Unix()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(&UserInfoAndPolicy{
+			TokenInfo: TokenInfo{
+				Token:       token,
+				AccessToken: token,
+				UserRole:    "admin",
+				Created:     expiredCreated,
+				Expires:     expiredAt,
+				ExpiresIn:   3600,
+			},
+			UserInfo: UserInfo{
+				ID:         "00000000-0000-0000-0000-000000000003",
+				Email:      "admin-a@openwifi.local",
+				UserRole:   "admin",
+				UserRights: []UserRight{{Role: "admin"}},
+			},
+			WebToken: WebToken{
+				AccessToken: token,
+				TokenType:   "Bearer",
+				Created:     expiredCreated,
+				Expires:     expiredAt,
+				ExpiresIn:   3600,
+				ID:          "00000000-0000-0000-0000-000000000003",
+			},
+			ExpiresOn: expiredAt,
+		})
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
