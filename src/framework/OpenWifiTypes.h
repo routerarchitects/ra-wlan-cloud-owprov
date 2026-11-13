@@ -25,6 +25,12 @@ namespace OpenWifi::Types {
 	typedef std::function<void(const std::string &, const std::string &)> TopicNotifyFunction;
 	typedef std::list<std::pair<TopicNotifyFunction, int>> TopicNotifyFunctionList;
 	typedef std::map<std::string, TopicNotifyFunctionList> NotifyTable;
+
+	enum class KafkaHandlerOutcome {
+		Success,
+		RetryableFailure,
+		NonRetryableFailure
+	};
 	typedef std::map<std::string, uint64_t> CountedMap;
 	typedef std::vector<uint64_t> TagList;
 	typedef std::string UUID_t;

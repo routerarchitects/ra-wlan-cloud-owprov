@@ -320,7 +320,10 @@ namespace OpenWifi {
 			return -1;
 		}
 		ContactDB_->Create();
-		InventoryDB_->Create();
+		if (!InventoryDB_->Create()) {
+			poco_critical(Logger(), "InventoryDB initialization or unique serialNumber index validation failed. Halting daemon startup.");
+			throw std::runtime_error("InventoryDB initialization or unique serialNumber index validation failed.");
+		}
 		if (!RolesDB_->Create()) {
 			poco_critical(Logger(), "RolesDB initialization or migration reported failure. Halting daemon startup.");
 			return -1;
