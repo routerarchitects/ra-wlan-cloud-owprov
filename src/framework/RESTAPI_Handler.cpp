@@ -6,17 +6,30 @@
 #include "RESTAPI/RESTAPI_db_helpers.h"
 #include "RESTObjects/RESTAPI_ProvObjects.h"
 #include "StorageService.h"
+#include "framework/SubscriberAccess.h"
 #include "framework/MicroServiceFuncs.h"
 
 namespace OpenWifi {
 
 	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path, const std::string &Method,
-										  std::string &Reason) {
-		// 0. Pure service-to-service calls without delegated user credentials bypass user RBAC
-		if (IsInternalServiceOnly()) {
+								  std::string &Reason) {
+		// === Principal Classification Gate (subscriber_rbac.md sec 4.1) ===
+
+		// Track 1: Internal microservice call authenticated via inter-service API key.
+		if (Internal_ && InternalServiceAuthenticated_) {
 			return true;
 		}
 
+		// Track 2: Subscriber self-care (Bearer token with userRole == SUBSCRIBER).
+		if (UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER) {
+			return AuthorizeSubscriberRequest(Path, Method, Reason);
+		}
+		if (UserInfo_.userinfo.userRole == SecurityObjects::UNKNOWN) {
+			Reason = "Unrecognized principal.";
+			return false;
+		}
+
+		// Track 3: Administrative users (ROOT, ADMIN, CSR, etc.) -- existing logic below.
 		// 1. Bypass check only if user is root
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 			return true;
@@ -756,6 +769,99 @@ namespace OpenWifi {
 			}
 		}
 		return false;
+	}
+
+	// Tier 1 subscriber authorization; failures never fall through to admin RBAC.
+	bool RESTAPIHandler::AuthorizeSubscriberRequest(const std::string &Path,
+		const std::string &Method, std::string &Reason) {
+		using SubscriberAccess::Operation;
+		const std::string CallerId = UserInfo_.userinfo.id;
+		if (CallerId.empty()) {
+			Reason = "Subscriber identity context is missing or unresolvable.";
+			return false;
+		}
+		std::string targetId;
+		// The legacy admin resource mapper matches substrings, including query strings.
+		// Subscriber capabilities instead match the decoded URI path exactly.
+		const auto operation = SubscriberAccess::Resolve(
+			Method, Poco::URI(Path).getPath(), CallerId, targetId);
+		if (operation == Operation::Denied) {
+			Reason = "Method, path or identity not permitted for subscriber self-care.";
+			return false;
+		}
+
+		// A supplied identity is a consistency assertion, never a scope selector.
+		for (const auto &[name, value] : Parameters_) {
+			if (name == "subscriberId" && value != CallerId) {
+				Reason = "subscriberId must match authenticated subscriber identity.";
+				return false;
+			}
+		}
+		if (ParsedBody_ && ParsedBody_->has("subscriberId")) {
+			const auto value = ParsedBody_->get("subscriberId");
+			if (!value.isString()) {
+				BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+				return false;
+			}
+			if (value.toString() != CallerId) {
+				Reason = "subscriberId must match authenticated subscriber identity.";
+				return false;
+			}
+		}
+
+		if (operation == Operation::ClaimDevice) {
+			if (!ParsedBody_) {
+				BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+				return false;
+			}
+			for (const auto &field : *ParsedBody_) {
+				if (!SubscriberAccess::IsClaimFieldAllowed(field.first)) {
+					Reason = "Property not permitted on subscriber device claim.";
+					return false;
+				}
+				if ((field.first == "configuration" && !ParsedBody_->isArray(field.first)) ||
+					(field.first != "configuration" && !field.second.isString())) {
+					BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+					return false;
+				}
+			}
+			if (ParsedBody_->has("deviceConfiguration")) {
+				const auto configuration = ParsedBody_->get("deviceConfiguration");
+				if (!configuration.isString()) {
+					BadRequest(RESTAPI::Errors::InvalidJSONDocument);
+					return false;
+				}
+				if (!configuration.toString().empty()) {
+					Reason = "Subscribers may not reference an existing configuration.";
+					return false;
+				}
+			}
+			return true;
+		}
+
+		if (operation == Operation::ListDevices || operation == Operation::DeleteAccount)
+			return true;
+
+		ProvObjects::SubscriberDevice device;
+		bool found;
+		if (Utils::ValidUUID(targetId)) {
+			found = StorageService()->SubscriberDeviceDB().GetRecord("id", targetId, device);
+		} else if (Utils::ValidSerialNumber(targetId)) {
+			found = StorageService()->SubscriberDeviceDB().GetRecord("serialNumber", targetId, device);
+		} else {
+			BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			return false;
+		}
+		if (!found || device.subscriberId != CallerId) {
+			Logger_.information(fmt::format("SUBSCRIBER_RBAC: {} target='{}' caller='{}'",
+				found ? "Foreign resource ownership" : "Resource not found in database",
+				targetId, CallerId));
+			NotFound();
+			return false;
+		}
+		MemoizedSubscriberDevice_ = std::move(device);
+		MemoizedDeviceLoaded_ = true;
+		return true;
 	}
 
 	bool AuthCache::GetUserRoles(const std::string &userId,

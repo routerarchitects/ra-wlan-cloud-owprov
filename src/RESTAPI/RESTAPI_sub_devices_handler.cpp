@@ -138,15 +138,20 @@ namespace OpenWifi {
 
 	bool RESTAPI_sub_devices_handler::ValidateRequestFields(
 		const SubscriberDeviceDB::RecordName &deviceObject) {
+		// operatorId has no subscriber authorization semantics (requirements 4.6).
+		const bool isSubscriber =
+			(UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER);
+
 		if (!ValidDbId(deviceObject.managementPolicy, StorageService()->PolicyDB(), true,
 					   RESTAPI::Errors::UnknownManagementPolicyUUID, *this) ||
-			!ValidDbId(deviceObject.operatorId, StorageService()->OperatorDB(), false,
-					   RESTAPI::Errors::InvalidOperatorId, *this) ||
+			(!isSubscriber &&
+			 !ValidDbId(deviceObject.operatorId, StorageService()->OperatorDB(), false,
+					   RESTAPI::Errors::InvalidOperatorId, *this)) ||
 			!ValidDbId(deviceObject.serviceClass, StorageService()->ServiceClassDB(), true,
 					   RESTAPI::Errors::InvalidServiceClassId, *this) ||
 			!ValidDbId(deviceObject.deviceConfiguration, StorageService()->ConfigurationDB(), true,
 					   RESTAPI::Errors::ConfigurationMustExist, *this) ||
-			!ValidSubscriberId(deviceObject.subscriberId, true, *this) ||
+			(!isSubscriber && !ValidSubscriberId(deviceObject.subscriberId, true, *this)) ||
 			!ValidDeviceRules(deviceObject.deviceRules, *this) ||
 			!ValidSerialNumber(deviceObject.serialNumber, false, *this)) {
 			return false;
@@ -280,6 +285,9 @@ namespace OpenWifi {
 		subscriberConfiguration.managementPolicy = newObject.managementPolicy;
 		subscriberConfiguration.deviceTypes = {newObject.deviceType.empty() ? std::string("*")
 																			: newObject.deviceType};
+		// Claim configuration belongs exclusively to the subscriber (requirements 5.2.3).
+		subscriberConfiguration.subscriber = newObject.subscriberId;
+		subscriberConfiguration.subscriberOnly = true;
 
 		std::vector<std::string> errors;
 		if (!ValidateConfigBlock(ConfigurationValidator::GetType(targetDeviceGroup),
@@ -340,6 +348,8 @@ namespace OpenWifi {
 			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 			return false;
 		}
+		if (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER)
+			newObject.subscriberId = UserInfo_.userinfo.id;
 
 		if (DB_.Exists("serialNumber", newObject.serialNumber)) {
 			BadRequest(RESTAPI::Errors::SerialNumberExists);
@@ -348,6 +358,18 @@ namespace OpenWifi {
 
 		if (!ValidateRequestFields(newObject)) {
 			return false;
+		}
+		if (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER) {
+			ProvObjects::InventoryTag inventory;
+			if (!StorageService()->InventoryDB().GetRecord("serialNumber", newObject.serialNumber, inventory)) {
+				NotFound();
+				return false;
+			}
+			if (!inventory.subscriber.empty() && inventory.subscriber != newObject.subscriberId) {
+				NotFound();
+				return false;
+			}
+			newObject.deviceType = inventory.deviceType;
 		}
 
 		return true;
@@ -376,8 +398,13 @@ namespace OpenWifi {
 			return false;
 		}
 
+		bool querySucceeded = false;
 		const auto subscriberDeviceCount =
-			DB_.Count(DB_.OP("subscriberId", ORM::EQ, newObject.subscriberId));
+			DB_.Count(DB_.OP("subscriberId", ORM::EQ, newObject.subscriberId), &querySucceeded);
+		if (!querySucceeded) {
+			InternalError(RESTAPI::Errors::InternalError);
+			return false;
+		}
 
 		if (subscriberDeviceCount == 0) {
 			if (newObject.deviceGroup != "olg") {
@@ -787,7 +814,10 @@ namespace OpenWifi {
 
 	void RESTAPI_sub_devices_handler::DoGet() {
 		ProvObjects::SubscriberDevice existingObject;
-		if (!LoadDeviceFromBinding(existingObject, true)) {
+		// Reuse device pre-loaded and ownership-verified in AuthorizeSubscriberRequest (sec 4.2.5)
+		if (MemoizedDeviceLoaded_) {
+			existingObject = MemoizedSubscriberDevice_;
+		} else if (!LoadDeviceFromBinding(existingObject, true)) {
 			return;
 		}
 		return ReturnSubscriberDeviceObject(existingObject);
@@ -800,7 +830,29 @@ namespace OpenWifi {
 								 deviceIdOrSerial));
 
 		ProvObjects::SubscriberDevice existingObject;
-		if (!ValidateDeleteRequest(deviceIdOrSerial, existingObject)) {
+		// Reuse device pre-loaded and ownership-verified in AuthorizeSubscriberRequest (sec 4.2.5)
+		if (MemoizedDeviceLoaded_) {
+			existingObject = MemoizedSubscriberDevice_;
+			// Still run OLG prerequisite check
+			std::string grp = existingObject.deviceGroup;
+			Poco::toLowerInPlace(grp);
+			if (grp == "olg") {
+				bool querySucceeded = false;
+				const auto subscriberDeviceCount =
+					DB_.Count(DB_.OP("subscriberId", ORM::EQ, existingObject.subscriberId), &querySucceeded);
+				if (!querySucceeded)
+					return InternalError(RESTAPI::Errors::InternalError);
+				if (subscriberDeviceCount > 1) {
+					poco_warning(Logger(),
+								 fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Rejecting delete for OLG "
+											 "device [{}] of subscriber [{}]. Device count is [{}]; "
+											 "AP devices must be deleted first.",
+											 existingObject.serialNumber, existingObject.subscriberId,
+											 subscriberDeviceCount));
+					return BadRequest(RESTAPI::Errors::MustDeleteAPDevicesBeforeOLG);
+				}
+			}
+		} else if (!ValidateDeleteRequest(deviceIdOrSerial, existingObject)) {
 			return;
 		}
 		if (!StopMonitoring(existingObject)) {

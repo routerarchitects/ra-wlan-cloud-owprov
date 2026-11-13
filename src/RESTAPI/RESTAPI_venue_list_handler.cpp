@@ -9,6 +9,34 @@
 
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
+		auto subscriberId = GetParameter("subscriberId", "");
+		bool isSubscriber = (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER);
+		if (isSubscriber) {
+			if (subscriberId.empty()) {
+				subscriberId = UserInfo_.userinfo.id;
+			} else if (subscriberId != UserInfo_.userinfo.id) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+		}
+
+		if (!subscriberId.empty()) {
+			if (!Utils::ValidUUID(subscriberId)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
+			std::string WhereClause = fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId));
+			auto RRMvendor = GetParameter("RRMvendor", "");
+			if (!RRMvendor.empty()) {
+				WhereClause += fmt::format(" AND deviceRules LIKE '%{}%' ", ORM::Escape(RRMvendor));
+			}
+			if (QB_.CountOnly) {
+				auto C = DB_.Count(WhereClause);
+				return ReturnCountOnly(C);
+			}
+			VenueDB::RecordVec Venues;
+			DB_.GetRecords(QB_.Offset, QB_.Limit, Venues, WhereClause, " ORDER BY name ");
+			return ReturnObject("venues", Venues);
+		}
+
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
 
 		if (isRoot) {

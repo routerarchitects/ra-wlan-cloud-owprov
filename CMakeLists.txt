@@ -260,6 +260,10 @@ target_link_libraries(db_transaction_test PRIVATE
 enable_testing()
 add_test(NAME db_transaction_test COMMAND db_transaction_test)
 
+add_executable(subscriber_access_test tests/framework_tests/SubscriberAccess_test.cpp)
+target_link_libraries(subscriber_access_test PRIVATE ${Poco_LIBRARIES} fmt::fmt)
+add_test(NAME subscriber_access_test COMMAND subscriber_access_test)
+
 add_executable(instance_identity_test
         tests/framework_tests/InstanceIdentity_test.cpp
 )
