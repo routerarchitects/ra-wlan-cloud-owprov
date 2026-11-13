@@ -99,6 +99,10 @@ namespace OpenWifi {
 		bool RoleIsAuthorized(const std::string &Path, const std::string &Method,
 							  std::string &Reason);
 
+		// Subscriber self-care RBAC gate (subscriber_rbac.md sec 4.2)
+		bool AuthorizeSubscriberRequest(const std::string &Path, const std::string &Method,
+										std::string &Reason);
+
 		inline void handleRequest(Poco::Net::HTTPServerRequest &RequestIn,
 								  Poco::Net::HTTPServerResponse &ResponseIn) final {
 			try {
@@ -137,7 +141,12 @@ namespace OpenWifi {
 
 				std::string Reason;
 				if (!RoleIsAuthorized(RequestIn.getURI(), Request->getMethod(), Reason)) {
-					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+					// AuthorizeSubscriberRequest may have already sent a 404 (uniform masking).
+					// Only send 403 if no response has been committed yet.
+					if (!Response->sent()) {
+						return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+					}
+					return;
 				}
 
 				if (Request->getMethod() == Poco::Net::HTTPRequest::HTTP_GET)
@@ -237,6 +246,13 @@ namespace OpenWifi {
 			if (Hint == end(Parameters_))
 				return Default;
 			return Hint->second;
+		}
+
+		[[nodiscard]] inline bool HasParameter(const std::string &Name) {
+			auto Hint = std::find_if(
+				begin(Parameters_), end(Parameters_),
+				[&](const std::pair<std::string, std::string> &S) { return S.first == Name; });
+			return Hint != end(Parameters_);
 		}
 
 		[[nodiscard]] inline bool HasParameter(const std::string &Name, std::string &Value) {
@@ -774,6 +790,11 @@ namespace OpenWifi {
 		std::string GetResourceName(const std::string &Path);
 
 	  protected:
+		// Reuse the ownership-checked device in GET/DELETE (subscriber_rbac.md 4.3.2).
+		ProvObjects::SubscriberDevice MemoizedSubscriberDevice_;
+		bool MemoizedDeviceLoaded_ = false;
+		bool InternalServiceAuthenticated_ = false;
+
 		BindingMap Bindings_;
 		Poco::URI::QueryParameters Parameters_;
 		Poco::Logger &Logger_;
@@ -801,7 +822,9 @@ namespace OpenWifi {
 	inline bool RESTAPIHandler::IsAuthorized(bool &Expired, [[maybe_unused]] bool &Contacted,
 											 bool Sub) {
 		if (Internal_ && Request->has("X-INTERNAL-NAME")) {
-			auto Allowed = MicroServiceIsValidAPIKEY(*Request);
+			auto Allowed = !Request->get("X-INTERNAL-NAME", "").empty() &&
+				MicroServiceIsValidAPIKEY(*Request);
+			InternalServiceAuthenticated_ = Allowed;
 			Contacted = true;
 			if (!Allowed) {
 				if (Server_.LogBadTokens(false)) {
