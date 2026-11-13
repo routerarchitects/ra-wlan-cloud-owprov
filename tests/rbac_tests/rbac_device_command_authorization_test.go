@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
  *   6. F4: Entity-owned devices require exact entity role (no parent->child entity inheritance or ancestor shadowing).
  *   7. Action-specific permissions & aliases (BLINK/LEDS, WIFI_SCAN/WIFISCAN, FACTORY_RESET/FACTORY, RE_ENROLL/REENROLL).
  *   8. F7: Unknown actions rejected rather than authorized under FULL policy (or ROOT).
+ *   9. Valid internal service credentials delegate user permissions and preserve service-only list access.
  */
 func TestDeviceCommandAuthorization(t *testing.T) {
 	baseURL := getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1")
@@ -46,7 +48,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		PolicyName   string `json:"policyName"`
 	}
 
-	doRequestWithHeaders := func(targetURL string, headers map[string]string, body interface{}) (int, []byte, error) {
+	doRequestWithHeaders := func(method, targetURL string, headers map[string]string, body interface{}) (int, []byte, error) {
 		var bodyReader io.Reader
 		if body != nil {
 			raw, err := json.Marshal(body)
@@ -55,7 +57,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			}
 			bodyReader = bytes.NewBuffer(raw)
 		}
-		req, err := http.NewRequest("POST", targetURL, bodyReader)
+		req, err := http.NewRequest(method, targetURL, bodyReader)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -78,7 +80,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		if token != "" {
 			headers["Authorization"] = token
 		}
-		status, body, err := doRequestWithHeaders(baseURL+"/authorization/deviceCommand", headers, map[string]interface{}{
+		status, body, err := doRequestWithHeaders(http.MethodPost, baseURL+"/authorization/deviceCommand", headers, map[string]interface{}{
 			"serialNumber": serial,
 			"action":       action,
 		})
@@ -454,7 +456,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			"action":       "REBOOT",
 		}
 
-		s, b, err := doRequestWithHeaders(internalBaseURL+"/authorization/deviceCommand", map[string]string{
+		s, b, err := doRequestWithHeaders(http.MethodPost, internalBaseURL+"/authorization/deviceCommand", map[string]string{
 			"Authorization": rootToken,
 		}, payload)
 		if err != nil {
@@ -464,7 +466,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			t.Fatalf("Expected 401/403 on internal endpoint without X-INTERNAL-NAME and X-API-KEY, got %d body=%s", s, string(b))
 		}
 
-		s, b, err = doRequestWithHeaders(internalBaseURL+"/authorization/deviceCommand", map[string]string{
+		s, b, err = doRequestWithHeaders(http.MethodPost, internalBaseURL+"/authorization/deviceCommand", map[string]string{
 			"Authorization":   rootToken,
 			"X-INTERNAL-NAME": "owgw-test",
 			"X-API-KEY":       "invalid-service-key",
@@ -476,7 +478,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			t.Fatalf("Expected 401/403 on internal endpoint with invalid X-API-KEY, got %d body=%s", s, string(b))
 		}
 
-		s, b, err = doRequestWithHeaders(internalBaseURL+"/authorization/deviceCommand", map[string]string{
+		s, b, err = doRequestWithHeaders(http.MethodPost, internalBaseURL+"/authorization/deviceCommand", map[string]string{
 			"Authorization": rootToken,
 			"X-API-KEY":     "invalid-service-key",
 		}, payload)
@@ -487,4 +489,99 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			t.Fatalf("Expected 401/403 on internal endpoint without X-INTERNAL-NAME, got %d body=%s", s, string(b))
 		}
 	})
+
+	// 9. Valid service authentication must preserve delegated user RBAC and service-only APIs.
+	t.Run("Internal authenticated delegation and service-only access", func(t *testing.T) {
+		internalBaseURL := os.Getenv("OWPROV_INTERNAL_URL")
+		serviceKey := os.Getenv("OWPROV_INTERNAL_API_KEY")
+		serviceName := os.Getenv("OWPROV_INTERNAL_NAME")
+		if internalBaseURL == "" || serviceKey == "" || serviceName == "" {
+			if os.Getenv("CI") == "true" {
+				t.Fatal("Internal authentication coverage requires OWPROV_INTERNAL_URL, OWPROV_INTERNAL_API_KEY, and OWPROV_INTERNAL_NAME in CI")
+			}
+			t.Skip("Set OWPROV_INTERNAL_URL, OWPROV_INTERNAL_API_KEY, and OWPROV_INTERNAL_NAME to run internal authentication integration tests")
+		}
+		cleanupRole := assignRole(entityAId, "", polFullId, adminUserId)
+		defer cleanupRole()
+
+		for _, tc := range []struct {
+			name   string
+			token  string
+			serial string
+			allow  bool
+			reason string
+		}{
+			{"Delegated admin authorized in own entity", adminToken, entADeviceSerial, true, "ALLOWED"},
+			{"Delegated admin denied outside entity", adminToken, entBDeviceSerial, false, "OUT_OF_SCOPE"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				status, body, err := doRequestWithHeaders(http.MethodPost, internalBaseURL+"/authorization/deviceCommand", map[string]string{
+					"X-INTERNAL-NAME": serviceName,
+					"X-API-KEY":       serviceKey,
+					"Authorization":   tc.token,
+				}, map[string]interface{}{"serialNumber": tc.serial, "action": "REBOOT"})
+				if err != nil {
+					t.Fatalf("Internal delegated request failed: %v", err)
+				}
+				var resp authzResp
+				if err := json.Unmarshal(body, &resp); err != nil {
+					t.Fatalf("Invalid authorization response: %v", err)
+				}
+				if status != http.StatusOK || resp.Allowed != tc.allow || resp.Reason != tc.reason || resp.UserID != adminUserId || resp.SerialNumber != tc.serial {
+					t.Fatalf("Expected delegated user decision allowed=%v reason=%s, got status=%d resp=%+v", tc.allow, tc.reason, status, resp)
+				}
+				if tc.allow && resp.PolicyID != polFullId {
+					t.Fatalf("Expected delegated user's policy %s, got %s", polFullId, resp.PolicyID)
+				}
+			})
+		}
+
+		for _, tc := range []struct{ name, token string }{
+			{"Device command requires a delegated user", ""},
+			{"Invalid delegated token rejected despite valid service key", "Bearer invalid-devicecmd-token"},
+			{"Expired delegated token rejected despite valid service key", "Bearer expired-devicecmd-token"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				headers := map[string]string{"X-INTERNAL-NAME": serviceName, "X-API-KEY": serviceKey}
+				if tc.token != "" {
+					headers["Authorization"] = tc.token
+				}
+				status, _, err := doRequestWithHeaders(http.MethodPost, internalBaseURL+"/authorization/deviceCommand", headers,
+					map[string]interface{}{"serialNumber": entADeviceSerial, "action": "REBOOT"})
+				if err != nil {
+					t.Fatalf("Internal request failed: %v", err)
+				}
+				if status != http.StatusUnauthorized && status != http.StatusForbidden {
+					t.Fatalf("Expected 401/403, got %d", status)
+				}
+			})
+		}
+
+		for _, tc := range []struct{ path, field string }{
+			{"/configurations", "configurations"},
+			{"/variable", "variableBlocks"},
+		} {
+			t.Run("Service-only GET "+tc.path, func(t *testing.T) {
+				status, body, err := doRequestWithHeaders(http.MethodGet, internalBaseURL+tc.path, map[string]string{
+					"X-INTERNAL-NAME": serviceName,
+					"X-API-KEY":       serviceKey,
+				}, nil)
+				if err != nil {
+					t.Fatalf("Service-only list request failed: %v", err)
+				}
+				if status != http.StatusOK {
+					t.Fatalf("Expected service-only list access to succeed, got %d body=%s", status, body)
+				}
+				var resp map[string]json.RawMessage
+				if err := json.Unmarshal(body, &resp); err != nil {
+					t.Fatalf("Invalid list response: %v", err)
+				}
+				var items []json.RawMessage
+				if raw, ok := resp[tc.field]; !ok || json.Unmarshal(raw, &items) != nil || items == nil {
+					t.Fatalf("Expected %s array in service-only response, got %s", tc.field, body)
+				}
+			})
+		}
+	})
+
 }

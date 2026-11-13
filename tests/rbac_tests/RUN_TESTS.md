@@ -892,6 +892,30 @@ TOKEN_NO_ACCESS="Bearer <no_access_token>" go test -v . -run TestManagementRole_
 
 ---
 
+## Internal authentication integration coverage
+
+`TestDeviceCommandAuthorization/Internal_authenticated_delegation_and_service-only_access`
+checks valid service credentials with a forwarded admin Bearer token, including
+successful authorization in the admin's entity and `OUT_OF_SCOPE` denial in another
+entity. It also checks that valid service credentials cannot bypass missing,
+invalid, or expired user tokens for device commands, while service-only
+`GET /configurations` and `GET /variable` requests remain supported.
+
+Set these variables alongside the existing user token and public URL settings:
+
+```bash
+export OWPROV_INTERNAL_URL="https://localhost:17005/api/v1"
+export OWPROV_INTERNAL_NAME="https://owprov-integration-test.local"
+export OWPROV_INTERNAL_API_KEY="<target OWPROV service access key>"
+go test -v . -run '^TestDeviceCommandAuthorization$'
+```
+
+Use OWPROV's service access key, as advertised in its service discovery event,
+rather than a user token or the caller's own service key. The lab CI workflow
+supplies the key using the same SHA-256 derivation as OWPROV's configured public
+endpoint. Missing settings skip this coverage locally and fail it in CI;
+connection failures with configured credentials always fail.
+
 ## Run All Tests Simultaneously
 
 To run all RBAC tests in one single command:
