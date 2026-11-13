@@ -7,17 +7,25 @@
 //
 
 #include "storage_inventory.h"
+#include <algorithm>
 #include "RESTObjects/RESTAPI_SecurityObjects.h"
 #include "SerialNumberCache.h"
 #include "StorageService.h"
+#include "fmt/format.h"
 #include "framework/MicroServiceFuncs.h"
 #include "framework/OpenWifiTypes.h"
 #include "framework/RESTAPI_utils.h"
+#include "framework/RetryableTransaction.h"
 #include "framework/utils.h"
 #include "nlohmann/json.hpp"
 #include "sdks/SDK_gw.h"
 
 namespace OpenWifi {
+
+	namespace {
+		constexpr const char *kSerialCanonicalUniqueIndex = "inventory_serial_canonical_unique_idx";
+		constexpr const char *kCanonicalSerialExprSQL = "lower(serialnumber)";
+	} // namespace
 
 	static ORM::FieldVec InventoryDB_Fields{
 		// object info
@@ -75,10 +83,99 @@ namespace OpenWifi {
 			} catch (...) {
 			}
 		}
-		return true;
+		return EnsureSerialUniqueIndex();
 	}
 
-#define __DBG__ std::cout << __FILE__ << ": " << __LINE__ << std::endl;
+	bool InventoryDB::EnsureSerialUniqueIndex() {
+		if (Type_ != OpenWifi::DBType::pgsql) {
+			return true;
+		}
+
+		try {
+			Poco::Data::Session Session = Pool_.get();
+
+			// Create separately named unique index on lower(serialnumber), keeping inventory_serial_index intact.
+			std::string CreateIndexSQL = fmt::format(
+				"CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} ({})",
+				kSerialCanonicalUniqueIndex, TableName_, kCanonicalSerialExprSQL);
+			Session << CreateIndexSQL, Poco::Data::Keywords::now;
+
+			// Verify via PostgreSQL catalogs that the required unique index exists, is valid,
+			// is not partial, has one key attribute, and covers lower(serialnumber).
+			bool Verified = false;
+			std::string VerifySQL = ConvertParams(
+				"SELECT true "
+				"FROM pg_index i "
+				"JOIN pg_class idx_cls ON idx_cls.oid = i.indexrelid "
+				"JOIN pg_class tbl_cls ON tbl_cls.oid = i.indrelid "
+				"JOIN pg_namespace ns ON ns.oid = tbl_cls.relnamespace "
+				"WHERE tbl_cls.oid = to_regclass(?) "
+				"  AND idx_cls.oid = to_regclass(quote_ident(ns.nspname) || '.' || ?) "
+				"  AND idx_cls.relnamespace = tbl_cls.relnamespace "
+				"  AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indnkeyatts = 1 "
+				"  AND lower(replace(replace(pg_get_expr(i.indexprs, i.indrelid), ' ', ''), '\"', '')) "
+				"      IN ('lower(serialnumber)', 'lower((serialnumber)::text)')");
+			std::string UseTable = TableName_;
+			std::string UseIndex = kSerialCanonicalUniqueIndex;
+
+			Session << VerifySQL,
+				Poco::Data::Keywords::into(Verified),
+				Poco::Data::Keywords::use(UseTable),
+				Poco::Data::Keywords::use(UseIndex),
+				Poco::Data::Keywords::now;
+
+			if (!Verified) {
+				Logger().critical(fmt::format(
+					"InventoryDB: PostgreSQL unique index '{}' on '{}' failed verification.",
+					kSerialCanonicalUniqueIndex, TableName_));
+				return false;
+			}
+
+			return true;
+		} catch (const std::exception &E) {
+			Logger().critical(fmt::format(
+				"InventoryDB: Failed to create or verify unique index '{}' on '{}': {}",
+				kSerialCanonicalUniqueIndex, TableName_, E.what()));
+			return false;
+		} catch (...) {
+			Logger().critical(fmt::format(
+				"InventoryDB: Failed to create or verify unique index '{}' on '{}': unknown exception",
+				kSerialCanonicalUniqueIndex, TableName_));
+			return false;
+		}
+	}
+
+	namespace {
+		template <typename ParentDBType, typename ParentRecordType>
+		bool AddDeviceToParent(OpenWifi::DbTransaction &tx,
+		                       OpenWifi::DBType dbType,
+		                       ParentDBType &parentDb,
+		                       const std::string &parentId,
+		                       const std::string &deviceId,
+		                       Poco::Logger &logger) {
+			ParentRecordType parent;
+			const bool loaded = (dbType == OpenWifi::DBType::pgsql)
+				? parentDb.GetRecordForUpdate(tx, "id", parentId, parent)
+				: parentDb.GetRecord(tx, "id", parentId, parent);
+			if (!loaded) {
+				logger.error(fmt::format(
+					"CreateFromConnection could not load parent '{}' to add device '{}'.",
+					parentId, deviceId));
+				return false;
+			}
+			if (std::find(parent.devices.begin(), parent.devices.end(), deviceId) == parent.devices.end()) {
+				parent.devices.push_back(deviceId);
+				std::sort(parent.devices.begin(), parent.devices.end());
+				if (!parentDb.UpdateRecord(tx, "id", parentId, parent)) {
+					logger.error(fmt::format(
+						"CreateFromConnection could not update parent '{}' membership for device '{}'.",
+						parentId, deviceId));
+					return false;
+				}
+			}
+			return true;
+		}
+	} // namespace
 
 	InventoryDB::InventoryDB(OpenWifi::DBType T, Poco::Data::SessionPool &P, Poco::Logger &L)
 		: DB(T, "inventory", InventoryDB_Fields, InventoryDB_Indexes, P, L, "inv") {}
@@ -89,128 +186,258 @@ namespace OpenWifi {
 										   const std::string &Locale,
 										   const bool isConnection) {
 
-		ProvObjects::InventoryTag ExistingDevice;
-		auto SerialNumber = Poco::toLower(SerialNumberRaw);
-		if (!GetRecord("serialNumber", SerialNumber, ExistingDevice)) {
-            ProvObjects::InventoryTag NewDevice;
-			uint64_t Now = Utils::Now();
+		const std::string SerialNumber = Poco::toLower(SerialNumberRaw);
+		if (SerialNumber.empty()) {
+			Logger().error("CreateFromConnection called with empty serial number.");
+			return false;
+		}
 
+		// Check inventory existence before entering transaction to keep venue/entity
+		// discovery outside the active PostgreSQL transaction and avoid holding locks
+		// or exhausting session-pool connections during IP scans.
+		bool PreflightFound = false;
+		try {
+			Poco::Data::Session PreflightSession = Pool_.get();
+			std::string PreflightId;
+			std::string key = SerialNumber;
+			Poco::Data::Statement select(PreflightSession);
+			select << ConvertParams(fmt::format(
+				"SELECT id FROM {} WHERE {} = ? LIMIT 1",
+				TableName_, kCanonicalSerialExprSQL)),
+				Poco::Data::Keywords::into(PreflightId),
+				Poco::Data::Keywords::use(key);
+			PreflightFound = (select.execute() == 1 && !PreflightId.empty());
+		} catch (const Poco::Exception &E) {
+			Logger().error(fmt::format(
+				"CreateFromConnection preflight lookup database error for '{}': {}",
+				SerialNumber, E.displayText()));
+			return false;
+		} catch (const std::exception &E) {
+			Logger().error(fmt::format(
+				"CreateFromConnection preflight lookup database error for '{}': {}",
+				SerialNumber, E.what()));
+			return false;
+		} catch (...) {
+			Logger().error(fmt::format(
+				"CreateFromConnection preflight lookup database error for '{}': unknown exception",
+				SerialNumber));
+			return false;
+		}
+
+		std::string MatchedVenue;
+		std::string MatchedEntity;
+		if (!PreflightFound) {
 			auto Tokens = Poco::StringTokenizer(ConnectionInfo, "@:");
-			std::string IP;
-			if (Tokens.count() == 3) {
-				IP = Tokens[1];
-			}
-			NewDevice.info.id = MicroServiceCreateUUID();
-			NewDevice.info.name = SerialNumber;
-			NewDevice.info.created = NewDevice.info.modified = Now;
-			NewDevice.info.notes.push_back(SecurityObjects::NoteInfo{
-				.created = Now, .createdBy = "*system", .note = "Auto discovered"});
-			NewDevice.serialNumber = SerialNumber;
-			NewDevice.deviceType = DeviceType;
-			NewDevice.locale = Locale;
-			nlohmann::json StateDoc;
-			StateDoc["method"] = "auto-discovery";
-			StateDoc["date"] = Utils::Now();
-			NewDevice.state = to_string(StateDoc);
-			NewDevice.devClass = "any";
-            NewDevice.connected = Now;
-            NewDevice.imported = 0;
-			if (!IP.empty()) {
-				StorageService()->VenueDB().GetByIP(IP, NewDevice.venue);
-				if (NewDevice.venue.empty()) {
-					StorageService()->EntityDB().GetByIP(IP, NewDevice.entity);
+			if (Tokens.count() == 3 && !Tokens[1].empty()) {
+				const std::string &IP = Tokens[1];
+				StorageService()->VenueDB().GetByIP(IP, MatchedVenue);
+				if (MatchedVenue.empty()) {
+					StorageService()->EntityDB().GetByIP(IP, MatchedEntity);
 				}
 			}
+		}
 
-			if (CreateRecord(NewDevice)) {
-				SerialNumberCache()->AddSerialNumber(SerialNumber, DeviceType);
-				std::string FullUUID;
-				if (!NewDevice.entity.empty()) {
-					StorageService()->EntityDB().AddDevice("id", NewDevice.entity,
-														   NewDevice.info.id);
-					FullUUID = StorageService()->EntityDB().Prefix() + ":" + NewDevice.entity;
-				} else if (!NewDevice.venue.empty()) {
-					StorageService()->VenueDB().AddDevice("id", NewDevice.venue, NewDevice.info.id);
-					FullUUID = StorageService()->VenueDB().Prefix() + ":" + NewDevice.venue;
-				}
+		bool CreatedNew = false;
+		ProvObjects::InventoryTag CommittedDevice;
 
-				if (!FullUUID.empty()) {
-					if (SDK::GW::Device::SetVenue(nullptr, NewDevice.serialNumber, FullUUID)) {
-						Logger().information(Poco::format("%s: GW set entity/venue property.",
-														  NewDevice.serialNumber));
-					} else {
-						Logger().information(Poco::format(
-							"%s: could not set GW entity/venue property.", NewDevice.serialNumber));
+		RetryableTransactionOptions TxOpts;
+		TxOpts.logContext = "inventory_create_from_connection";
+
+		for (int Pass = 0; Pass < 2; ++Pass) {
+			auto Res = RunRetryableTransaction(
+				Logger(),
+				TxOpts,
+				[&]() { return StorageService()->BeginTransaction(); },
+				[&](DbTransaction &tx) -> bool {
+					CreatedNew = false;
+					CommittedDevice = ProvObjects::InventoryTag{};
+
+					std::string ExistingId;
+					try {
+						Poco::Data::Statement select(tx.Session());
+						std::string key = SerialNumber;
+						select << ConvertParams(fmt::format(
+							"SELECT id FROM {} WHERE {} = ? LIMIT 1",
+							TableName_, kCanonicalSerialExprSQL)),
+							Poco::Data::Keywords::into(ExistingId),
+							Poco::Data::Keywords::use(key);
+						select.execute();
+					} catch (const Poco::Exception &E) {
+						tx.MarkFailed(E);
+						return false;
+					} catch (const std::exception &E) {
+						tx.MarkFailed("", E.what());
+						return false;
+					} catch (...) {
+						tx.MarkFailed();
+						return false;
 					}
-				}
-				Logger().information(Poco::format("Adding %s to inventory.", SerialNumber));
-				return true;
-			} else {
-				Logger().information(Poco::format("Could not add %s to inventory.", SerialNumber));
-			}
-		} else {
-			//  Device already exists, do we need to modify anything?
-			bool modified = false;
-			if (ExistingDevice.deviceType != DeviceType) {
-				ExistingDevice.deviceType = DeviceType;
-				modified = true;
-			}
 
-			//  if this device is being claimed, not it is claimed.
-			if (!ExistingDevice.state.empty()) {
-				auto State = nlohmann::json::parse(ExistingDevice.state);
-				if (State["method"] == "claiming") {
-					uint64_t Date = State["date"];
-					uint64_t Now = Utils::Now();
+					if (ExistingId.empty()) {
+						// If preflight found a record that was deleted before this transaction,
+						// fail this attempt so Kafka retries with full IP discovery.
+						if (PreflightFound) {
+							Logger().warning(fmt::format(
+								"CreateFromConnection: device '{}' was present during preflight but deleted before transaction; "
+								"failing for retry with discovery.",
+								SerialNumber));
+							return false;
+						}
 
-					if ((Now - Date) < (24 * 60 * 60)) {
-						State["method"] = "claimed";
-						State["date"] = Utils::Now();
-						ExistingDevice.state = to_string(State);
-						modified = true;
-					} else {
-						ExistingDevice.state = "";
+						ProvObjects::InventoryTag NewDevice;
+						uint64_t Now = Utils::Now();
+						NewDevice.info.id = MicroServiceCreateUUID();
+						NewDevice.info.name = SerialNumber;
+						NewDevice.info.created = NewDevice.info.modified = Now;
+						NewDevice.info.notes.push_back(SecurityObjects::NoteInfo{
+							.created = Now, .createdBy = "*system", .note = "Auto discovered"});
+						NewDevice.serialNumber = SerialNumber;
+						NewDevice.deviceType = DeviceType;
+						NewDevice.locale = Locale;
+						nlohmann::json StateDoc;
+						StateDoc["method"] = "auto-discovery";
+						StateDoc["date"] = Now;
+						NewDevice.state = to_string(StateDoc);
+						NewDevice.devClass = "any";
+						NewDevice.connected = Now;
+						NewDevice.imported = 0;
+						NewDevice.venue = MatchedVenue;
+						NewDevice.entity = MatchedEntity;
+
+						if (!CreateRecord(tx, NewDevice)) {
+							return false;
+						}
+
+						if (!NewDevice.entity.empty()) {
+							if (!AddDeviceToParent<EntityDB, ProvObjects::Entity>(
+									tx, Type_, StorageService()->EntityDB(), NewDevice.entity, NewDevice.info.id, Logger())) {
+								return false;
+							}
+						} else if (!NewDevice.venue.empty()) {
+							if (!AddDeviceToParent<VenueDB, ProvObjects::Venue>(
+									tx, Type_, StorageService()->VenueDB(), NewDevice.venue, NewDevice.info.id, Logger())) {
+								return false;
+							}
+						}
+
+						CreatedNew = true;
+						CommittedDevice = std::move(NewDevice);
+						return true;
+					}
+
+					ProvObjects::InventoryTag ExistingDevice;
+					const bool Loaded = (Type_ == OpenWifi::DBType::pgsql)
+						? GetRecordForUpdate(tx, "id", ExistingId, ExistingDevice)
+						: GetRecord(tx, "id", ExistingId, ExistingDevice);
+					if (!Loaded) {
+						return false;
+					}
+
+					// Device already exists, do we need to modify anything?
+					bool modified = false;
+					if (ExistingDevice.deviceType != DeviceType) {
+						ExistingDevice.deviceType = DeviceType;
 						modified = true;
 					}
-				}
-			} else {
-				ExistingDevice.devClass = "any";
-				modified = true;
+
+					// if this device is being claimed, now it is claimed.
+					if (!ExistingDevice.state.empty()) {
+						auto State = nlohmann::json::parse(ExistingDevice.state);
+						if (State["method"] == "claiming") {
+							uint64_t Date = State["date"];
+							uint64_t Now = Utils::Now();
+
+							if ((Now - Date) < (24 * 60 * 60)) {
+								State["method"] = "claimed";
+								State["date"] = Utils::Now();
+								ExistingDevice.state = to_string(State);
+								modified = true;
+							} else {
+								ExistingDevice.state = "";
+								modified = true;
+							}
+						}
+					} else {
+						ExistingDevice.devClass = "any";
+						modified = true;
+					}
+
+					if (Locale != ExistingDevice.locale) {
+						ExistingDevice.locale = Locale;
+						modified = true;
+					}
+
+					if (modified) {
+						ExistingDevice.info.modified = Utils::Now();
+						ExistingDevice.connected = Utils::Now();
+						if (!UpdateRecord(tx, "id", ExistingDevice.info.id, ExistingDevice)) {
+							Logger().error(Poco::format("Could not update %s in inventory.", SerialNumber));
+							return false;
+						}
+					}
+
+					CreatedNew = false;
+					CommittedDevice = std::move(ExistingDevice);
+					return true;
+				});
+
+			if (Res.Succeeded()) {
+				break;
 			}
 
-			if (Locale != ExistingDevice.locale) {
-				ExistingDevice.locale = Locale;
-				modified = true;
+			if (Res.status == RetryableTransactionStatus::UniqueViolation && Pass == 0) {
+				Logger().information(fmt::format(
+					"CreateFromConnection concurrent insert conflict for '{}' (SQLSTATE 23505); "
+					"re-reading existing record in fresh transaction.",
+					SerialNumber));
+				continue;
 			}
 
-			if (modified) {
-				ExistingDevice.info.modified = Utils::Now();
-                ExistingDevice.connected = Utils::Now();
-				if (!StorageService()->InventoryDB().UpdateRecord("id", ExistingDevice.info.id, ExistingDevice)) {
-					Logger().error(Poco::format("Could not update %s in inventory.", SerialNumber));
-					return false;
-				}
+			Logger().error(fmt::format("CreateFromConnection failed for '{}': {}",
+				SerialNumber, Res.lastFailureMessage));
+			return false;
+		}
+
+		if (CreatedNew) {
+			SerialNumberCache()->AddSerialNumber(CommittedDevice.serialNumber, CommittedDevice.deviceType);
+
+			std::string FullUUID;
+			if (!CommittedDevice.entity.empty()) {
+				FullUUID = StorageService()->EntityDB().Prefix() + ":" + CommittedDevice.entity;
+			} else if (!CommittedDevice.venue.empty()) {
+				FullUUID = StorageService()->VenueDB().Prefix() + ":" + CommittedDevice.venue;
 			}
 
-			// Push ownership properties in a single GW PUT, only on connect (not ping).
-			if (isConnection && (!ExistingDevice.venue.empty() || !ExistingDevice.entity.empty() ||
-								 !ExistingDevice.subscriber.empty())) {
-				if (SDK::GW::Device::SetOwnerShip(nullptr, ExistingDevice.serialNumber,
-												  ExistingDevice.entity, ExistingDevice.venue,
-												  ExistingDevice.subscriber)) {
-					Logger().information(
-						Poco::format("%s: GW set ownership properties (entity/venue/subscriber).",
-									 ExistingDevice.serialNumber));
+			if (!FullUUID.empty()) {
+				if (SDK::GW::Device::SetVenue(nullptr, CommittedDevice.serialNumber, FullUUID)) {
+					Logger().information(Poco::format("%s: GW set entity/venue property.",
+													  CommittedDevice.serialNumber));
 				} else {
 					Logger().information(Poco::format(
-						"%s: could not set GW ownership properties (entity/venue/subscriber).",
-						ExistingDevice.serialNumber));
+						"%s: could not set GW entity/venue property.", CommittedDevice.serialNumber));
 				}
 			}
-
+			Logger().information(Poco::format("Adding %s to inventory.", SerialNumber));
 			return true;
 		}
-		return false;
+
+		// Push ownership properties in a single GW PUT, only on connect (not ping).
+		if (isConnection && (!CommittedDevice.venue.empty() || !CommittedDevice.entity.empty() ||
+							 !CommittedDevice.subscriber.empty())) {
+			if (SDK::GW::Device::SetOwnerShip(nullptr, CommittedDevice.serialNumber,
+											  CommittedDevice.entity, CommittedDevice.venue,
+											  CommittedDevice.subscriber)) {
+				Logger().information(
+					Poco::format("%s: GW set ownership properties (entity/venue/subscriber).",
+								 CommittedDevice.serialNumber));
+			} else {
+				Logger().information(Poco::format(
+					"%s: could not set GW ownership properties (entity/venue/subscriber).",
+					CommittedDevice.serialNumber));
+			}
+		}
+
+		return true;
 	}
 
 	bool InventoryDB::EvaluateDeviceIDRules(const std::string &id,
