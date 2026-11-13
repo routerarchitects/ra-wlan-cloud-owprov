@@ -558,7 +558,7 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		}
 
 		for _, tc := range []struct{ path, field string }{
-			{"/configurations", "configurations"},
+			{"/configuration", "configurations"},
 			{"/variable", "variableBlocks"},
 		} {
 			t.Run("Service-only GET "+tc.path, func(t *testing.T) {

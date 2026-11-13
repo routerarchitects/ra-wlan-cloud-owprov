@@ -899,7 +899,7 @@ checks valid service credentials with a forwarded admin Bearer token, including
 successful authorization in the admin's entity and `OUT_OF_SCOPE` denial in another
 entity. It also checks that valid service credentials cannot bypass missing,
 invalid, or expired user tokens for device commands, while service-only
-`GET /configurations` and `GET /variable` requests remain supported.
+`GET /configuration` and `GET /variable` requests remain supported.
 
 Set these variables alongside the existing user token and public URL settings:
 
