@@ -187,8 +187,18 @@ namespace OpenWifi {
 										   const bool isConnection) {
 
 		const std::string SerialNumber = Poco::toLower(SerialNumberRaw);
-		if (SerialNumber.empty()) {
-			Logger().error("CreateFromConnection called with empty serial number.");
+		if (SerialNumber.empty() || SerialNumber.size() > 16 || !Utils::ValidSerialNumber(SerialNumber)) {
+			Logger().error(fmt::format(
+				"CreateFromConnection called with invalid serial number '{}'.", SerialNumberRaw));
+			return false;
+		}
+		try {
+			(void)std::stoull(SerialNumber, nullptr, 16);
+			std::string rev(SerialNumber.rbegin(), SerialNumber.rend());
+			(void)std::stoull(rev, nullptr, 16);
+		} catch (...) {
+			Logger().error(fmt::format(
+				"CreateFromConnection called with out-of-range hex serial number '{}'.", SerialNumberRaw));
 			return false;
 		}
 

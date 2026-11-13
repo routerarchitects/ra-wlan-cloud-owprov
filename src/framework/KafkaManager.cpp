@@ -275,6 +275,19 @@ namespace OpenWifi {
 		return Assigned_;
 	}
 
+	int64_t KafkaConsumer::GetCommittedOffset(const std::string &Topic, int Partition) const {
+		std::lock_guard Lock(ConsumerMutex_);
+		if (!Consumer_) return -1;
+		try {
+			cppkafka::TopicPartitionList tpl{{Topic, Partition}};
+			auto committed = Consumer_->get_offsets_committed(tpl);
+			if (!committed.empty()) {
+				return committed.front().get_offset();
+			}
+		} catch (...) {}
+		return -1;
+	}
+
 	inline void KafkaConsumer::run() {
 		std::string RoleName = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
 		Utils::SetThreadName((ConsumerType_ == KafkaConsumerType::Broadcast) ? "Kafka:Bcast" : "Kafka:GrpCons");

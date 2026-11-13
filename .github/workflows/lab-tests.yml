@@ -119,7 +119,11 @@ jobs:
             test_bcast_topic_a \
             test_bcast_topic_b \
             test_reentrant_deadlock_probe \
-            test_concurrent_unregister_probe; do
+            test_concurrent_unregister_probe \
+            test_commit_retry_topic \
+            test_retry_scenario_topic \
+            test_non_retry_scenario_topic \
+            test_shutdown_scenario_topic; do
             docker exec kafka /opt/kafka/bin/kafka-topics.sh \
               --bootstrap-server localhost:9092 \
               --create \

@@ -8,6 +8,7 @@
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
 #include "framework/ow_constants.h"
+#include "framework/utils.h"
 #include "fmt/format.h"
 
 namespace OpenWifi {
@@ -140,9 +141,18 @@ namespace OpenWifi {
 				return Types::KafkaHandlerOutcome::Success;
 			}
 
-			if (SerialNumber.empty()) {
+			const std::string LowerSerial = Poco::toLower(SerialNumber);
+			if (LowerSerial.empty() || LowerSerial.size() > 16 || !Utils::ValidSerialNumber(LowerSerial)) {
 				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
-					fmt::format("Missing serial number on 'connection' topic, Key: {}", Key));
+					fmt::format("Invalid or malformed serial number '{}' on 'connection' topic, Key: {}", SerialNumber, Key));
+			}
+			try {
+				(void)std::stoull(LowerSerial, nullptr, 16);
+				std::string rev(LowerSerial.rbegin(), LowerSerial.rend());
+				(void)std::stoull(rev, nullptr, 16);
+			} catch (...) {
+				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
+					fmt::format("Out of range hex serial number '{}' on 'connection' topic, Key: {}", SerialNumber, Key));
 			}
 		} catch (const Poco::Exception &E) {
 			return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,

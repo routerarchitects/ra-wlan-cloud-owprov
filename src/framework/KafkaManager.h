@@ -94,6 +94,7 @@ namespace OpenWifi {
 		[[nodiscard]] std::vector<std::string> Subscriptions() const;
 		[[nodiscard]] bool HasPartitionAssignment() const { return Assigned_; }
 		bool WaitForPartitionAssignment(uint64_t TimeoutMs = 5000) const;
+		[[nodiscard]] int64_t GetCommittedOffset(const std::string &Topic, int Partition = 0) const;
 
 		using AckCallback = std::function<Types::KafkaHandlerOutcome(const std::string &, const std::string &, std::string &)>;
 
