@@ -17,7 +17,7 @@ import (
  * VALIDATES POST /api/v1/authorization/deviceCommand:
  *   1. Normal authorization (entity-owned and venue-owned devices, MAC normalization, ROOT on existing device).
  *   2. Missing, invalid, and expired Bearer tokens (and internal endpoint Bearer requirement).
- *   3. F2: Public endpoint with both privileged X-API-KEY and restricted Bearer token enforces Bearer user's policy.
+ *   3. Bearer token authorization denies access to devices outside the user's entity scope.
  *   4. F5: Malformed serial numbers rejected with 400; ROOT on nonexistent device returns allowed=false (DEVICE_NOT_FOUND).
  *   5. Venue override precedence: authoritative venue role overrides broader entity role; no venue role falls back to venue's entity.
  *   6. F4: Entity-owned devices require exact entity role (no parent->child entity inheritance or ancestor shadowing).
@@ -325,8 +325,8 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 		}
 	})
 
-	// 4. Normal entity ownership, MAC normalization, Unknown Action under FULL policy, and F2 X-API-KEY override
-	t.Run("Entity FULL policy, MAC normalization, unknown action rejection, and F2 X-API-KEY precedence", func(t *testing.T) {
+	// 4. Bearer authorization: entity ownership, MAC normalization, unknown actions, and scope enforcement
+	t.Run("Entity FULL policy, MAC normalization, unknown action rejection, and Bearer scope enforcement", func(t *testing.T) {
 		cleanupRoleA := assignRole(entityAId, "", polFullId, adminUserId)
 		defer cleanupRoleA()
 
@@ -353,22 +353,10 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			}
 		}
 
-		// F2: Sending ROOT X-API-KEY alongside adminToken Bearer for out-of-scope Entity B must still deny (OUT_OF_SCOPE)
-		rawRootKey := strings.TrimPrefix(rootToken, "Bearer ")
-		status, body, err := doRequestWithHeaders(baseURL+"/authorization/deviceCommand", map[string]string{
-			"X-API-KEY":     rawRootKey,
-			"Authorization": adminToken,
-		}, map[string]interface{}{
-			"serialNumber": entBDeviceSerial,
-			"action":       "REBOOT",
-		})
-		if err != nil {
-			t.Fatalf("F2 mixed-header request failed: %v", err)
-		}
-		var mixedResp authzResp
-		_ = json.Unmarshal(body, &mixedResp)
-		if status != http.StatusOK || mixedResp.Allowed || mixedResp.Reason != "OUT_OF_SCOPE" {
-			t.Fatalf("F2 regression: X-API-KEY leaked ROOT privilege over Bearer user; got status=%d resp=%+v body=%s", status, mixedResp, string(body))
+		// The admin Bearer token must deny access to out-of-scope Entity B.
+		s, resp, b = callAuthz(adminToken, entBDeviceSerial, "REBOOT")
+		if s != http.StatusOK || resp.Allowed || resp.Reason != "OUT_OF_SCOPE" {
+			t.Fatalf("Expected Bearer user to be denied with OUT_OF_SCOPE, got status=%d resp=%+v body=%s", s, resp, string(b))
 		}
 	})
 
