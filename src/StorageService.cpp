@@ -905,48 +905,50 @@ namespace OpenWifi {
 			ServiceClassDB_->CreateRecord(DefSer);
 		}
 
-		auto EnsureResourceInPolicy = [&](const std::string &policyName, const std::vector<std::string> &resourcesToAdd, const std::string &accessLevel) {
+		auto EnsureResourceInPolicy = [&](const std::string &policyName, const std::vector<std::string> &resourcesToAdd, const std::string &accessLevel) -> bool {
 			ProvObjects::ManagementPolicy P;
-			if (PolicyDB().GetRecord("name", policyName, P)) {
-				bool updated = false;
-				for (const auto &resToAdd : resourcesToAdd) {
-					bool found = false;
+			if (!PolicyDB().GetRecord("name", policyName, P)) {
+				return false;
+			}
+			bool updated = false;
+			for (const auto &resToAdd : resourcesToAdd) {
+				bool found = false;
+				for (auto &entry : P.entries) {
+					for (const auto &r : entry.resources) {
+						if (r == resToAdd || r == "*") {
+							found = true;
+							break;
+						}
+					}
+					if (found) break;
+				}
+				if (!found) {
+					bool addedToExisting = false;
 					for (auto &entry : P.entries) {
-						for (const auto &r : entry.resources) {
-							if (r == resToAdd || r == "*") {
-								found = true;
+						for (const auto &acc : entry.access) {
+							if (acc == accessLevel || acc == "FULL") {
+								entry.resources.push_back(resToAdd);
+								addedToExisting = true;
+								updated = true;
 								break;
 							}
 						}
-						if (found) break;
+						if (addedToExisting) break;
 					}
-					if (!found) {
-						bool addedToExisting = false;
-						for (auto &entry : P.entries) {
-							for (const auto &acc : entry.access) {
-								if (acc == accessLevel || acc == "FULL") {
-									entry.resources.push_back(resToAdd);
-									addedToExisting = true;
-									updated = true;
-									break;
-								}
-							}
-							if (addedToExisting) break;
-						}
-						if (!addedToExisting) {
-							ProvObjects::ManagementPolicyEntry newEntry;
-							newEntry.resources = {resToAdd};
-							newEntry.access = {accessLevel};
-							P.entries.push_back(newEntry);
-							updated = true;
-						}
+					if (!addedToExisting) {
+						ProvObjects::ManagementPolicyEntry newEntry;
+						newEntry.resources = {resToAdd};
+						newEntry.access = {accessLevel};
+						P.entries.push_back(newEntry);
+						updated = true;
 					}
-				}
-				if (updated) {
-					P.info.modified = Utils::Now();
-					PolicyDB().UpdateRecord("id", P.info.id, P);
 				}
 			}
+			if (updated) {
+				P.info.modified = Utils::Now();
+				return PolicyDB().UpdateRecord("id", P.info.id, P);
+			}
+			return true;
 		};
 
 		if (!PolicyDB().Exists("name", "Admin")) {
@@ -957,7 +959,7 @@ namespace OpenWifi {
 			P.info.created = P.info.modified = Utils::Now();
 
 			ProvObjects::ManagementPolicyEntry E1;
-			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole"};
+			E1.resources = {"entity", "venue", "configuration", "inventory", "operator", "subscriber", "contact", "location", "managementRole", "deviceCommand"};
 			E1.access = {"FULL"}; P.entries.push_back(E1);
 
 			PolicyDB().CreateRecord(P);

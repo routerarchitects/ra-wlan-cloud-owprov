@@ -315,7 +315,7 @@ jobs:
 
           echo "Waiting for mock_owsec (port 16001)..."
           for i in {1..20}; do
-            if curl -k -s --fail --max-time 2 https://localhost:16001/api/v1/validateToken > /dev/null 2>&1; then
+            if curl -k -s --fail --max-time 2 "https://localhost:16001/api/v1/validateToken?token=root-test-token" > /dev/null 2>&1; then
               echo "mock_owsec is UP!"
               break
             fi
@@ -468,6 +468,7 @@ jobs:
             -e STORAGE_TYPE_POSTGRESQL_DATABASE=owprov \
             -e RESTAPI_HOST_PORT=16005 \
             -e INTERNAL_RESTAPI_HOST_PORT=17005 \
+            -e SYSTEM_URI_PUBLIC=https://localhost:16005 \
             owprov:test
 
           echo "Waiting for owprov to start on port 16005..."
@@ -647,12 +648,16 @@ jobs:
       # ── Run RBAC immutability, policy protection, and v1/v2 role tests ─────────
       - name: Execute RBAC Immutability and Policy Protection Tests
         run: |
-          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection|TestManagementRole_V1|TestManagementRole_V2|TestManagementRolePolicyQueryFilter"
+          # MicroService::LoadMyConfig uses SHA-256 of SYSTEM_URI_PUBLIC as its access key.
+          export OWPROV_INTERNAL_API_KEY="$(printf '%s' 'https://localhost:16005' | sha256sum | cut -d ' ' -f1)"
+          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection|TestManagementRole_V1|TestManagementRole_V2|TestManagementRolePolicyQueryFilter|TestInventoryCreateScopeAuthorization|TestDeviceCommandAuthorization"
         working-directory: ${{ github.workspace }}/tests/rbac_tests
         env:
           OWPROV_URL: "https://localhost:16005/api/v1"
           OWPROV_V1_URL: "https://localhost:16005/api/v1"
           OWPROV_V2_URL: "https://localhost:16005/api/v2"
+          OWPROV_INTERNAL_URL: "https://localhost:17005/api/v1"
+          OWPROV_INTERNAL_NAME: "https://owprov-integration-test.local"
           TOKEN_ROOT: "Bearer root-test-token"
           TOKEN_NO_ACCESS: "Bearer user-read-only-token"
           TOKEN_ADMIN_OPERATOR_A: "Bearer user-admin-operator-a-token"

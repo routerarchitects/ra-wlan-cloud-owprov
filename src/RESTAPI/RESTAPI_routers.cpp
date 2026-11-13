@@ -3,6 +3,7 @@
 //
 
 #include "RESTAPI/RESTAPI_asset_server.h"
+#include "RESTAPI/RESTAPI_authorization_deviceCommand_handler.h"
 #include "RESTAPI/RESTAPI_configurations_handler.h"
 #include "RESTAPI/RESTAPI_configurations_list_handler.h"
 #include "RESTAPI/RESTAPI_contact_handler.h"
@@ -77,7 +78,8 @@ namespace OpenWifi {
             RESTAPI_openroaming_gr_acct_handler, RESTAPI_openroaming_gr_list_acct_handler,
             RESTAPI_openroaming_gr_cert_handler, RESTAPI_openroaming_gr_list_certificates,
             RESTAPI_openroaming_orion_acct_handler, RESTAPI_openroaming_orion_list_acct_handler,
-            RESTAPI_radiusendpoint_list_handler, RESTAPI_radius_endpoint_handler>(
+            RESTAPI_radiusendpoint_list_handler, RESTAPI_radius_endpoint_handler,
+            RESTAPI_authorization_deviceCommand_handler>(
 			Path, Bindings, L, S, TransactionId);
 	}
 
@@ -106,7 +108,8 @@ namespace OpenWifi {
             RESTAPI_openroaming_gr_acct_handler, RESTAPI_openroaming_gr_list_acct_handler,
             RESTAPI_openroaming_gr_cert_handler, RESTAPI_openroaming_gr_list_certificates,
             RESTAPI_openroaming_orion_acct_handler, RESTAPI_openroaming_orion_list_acct_handler,
-            RESTAPI_radiusendpoint_list_handler, RESTAPI_radius_endpoint_handler>(
+            RESTAPI_radiusendpoint_list_handler, RESTAPI_radius_endpoint_handler,
+            RESTAPI_authorization_deviceCommand_handler>(
                     Path, Bindings, L, S,TransactionId);
 	}
 } // namespace OpenWifi

@@ -170,6 +170,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_managementRole_handler.cpp src/RESTAPI/RESTAPI_managementRole_handler.h
         src/RESTAPI/RESTAPI_managementRole_list_handler.cpp src/RESTAPI/RESTAPI_managementRole_list_handler.h
         src/RESTAPI/RESTAPI_managementRole_v2_handler.cpp src/RESTAPI/RESTAPI_managementRole_v2_handler.h
+        src/RESTAPI/RESTAPI_authorization_deviceCommand_handler.cpp src/RESTAPI/RESTAPI_authorization_deviceCommand_handler.h
         src/RESTAPI/RESTAPI_configurations_list_handler.cpp src/RESTAPI/RESTAPI_configurations_list_handler.h
         src/RESTAPI/RESTAPI_iptocountry_handler.cpp src/RESTAPI/RESTAPI_iptocountry_handler.h
         src/RESTAPI/RESTAPI_subscriber_handler.h src/RESTAPI/RESTAPI_subscriber_handler.cpp
@@ -324,6 +325,20 @@ target_link_libraries(kafka_callback_deadlock_test PRIVATE
 add_test(NAME kafka_callback_deadlock_test COMMAND kafka_callback_deadlock_test)
 set_tests_properties(kafka_callback_deadlock_test
         PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(kafka_producer_partitioning_test
+        tests/framework_tests/KafkaProducerPartitioning_test.cpp
+        src/framework/KafkaManager.cpp
+        src/framework/EventBusManager.cpp
+        src/RESTObjects/RESTAPI_ProvObjects.cpp
+        src/RESTObjects/RESTAPI_SecurityObjects.cpp
+)
+target_link_libraries(kafka_producer_partitioning_test PRIVATE
+        ${Poco_LIBRARIES}
+        CppKafka::cppkafka
+        fmt::fmt)
+
+add_test(NAME kafka_producer_partitioning_test COMMAND kafka_producer_partitioning_test)
 
 add_executable(service_discovery_test
         tests/framework_tests/ServiceDiscovery_test.cpp
