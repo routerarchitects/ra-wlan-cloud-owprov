@@ -137,7 +137,7 @@ namespace OpenWifi {
 
 				std::string Reason;
 				if (!RoleIsAuthorized(RequestIn.getURI(), Request->getMethod(), Reason)) {
-					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED, Reason);
 				}
 
 				if (Request->getMethod() == Poco::Net::HTTPRequest::HTTP_GET)
@@ -425,12 +425,17 @@ namespace OpenWifi {
 			Poco::JSON::Stringifier::stringify(ErrorObject, Answer);
 		}
 
-		inline void UnAuthorized(const OpenWifi::RESTAPI::Errors::msg &E) {
+		inline void UnAuthorized(const OpenWifi::RESTAPI::Errors::msg &E,
+								 const std::string &Extra = "") {
 			PrepareResponse(Poco::Net::HTTPResponse::HTTP_FORBIDDEN);
 			Poco::JSON::Object ErrorObject;
 			ErrorObject.set("ErrorCode", E.err_num);
 			ErrorObject.set("ErrorDetails", Request->getMethod());
-			ErrorObject.set("ErrorDescription", fmt::format("{}: {}", E.err_num, E.err_txt));
+			if (Extra.empty())
+				ErrorObject.set("ErrorDescription", fmt::format("{}: {}", E.err_num, E.err_txt));
+			else
+				ErrorObject.set("ErrorDescription",
+								fmt::format("{}: {} ({})", E.err_num, E.err_txt, Extra));
 			std::ostream &Answer = Response->send();
 			Poco::JSON::Stringifier::stringify(ErrorObject, Answer);
 		}
@@ -585,6 +590,11 @@ namespace OpenWifi {
 			return true;
 		}
 
+		inline bool IsInternalServiceOnly() const {
+			return Internal_ && UserInfo_.userinfo.id.empty() && Request != nullptr &&
+				   !Request->has("Authorization");
+		}
+		inline bool ValidateBearerToken(bool &Expired, bool &Contacted, bool Sub);
 		inline bool IsAuthorized(bool &Expired, bool &Contacted, bool SubOnly = false);
 
 		inline void ReturnObject(Poco::JSON::Object &Object) {
@@ -752,7 +762,8 @@ namespace OpenWifi {
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method,
-								  std::string &TargetEntity, std::string &TargetVenue);
+								  std::string &TargetEntity, std::string &TargetVenue,
+								  std::string *ErrorReason = nullptr);
 		bool IsScopeAuthorized(const std::string &TargetEntity, const std::string &TargetVenue,
 							   const std::string &Resource, const std::string &Method,
 							   std::string *Reason = nullptr);
@@ -798,12 +809,44 @@ namespace OpenWifi {
 											   SecurityObjects::UserInfoAndPolicy &UInfo,
 											   std::uint64_t TID, bool &Expired, bool Sub);
 #endif
+	inline bool RESTAPIHandler::ValidateBearerToken(bool &Expired, [[maybe_unused]] bool &Contacted,
+													bool Sub) {
+		if (SessionToken_.empty()) {
+			try {
+				Poco::Net::OAuth20Credentials Auth(*Request);
+				if (Auth.getScheme() == "Bearer") {
+					SessionToken_ = Auth.getBearerToken();
+				}
+			} catch (const Poco::Exception &E) {
+				Logger_.log(E);
+			}
+		}
+		if (SessionToken_.empty()) {
+			Contacted = true;
+			return false;
+		}
+#ifdef TIP_SECURITY_SERVICE
+		if (AuthServiceIsAuthorized(*Request, SessionToken_, UserInfo_, TransactionId_, Expired,
+									Sub)) {
+#else
+		if (AuthClient()->IsAuthorized(SessionToken_, UserInfo_, TransactionId_, Expired,
+									   Contacted, Sub)) {
+#endif
+			REST_Requester_ = UserInfo_.userinfo.email;
+			return true;
+		}
+		return false;
+	}
+
 	inline bool RESTAPIHandler::IsAuthorized(bool &Expired, [[maybe_unused]] bool &Contacted,
 											 bool Sub) {
-		if (Internal_ && Request->has("X-INTERNAL-NAME")) {
-			auto Allowed = MicroServiceIsValidAPIKEY(*Request);
-			Contacted = true;
+		if (Internal_) {
+			const auto InternalName = Request->get("X-INTERNAL-NAME", "");
+			const auto ApiKey = Request->get("X-API-KEY", "");
+			auto Allowed = !InternalName.empty() && !ApiKey.empty() &&
+						   MicroServiceIsValidAPIKEY(*Request);
 			if (!Allowed) {
+				Contacted = true;
 				if (Server_.LogBadTokens(false)) {
 					poco_debug(Logger_,
 							   fmt::format("I-REQ-DENIED({}): TID={} Method={} Path={}",
@@ -811,19 +854,46 @@ namespace OpenWifi {
 										   TransactionId_, Request->getMethod(),
 										   Request->getURI()));
 				}
-			} else {
-				auto Id = Request->get("X-INTERNAL-NAME", "unknown");
-				REST_Requester_ = Id;
-				if (Server_.LogIt(Request->getMethod(), true)) {
-					poco_debug(Logger_,
-							   fmt::format("I-REQ-ALLOWED({}): TID={} User='{}' Method={} Path={}",
-										   Utils::FormatIPv6(Request->clientAddress().toString()),
-										   TransactionId_, Id, Request->getMethod(),
-										   Request->getURI()));
-				}
+				return false;
 			}
-			return Allowed;
-		} else if (!Internal_ && Request->has("X-API-KEY")) {
+
+			if (Request->has("Authorization")) {
+				// Validate forwarded Bearer token so UserInfo_ and RBAC match the caller.
+				if (!ValidateBearerToken(Expired, Contacted, Sub)) {
+					if (Server_.LogBadTokens(true)) {
+						poco_debug(
+							Logger_,
+							fmt::format("I-REQ-DENIED({}): BEARER TID={} Service='{}' Method={} "
+										"Path={}",
+										Utils::FormatIPv6(Request->clientAddress().toString()),
+										TransactionId_, InternalName, Request->getMethod(),
+										Request->getURI()));
+					}
+					return false;
+				}
+				if (Server_.LogIt(Request->getMethod(), true)) {
+					poco_debug(
+						Logger_,
+						fmt::format("I-REQ-ALLOWED({}): TID={} Service='{}' User='{}' Method={} "
+									"Path={}",
+									Utils::FormatIPv6(Request->clientAddress().toString()),
+									TransactionId_, InternalName, UserInfo_.userinfo.email,
+									Request->getMethod(), Request->getURI()));
+				}
+				return true;
+			}
+
+			Contacted = true;
+			REST_Requester_ = InternalName;
+			if (Server_.LogIt(Request->getMethod(), true)) {
+				poco_debug(Logger_,
+						   fmt::format("I-REQ-ALLOWED({}): TID={} User='{}' Method={} Path={}",
+									   Utils::FormatIPv6(Request->clientAddress().toString()),
+									   TransactionId_, InternalName, Request->getMethod(),
+									   Request->getURI()));
+			}
+			return true;
+		} else if (Request->has("X-API-KEY")) {
 			SessionToken_ = Request->get("X-API-KEY", "");
 			bool suspended = false;
 #ifdef TIP_SECURITY_SERVICE
@@ -856,24 +926,7 @@ namespace OpenWifi {
 			}
 			return false;
 		} else {
-			if (SessionToken_.empty()) {
-				try {
-					Poco::Net::OAuth20Credentials Auth(*Request);
-					if (Auth.getScheme() == "Bearer") {
-						SessionToken_ = Auth.getBearerToken();
-					}
-				} catch (const Poco::Exception &E) {
-					Logger_.log(E);
-				}
-			}
-#ifdef TIP_SECURITY_SERVICE
-			if (AuthServiceIsAuthorized(*Request, SessionToken_, UserInfo_, TransactionId_, Expired,
-										Sub)) {
-#else
-			if (AuthClient()->IsAuthorized(SessionToken_, UserInfo_, TransactionId_, Expired,
-										   Contacted, Sub)) {
-#endif
-				REST_Requester_ = UserInfo_.userinfo.email;
+			if (ValidateBearerToken(Expired, Contacted, Sub)) {
 				if (Server_.LogIt(Request->getMethod(), true)) {
 					poco_debug(
 						Logger_,

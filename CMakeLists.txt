@@ -170,6 +170,7 @@ add_executable(owprov
         src/RESTAPI/RESTAPI_managementRole_handler.cpp src/RESTAPI/RESTAPI_managementRole_handler.h
         src/RESTAPI/RESTAPI_managementRole_list_handler.cpp src/RESTAPI/RESTAPI_managementRole_list_handler.h
         src/RESTAPI/RESTAPI_managementRole_v2_handler.cpp src/RESTAPI/RESTAPI_managementRole_v2_handler.h
+        src/RESTAPI/RESTAPI_authorization_deviceCommand_handler.cpp src/RESTAPI/RESTAPI_authorization_deviceCommand_handler.h
         src/RESTAPI/RESTAPI_configurations_list_handler.cpp src/RESTAPI/RESTAPI_configurations_list_handler.h
         src/RESTAPI/RESTAPI_iptocountry_handler.cpp src/RESTAPI/RESTAPI_iptocountry_handler.h
         src/RESTAPI/RESTAPI_subscriber_handler.h src/RESTAPI/RESTAPI_subscriber_handler.cpp

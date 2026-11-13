@@ -12,6 +12,11 @@ namespace OpenWifi {
 
 	bool RESTAPIHandler::RoleIsAuthorized(const std::string &Path, const std::string &Method,
 										  std::string &Reason) {
+		// 0. Pure service-to-service calls without delegated user credentials bypass user RBAC
+		if (IsInternalServiceOnly()) {
+			return true;
+		}
+
 		// 1. Bypass check only if user is root
 		if (UserInfo_.userinfo.userRole == SecurityObjects::ROOT) {
 			return true;
@@ -52,6 +57,10 @@ namespace OpenWifi {
 			return true;
 		}
 
+		if (Resource == "authorization") {
+			return true;
+		}
+
 		std::string UserId = UserInfo_.userinfo.id;
 		std::vector<ProvObjects::ManagementRole> Roles;
 		FindAllUserRoles(UserId, Roles);
@@ -73,9 +82,13 @@ namespace OpenWifi {
 		};
 
 		// 3. Resolve target Entity and Venue
-		std::string TargetEntity, TargetVenue;
-		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue)) {
+		std::string TargetEntity, TargetVenue, ScopeError;
+		if (!ResolveTargetContext(Path, Method, TargetEntity, TargetVenue, &ScopeError)) {
 			Logger_.information(fmt::format("AUTH_DEBUG: ResolveTargetContext returned false for Path='{}'", Path));
+			if (!ScopeError.empty()) {
+				Reason = ScopeError;
+				return false;
+			}
 			if (HasScopeConstraint(Resource, Method)) {
 				Reason = "Scope resolution failed for constrained operation; access denied.";
 				Logger_.information(fmt::format("AUTH_DEBUG: Denied - HasScopeConstraint is true but ResolveTargetContext failed"));
@@ -199,7 +212,11 @@ namespace OpenWifi {
 	}
 
 	bool RESTAPIHandler::ResolveTargetContext(const std::string &Path, const std::string &Method,
-											  std::string &TargetEntity, std::string &TargetVenue) {
+											  std::string &TargetEntity, std::string &TargetVenue,
+											  std::string *ErrorReason) {
+		if (ErrorReason) {
+			ErrorReason->clear();
+		}
 		// ----------------------------------------------------------------
 		// SOURCE 1: Bound object ID in path bindings (most authoritative).
 		// Always look up the record in the DB — never accept a partial scope.
@@ -227,8 +244,12 @@ namespace OpenWifi {
 			}
 		}
 
+		const bool IsInventoryCreate =
+			(Method == Poco::Net::HTTPRequest::HTTP_POST &&
+			 Path.find("/api/v1/inventory") != std::string::npos);
+
 		const bool HasBoundObjectId =
-			!Id.empty() &&
+			!Id.empty() && !IsInventoryCreate &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0));
 
 		Logger_.information(fmt::format("RESOLVE_DEBUG: Path='{}' Method='{}' Id='{}' HasBoundObjectId={}", Path, Method, Id, HasBoundObjectId));
@@ -452,32 +473,28 @@ namespace OpenWifi {
 		}
 
 		// ----------------------------------------------------------------
-		// SOURCE 2: Query parameters (?entity=... / ?venue=...).
-		// Collect candidate IDs first, then validate both against the DB.
-		// If a param is supplied but the ID doesn't exist, return false —
-		// don't silently fall back and treat a bad ID as "no scope".
+		// SOURCE 2 & 3: Query parameters and request body.
+		// Extract both independently, reject any conflicting scope between
+		// query parameters and request body, and prioritize ParsedBody_
+		// over query parameters so query params cannot shadow body scope.
 		// ----------------------------------------------------------------
-		std::string CandidateEntity, CandidateVenue, CandidateOperator;
+		std::string QueryEntity, QueryVenue, QueryOperator;
 		for (const auto &[name, value] : Parameters_) {
 			if (name == "entity")
-				CandidateEntity = value;
+				QueryEntity = value;
 			else if (name == "venue")
-				CandidateVenue = value;
+				QueryVenue = value;
 			else if (name == "operatorId" || name == "operator" || name == "registrationId")
-				CandidateOperator = value;
+				QueryOperator = value;
 			else if (name == "subscriberId" || name == "signupUUID") {
 				ProvObjects::SignupEntry SE;
 				if (StorageService()->SignupDB().GetRecord("userid", value, SE) ||
 					StorageService()->SignupDB().GetRecord("id", value, SE)) {
-					CandidateOperator = SE.operatorId;
+					QueryOperator = SE.operatorId;
 				}
 			}
 		}
 
-		// ----------------------------------------------------------------
-		// SOURCE 3: Request body (entity / venue / operator / parent fields).
-		// Only consulted when params yielded nothing.
-		// ----------------------------------------------------------------
 		// When creating an operator (POST /api/v1/operator/0), its companion entity is always
 		// attached directly to the Root Entity (EntityDB::RootUUID()). Target scope is therefore Root Entity.
 		// Handle this before checking CandidateOperator so a new registrationId is not looked up in DB.
@@ -487,35 +504,77 @@ namespace OpenWifi {
 			return true;
 		}
 
-		if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_) {
-			if (ParsedBody_->has("entity"))
-				CandidateEntity = ParsedBody_->get("entity").toString();
-			if (ParsedBody_->has("venue"))
-				CandidateVenue = ParsedBody_->get("venue").toString();
-			if (CandidateVenue.empty() && ParsedBody_->isArray("venueIds")) {
+		std::string BodyEntity, BodyVenue, BodyOperator;
+		if (ParsedBody_) {
+			auto ExtractString = [&](const char *Key) -> std::string {
+				if (ParsedBody_->has(Key) && !ParsedBody_->isNull(Key)) {
+					return ParsedBody_->get(Key).toString();
+				}
+				return "";
+			};
+
+			BodyEntity = ExtractString("entity");
+			BodyVenue = ExtractString("venue");
+			if (BodyVenue.empty() && ParsedBody_->isArray("venueIds")) {
 				auto Array = ParsedBody_->getArray("venueIds");
 				if (Array && Array->size() > 0) {
-					CandidateVenue = Array->get(0).toString();
+					BodyVenue = Array->get(0).toString();
 				}
 			}
-			if (ParsedBody_->has("operatorId"))
-				CandidateOperator = ParsedBody_->get("operatorId").toString();
-			else if (ParsedBody_->has("operator"))
-				CandidateOperator = ParsedBody_->get("operator").toString();
-			else if (ParsedBody_->has("registrationId"))
-				CandidateOperator = ParsedBody_->get("registrationId").toString();
+			BodyOperator = ExtractString("operatorId");
+			if (BodyOperator.empty())
+				BodyOperator = ExtractString("operator");
+			if (BodyOperator.empty())
+				BodyOperator = ExtractString("registrationId");
 
-			if (CandidateEntity.empty() && CandidateVenue.empty() && CandidateOperator.empty() && ParsedBody_->has("parent")) {
-				std::string ParentId = ParsedBody_->get("parent").toString();
+			if (BodyEntity.empty() && BodyVenue.empty() && BodyOperator.empty()) {
+				std::string ParentId = ExtractString("parent");
 				if (!ParentId.empty()) {
 					if (Path.find("/api/v1/entity") != std::string::npos) {
-						CandidateEntity = ParentId;
+						BodyEntity = ParentId;
 					} else if (Path.find("/api/v1/venue") != std::string::npos) {
-						CandidateVenue = ParentId;
+						BodyVenue = ParentId;
 					}
 				}
 			}
 		}
+
+		auto SetScopeError = [&](const std::string &Msg) {
+			Logger_.information(fmt::format("AUTH_DEBUG: {}", Msg));
+			if (ErrorReason) {
+				*ErrorReason = Msg;
+			}
+		};
+
+		struct ScopeFieldCheck {
+			const char *Name;
+			const std::string &Query;
+			const std::string &Body;
+		};
+		for (const auto &Field : std::initializer_list<ScopeFieldCheck>{
+				 {"entity", QueryEntity, BodyEntity},
+				 {"venue", QueryVenue, BodyVenue},
+				 {"operator", QueryOperator, BodyOperator}}) {
+			if (!Field.Query.empty() && !Field.Body.empty() && Field.Query != Field.Body) {
+				SetScopeError(fmt::format(
+					"Target scope mismatch: query parameter {} '{}' differs from request body {} '{}'.",
+					Field.Name, Field.Query, Field.Name, Field.Body));
+				return false;
+			}
+		}
+		if ((!QueryEntity.empty() && BodyEntity.empty() && (!BodyVenue.empty() || !BodyOperator.empty())) ||
+			(!QueryVenue.empty() && BodyVenue.empty() && (!BodyEntity.empty() || !BodyOperator.empty())) ||
+			(!QueryOperator.empty() && BodyOperator.empty() && (!BodyEntity.empty() || !BodyVenue.empty()))) {
+			SetScopeError(
+				"Target scope mismatch: query parameter scope differs from request body scope.");
+			return false;
+		}
+
+		const bool HasBodyScope =
+			!BodyEntity.empty() || !BodyVenue.empty() || !BodyOperator.empty();
+		std::string CandidateEntity = HasBodyScope ? BodyEntity : QueryEntity;
+		std::string CandidateVenue = HasBodyScope ? BodyVenue : QueryVenue;
+		std::string CandidateOperator = HasBodyScope ? BodyOperator : QueryOperator;
 
 		// ----------------------------------------------------------------
 		// Validate whatever candidates we have against the DB.
@@ -528,7 +587,13 @@ namespace OpenWifi {
 			ProvObjects::Venue V;
 			if (StorageService()->VenueDB().GetRecord("id", CandidateVenue, V)) {
 				TargetVenue = CandidateVenue;
-				TargetEntity = V.entity;
+				TargetEntity = V.entity.empty() ? FindParentEntity(V) : V.entity;
+				if (!CandidateEntity.empty() && TargetEntity != CandidateEntity) {
+					SetScopeError(fmt::format(
+						"Target scope mismatch: venue '{}' belongs to entity '{}', not '{}'.",
+						CandidateVenue, TargetEntity, CandidateEntity));
+					return false;
+				}
 				return true;
 			}
 			return false; // Venue ID provided but not found in DB.
@@ -616,7 +681,11 @@ namespace OpenWifi {
 			}
 		}
 
-		if (!Id.empty() &&
+		const bool IsInventoryCreate =
+			(Method == Poco::Net::HTTPRequest::HTTP_POST &&
+			 Resource == "inventory");
+
+		if (!Id.empty() && !IsInventoryCreate &&
 			!(Method == Poco::Net::HTTPRequest::HTTP_POST && (Id == "0" || Id == "1" || Poco::icompare(Id, "new") == 0))) {
 			return true;
 		}
@@ -626,14 +695,17 @@ namespace OpenWifi {
 		}
 
 		for (const auto &[name, value] : Parameters_) {
-			if (name == "entity" || name == "venue" || name == "operatorId" || name == "operator") {
+			if (name == "entity" || name == "venue" || name == "operatorId" ||
+				name == "operator" || name == "registrationId" ||
+				name == "subscriberId" || name == "signupUUID") {
 				return true;
 			}
 		}
 
 		if (ParsedBody_) {
 			if (ParsedBody_->has("entity") || ParsedBody_->has("venue") ||
-				ParsedBody_->has("operatorId") || ParsedBody_->has("operator") ||
+				ParsedBody_->has("venueIds") || ParsedBody_->has("operatorId") ||
+				ParsedBody_->has("operator") || ParsedBody_->has("registrationId") ||
 				ParsedBody_->has("parent")) {
 				return true;
 			}
@@ -852,6 +924,8 @@ namespace OpenWifi {
 			return "overrides";
 		if (Path.find("/api/v1/iptocountry") != std::string::npos)
 			return "iptocountry";
+		if (Path.find("/api/v1/authorization") != std::string::npos)
+			return "authorization";
 		if (Path.find("/api/v1/systemConfiguration") != std::string::npos)
 			return "systemConfiguration";
 		return "";
