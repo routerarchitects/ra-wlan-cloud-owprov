@@ -73,47 +73,12 @@ namespace OpenWifi {
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 		}
 
-		// On the internal server, strictly require valid service credentials (X-INTERNAL-NAME
-		// and X-API-KEY) before evaluating the caller's Bearer user token — never fall back.
-		if (Internal_) {
-			if (Request->get("X-INTERNAL-NAME", "").empty() ||
-				Request->get("X-API-KEY", "").empty() ||
-				!MicroServiceIsValidAPIKEY(*Request)) {
-				return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
-			}
-		}
-
-		// On the public server when both X-API-KEY and Authorization are supplied, or when
-		// UserInfo_ is still empty (e.g. internal call missing Bearer token), validate Bearer
-		// explicitly so X-API-KEY never overrides or bypasses caller identity.
-		if ((!Internal_ && Request->has("X-API-KEY") && Request->has("Authorization")) ||
-			UserInfo_.userinfo.id.empty()) {
-			std::string Token;
-			try {
-				Poco::Net::OAuth20Credentials Auth(*Request);
-				if (Auth.getScheme() == "Bearer") {
-					Token = Auth.getBearerToken();
-				}
-			} catch (...) {}
-
-			if (Token.empty()) {
-				return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
-			}
-
-			UserInfo_ = SecurityObjects::UserInfoAndPolicy{};
-			bool Expired = false, Contacted = false;
-			if (!AuthClient()->IsAuthorized(Token, UserInfo_, TransactionId_, Expired, Contacted, false)) {
-				if (Expired) {
-					return UnAuthorized(RESTAPI::Errors::EXPIRED_TOKEN);
-				}
-				if (Contacted) {
-					return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
-				}
-				return UnAuthorized(RESTAPI::Errors::SECURITY_SERVICE_UNREACHABLE);
-			}
-			REST_Requester_ = UserInfo_.userinfo.email;
-		}
-
+		// IsAuthorized() (called by the framework before DoPost()) has already:
+		//   - Validated X-INTERNAL-NAME + X-API-KEY on Internal_ requests.
+		//   - Validated and populated UserInfo_ from the forwarded Bearer token (if present).
+		// A non-empty UserInfo_.userinfo.id means a real user identity was established.
+		// Reject pure service-only calls that carry no user identity — this endpoint always
+		// requires a delegated user token so RBAC and scoping can be evaluated.
 		std::string UserId = UserInfo_.userinfo.id;
 		if (UserId.empty()) {
 			return UnAuthorized(RESTAPI::Errors::INVALID_TOKEN);
