@@ -168,9 +168,9 @@ func newMockStore() *MockStore {
 		Email:      "readonly@openwifi.local",
 		Username:   "readonly@openwifi.local",
 		Password:   "openwifi",
-		UserRole:   "subscriber",
+		UserRole:   "csr",
 		Name:       "Read Only User",
-		UserRights: []UserRight{{Role: "subscriber"}},
+		UserRights: []UserRight{{Role: "csr"}},
 	}
 	s.users[readOnlyID] = readOnlyUser
 	s.users[readOnlyUser.Email] = readOnlyUser
@@ -180,7 +180,7 @@ func newMockStore() *MockStore {
 			TokenInfo: TokenInfo{
 				Token:       tok,
 				AccessToken: tok,
-				UserRole:    "subscriber",
+				UserRole:    "csr",
 				Created:     time.Now().Unix(),
 				Expires:     time.Now().Add(24 * time.Hour).Unix(),
 				ExpiresIn:   86400,
@@ -188,9 +188,9 @@ func newMockStore() *MockStore {
 			UserInfo: UserInfo{
 				ID:         readOnlyID,
 				Email:      readOnlyUser.Email,
-				UserRole:   "subscriber",
+				UserRole:   "csr",
 				Name:       readOnlyUser.Name,
-				UserRights: []UserRight{{Role: "subscriber"}},
+				UserRights: []UserRight{{Role: "csr"}},
 			},
 			WebToken: WebToken{
 				AccessToken: tok,
@@ -311,10 +311,10 @@ func newMockStore() *MockStore {
 			Email:      id + "@openwifi.local",
 			Username:   id + "@openwifi.local",
 			Password:   "openwifi",
-			UserRole:   "subscriber",
+			UserRole:   "csr",
 			Name:       "Target User A",
 			CreatedBy:  adminAID,
-			UserRights: []UserRight{{Role: "subscriber"}},
+			UserRights: []UserRight{{Role: "csr"}},
 		}
 		s.users[id] = u
 		s.users[u.Email] = u
@@ -331,10 +331,10 @@ func newMockStore() *MockStore {
 			Email:      id + "@openwifi.local",
 			Username:   id + "@openwifi.local",
 			Password:   "openwifi",
-			UserRole:   "subscriber",
+			UserRole:   "csr",
 			Name:       "Target User B",
 			CreatedBy:  adminBID,
-			UserRights: []UserRight{{Role: "subscriber"}},
+			UserRights: []UserRight{{Role: "csr"}},
 		}
 		s.users[id] = u
 		s.users[u.Email] = u
@@ -346,13 +346,60 @@ func newMockStore() *MockStore {
 		Email:      "user-secondary-uuid-888@openwifi.local",
 		Username:   "user-secondary-uuid-888@openwifi.local",
 		Password:   "openwifi",
-		UserRole:   "subscriber",
+		UserRole:   "csr",
 		Name:       "Secondary User 888",
 		CreatedBy:  rootID,
-		UserRights: []UserRight{{Role: "subscriber"}},
+		UserRights: []UserRight{{Role: "csr"}},
 	}
 	s.users[secUser.ID] = secUser
 	s.users[secUser.Email] = secUser
+
+	// Pre-seed subscriber test tokens (Tier 1 Subscriber Self-Care)
+	subscriberTokens := []string{
+		"subscriber-test-token",
+		"sub-user-token",
+		"user-subscriber-selfcare-token",
+	}
+	subUserID := "00000000-0000-0000-0000-000000000005"
+	subUser := &UserRecord{
+		ID:         subUserID,
+		Email:      "subscriber@openwifi.local",
+		Username:   "subscriber@openwifi.local",
+		Password:   "openwifi",
+		UserRole:   "subscriber",
+		Name:       "Subscriber User",
+		UserRights: []UserRight{{Role: "subscriber"}},
+	}
+	s.users[subUserID] = subUser
+	s.users[subUser.Email] = subUser
+	for _, tok := range subscriberTokens {
+		s.tokens[tok] = &UserInfoAndPolicy{
+			TokenInfo: TokenInfo{
+				Token:       tok,
+				AccessToken: tok,
+				UserRole:    "subscriber",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+			},
+			UserInfo: UserInfo{
+				ID:         subUserID,
+				Email:      subUser.Email,
+				UserRole:   "subscriber",
+				Name:       subUser.Name,
+				UserRights: []UserRight{{Role: "subscriber"}},
+			},
+			WebToken: WebToken{
+				AccessToken: tok,
+				TokenType:   "Bearer",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+				ID:          subUserID,
+			},
+			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
+		}
+	}
 
 	return s
 }
@@ -523,8 +570,10 @@ func (s *MockStore) handleValidateToken(w http.ResponseWriter, r *http.Request) 
 		role := "root"
 		if strings.Contains(token, "admin") {
 			role = "admin"
-		} else if strings.Contains(token, "read-only") || strings.Contains(token, "readonly") || strings.Contains(token, "no-access") || strings.Contains(token, "subscriber") || strings.Contains(token, "venue") || strings.Contains(token, "user") {
+		} else if strings.Contains(token, "sub-user") || strings.Contains(token, "subscriber-self-care") || strings.Contains(token, "subscriber-test") {
 			role = "subscriber"
+		} else {
+			role = "csr"
 		}
 		info = &UserInfoAndPolicy{
 			TokenInfo: TokenInfo{
