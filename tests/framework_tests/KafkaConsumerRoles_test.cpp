@@ -1186,7 +1186,7 @@ static void test_broker_backed_commit_failure_isolation() {
 			// Execute actual database operation
 			int nowSec = static_cast<int>(std::time(nullptr));
 			db << "INSERT INTO commit_isolation_records (id, processed_time, write_count) VALUES (?, ?, 1)",
-				Poco::Data::Keywords::use(key),
+				Poco::Data::Keywords::bind(key),
 				Poco::Data::Keywords::use(nowSec),
 				Poco::Data::Keywords::now;
 
@@ -1224,7 +1224,7 @@ static void test_broker_backed_commit_failure_isolation() {
 	db << "SELECT COUNT(*), write_count FROM commit_isolation_records WHERE id = ?",
 		Poco::Data::Keywords::into(dbRowCount),
 		Poco::Data::Keywords::into(dbWriteCount),
-		Poco::Data::Keywords::use(commitFailKey),
+		Poco::Data::Keywords::bind(commitFailKey),
 		Poco::Data::Keywords::now;
 	TEST_ASSERT(dbRowCount == 1, "Database row count must be exactly 1");
 	TEST_ASSERT(dbWriteCount == 1, "Database operation must NOT be repeated during commit retries");
@@ -1273,7 +1273,7 @@ static void test_broker_backed_commit_failure_isolation() {
 
 				int nowSec = static_cast<int>(std::time(nullptr));
 				db << "INSERT INTO commit_isolation_records (id, processed_time, write_count) VALUES (?, ?, 1)",
-					Poco::Data::Keywords::use(key),
+					Poco::Data::Keywords::bind(key),
 					Poco::Data::Keywords::use(nowSec),
 					Poco::Data::Keywords::now;
 
@@ -1309,7 +1309,7 @@ static void test_broker_backed_commit_failure_isolation() {
 		db << "SELECT COUNT(*), write_count FROM commit_isolation_records WHERE id = ?",
 			Poco::Data::Keywords::into(exRowCount),
 			Poco::Data::Keywords::into(exWriteCount),
-			Poco::Data::Keywords::use(commitExhaustKey),
+			Poco::Data::Keywords::bind(commitExhaustKey),
 			Poco::Data::Keywords::now;
 		TEST_ASSERT(exRowCount == 1, "Exhaustion scenario database row count must be exactly 1");
 		TEST_ASSERT(exWriteCount == 1, "Exhaustion scenario database operation must not be repeated");
