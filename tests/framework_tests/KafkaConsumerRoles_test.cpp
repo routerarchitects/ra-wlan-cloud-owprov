@@ -976,6 +976,9 @@ static void test_partition_rebalance_during_in_flight_processing() {
 	// Use a test-specific short max.poll.interval.ms (6s) for Consumer-A so that holding
 	// the callback causes librdkafka to exceed the poll interval, triggering coordinator revocation.
 	g_MockMaxPollIntervalMs = "6000";
+	// librdkafka requires max.poll.interval.ms >= session.timeout.ms. Kafka's
+	// default broker minimum session timeout is 6s, so use 6s for both values.
+	g_MockSessionTimeoutMs = "6000";
 
 	// Latch: holds Consumer-A's callback until partition transfer to Consumer-B is observable.
 	std::promise<void> releaseConsumerA;
@@ -1110,6 +1113,7 @@ static void test_partition_rebalance_during_in_flight_processing() {
 	producer.Stop();
 
 	g_MockMaxPollIntervalMs.clear();
+	g_MockSessionTimeoutMs.clear();
 	g_MockGroupId    = savedGroupId;
 	g_MockInstanceId = savedInstanceId;
 
