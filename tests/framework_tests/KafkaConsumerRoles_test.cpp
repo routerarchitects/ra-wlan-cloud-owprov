@@ -1076,8 +1076,8 @@ static void test_partition_rebalance_during_in_flight_processing() {
 	releaseConsumerA.set_value();
 
 	// 8. Wait, with a bounded timeout, for Consumer-A's worker to finish naturally, without calling Stop() first.
-	// When Consumer-A detects partition revocation in RetryOp("Commit"), it stops without committing
-	// and breaks out of run(), naturally causing consumerA.IsRunning() to become false.
+	// When Consumer-A detects partition revocation in RetryOp("Commit"), it marks itself FAILED via FailConsumer(),
+	// stops without committing, and breaks out of run(), naturally causing consumerA.IsRunning() to become false.
 	auto consumerAWait = std::chrono::steady_clock::now();
 	while (consumerA.IsRunning() &&
 	       std::chrono::steady_clock::now() - consumerAWait < std::chrono::seconds(15)) {
@@ -1085,6 +1085,20 @@ static void test_partition_rebalance_during_in_flight_processing() {
 	}
 	TEST_ASSERT(!consumerA.IsRunning(),
 		"Consumer-A worker must finish naturally upon handling partition revocation during commit");
+	TEST_ASSERT(consumerA.HasFailed(),
+		"Consumer-A must be marked as FAILED when partition ownership is lost during active message processing");
+	TEST_ASSERT(consumerA.StatusString() == "FAILED",
+		"Consumer-A StatusString() must report 'FAILED'");
+	TEST_ASSERT(consumerA.FailureReason().find("assignment_lost") != std::string::npos,
+		"Failure reason must indicate assignment_lost: " + consumerA.FailureReason());
+	TEST_ASSERT(consumerA.FailureReason().find(rebalanceTopic) != std::string::npos,
+		"Failure reason must include topic name: " + consumerA.FailureReason());
+	TEST_ASSERT(consumerA.FailureReason().find("p=0") != std::string::npos,
+		"Failure reason must include partition: " + consumerA.FailureReason());
+	TEST_ASSERT(consumerA.FailureReason().find(rebalanceKey) != std::string::npos,
+		"Failure reason must include message key: " + consumerA.FailureReason());
+	TEST_ASSERT(consumerA.FailureReason().find(g_MockInstanceId) != std::string::npos,
+		"Failure reason must include instance ID: " + consumerA.FailureReason());
 
 	// 9. Assert the broker offset remains uncommitted (RD_KAFKA_OFFSET_INVALID).
 	// This proves Consumer-A completed its commit decision and avoided committing due to partition revocation.

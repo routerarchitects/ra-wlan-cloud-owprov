@@ -4,6 +4,7 @@
 
 #include "KafkaManager.h"
 
+#include <librdkafka/rdkafka.h>
 #include "fmt/format.h"
 #include "framework/MicroServiceFuncs.h"
 #include "cppkafka/utils/consumer_dispatcher.h"
@@ -442,9 +443,11 @@ namespace OpenWifi {
 						// while a handler is in flight. The background group state can
 						// already know ownership was lost (e.g. max.poll.interval.ms).
 						if (rd_kafka_assignment_lost(Consumer_->get_handle())) {
-							poco_warning(Logger_, fmt::format(
-								"Partition ownership lost during {} for '{}' p={} off={}; stopping without committing.",
-								Stage, msg.get_topic(), msg.get_partition(), msg.get_offset()));
+							FailConsumer(fmt::format(
+								"Permanent {} failure [assignment_lost] id='{}' topic='{}' p={} off={} key='{}' reason='Partition ownership lost during {}'; stopping without committing.",
+								RoleName, MicroServiceRuntimeInstanceId(), msg.get_topic(), msg.get_partition(),
+								msg.get_offset(), std::string(msg.get_key()), Stage));
+							fatalError = true;
 							return false;
 						}
 						Reason.clear();
