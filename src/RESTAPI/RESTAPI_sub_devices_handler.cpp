@@ -348,8 +348,15 @@ namespace OpenWifi {
 			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 			return false;
 		}
-		if (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER)
+		if (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER) {
 			newObject.subscriberId = UserInfo_.userinfo.id;
+			ProvObjects::SignupEntry signupRecord;
+			if (StorageService()->SignupDB().GetRecord("userid", newObject.subscriberId, signupRecord)) {
+				newObject.operatorId = signupRecord.operatorId;
+			} else {
+				newObject.operatorId.clear();
+			}
+		}
 
 		if (DB_.Exists("serialNumber", newObject.serialNumber)) {
 			BadRequest(RESTAPI::Errors::SerialNumberExists);

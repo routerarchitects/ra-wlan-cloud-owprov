@@ -20,6 +20,13 @@ namespace OpenWifi {
 			return true;
 		}
 
+		// Track 1: Authenticated internal service requests with forwarded subscriber token
+		// (e.g. signup Flow A / internal proxying) proceed through internal flow.
+		if (IsInternalServiceAuthenticated() &&
+			UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER) {
+			return true;
+		}
+
 		// Track 2: Subscriber self-care (Bearer token with userRole == SUBSCRIBER).
 		if (UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER) {
 			return AuthorizeSubscriberRequest(Path, Method, Reason);

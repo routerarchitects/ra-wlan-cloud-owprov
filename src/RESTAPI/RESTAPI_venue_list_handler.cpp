@@ -10,14 +10,6 @@
 namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
 		auto subscriberId = GetParameter("subscriberId", "");
-		bool isSubscriber = (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER);
-		if (isSubscriber) {
-			if (subscriberId.empty()) {
-				subscriberId = UserInfo_.userinfo.id;
-			} else if (subscriberId != UserInfo_.userinfo.id) {
-				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
-			}
-		}
 
 		if (!subscriberId.empty()) {
 			if (!Utils::ValidUUID(subscriberId)) {

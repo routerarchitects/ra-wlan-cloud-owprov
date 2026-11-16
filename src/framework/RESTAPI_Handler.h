@@ -606,8 +606,12 @@ namespace OpenWifi {
 			return true;
 		}
 
+		inline bool IsInternalServiceAuthenticated() const {
+			return Internal_ && InternalServiceAuthenticated_;
+		}
+
 		inline bool IsInternalServiceOnly() const {
-			return Internal_ && UserInfo_.userinfo.id.empty() && Request != nullptr &&
+			return Internal_ && InternalServiceAuthenticated_ && UserInfo_.userinfo.id.empty() && Request != nullptr &&
 				   !Request->has("Authorization");
 		}
 		inline bool ValidateBearerToken(bool &Expired, bool &Contacted, bool Sub);
@@ -877,6 +881,7 @@ namespace OpenWifi {
 				}
 				return false;
 			}
+			InternalServiceAuthenticated_ = true;
 
 			if (Request->has("Authorization")) {
 				// Validate forwarded Bearer token so UserInfo_ and RBAC match the caller.
