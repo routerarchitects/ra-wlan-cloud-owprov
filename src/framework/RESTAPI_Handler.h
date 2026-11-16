@@ -144,7 +144,7 @@ namespace OpenWifi {
 					// AuthorizeSubscriberRequest may have already sent a 404 (uniform masking).
 					// Only send 403 if no response has been committed yet.
 					if (!Response->sent()) {
-						return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+						return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED, Reason);
 					}
 					return;
 				}
@@ -861,11 +861,11 @@ namespace OpenWifi {
 
 	inline bool RESTAPIHandler::IsAuthorized(bool &Expired, [[maybe_unused]] bool &Contacted,
 											 bool Sub) {
-		if (Internal_ && Request->has("X-INTERNAL-NAME")) {
-			auto Allowed = !Request->get("X-INTERNAL-NAME", "").empty() &&
-				MicroServiceIsValidAPIKEY(*Request);
-			InternalServiceAuthenticated_ = Allowed;
-			Contacted = true;
+		if (Internal_) {
+			const auto InternalName = Request->get("X-INTERNAL-NAME", "");
+			const auto ApiKey = Request->get("X-API-KEY", "");
+			auto Allowed = !InternalName.empty() && !ApiKey.empty() &&
+						   MicroServiceIsValidAPIKEY(*Request);
 			if (!Allowed) {
 				Contacted = true;
 				if (Server_.LogBadTokens(false)) {

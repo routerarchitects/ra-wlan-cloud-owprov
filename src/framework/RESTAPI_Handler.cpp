@@ -15,8 +15,8 @@ namespace OpenWifi {
 								  std::string &Reason) {
 		// === Principal Classification Gate (subscriber_rbac.md sec 4.1) ===
 
-		// Track 1: Internal microservice call authenticated via inter-service API key.
-		if (Internal_ && InternalServiceAuthenticated_) {
+		// Track 1: Pure service-to-service calls without delegated user credentials bypass user RBAC
+		if (IsInternalServiceOnly()) {
 			return true;
 		}
 
