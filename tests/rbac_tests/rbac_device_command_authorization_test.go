@@ -375,12 +375,38 @@ func TestDeviceCommandAuthorization(t *testing.T) {
 			}
 		}
 
-		deniedActions := []string{"UPGRADE", "TELEMETRY", "RTTY", "TRACE", "SCRIPT"}
+		deniedActions := []string{"UPGRADE", "TELEMETRY", "RTTY", "TRACE", "SCRIPT", "EVENTQUEUE"}
 		for _, act := range deniedActions {
 			s, resp, b := callAuthz(adminToken, entADeviceSerial, act)
 			if s != http.StatusOK || resp.Allowed || resp.Reason != "ACTION_NOT_GRANTED" {
 				t.Fatalf("Expected action '%s' to be denied (ACTION_NOT_GRANTED), got status=%d resp=%+v body=%s", act, s, resp, string(b))
 			}
+		}
+	})
+
+	t.Run("EVENTQUEUE permission authorizes only event queue in the assigned scope", func(t *testing.T) {
+		policyID, cleanupPolicy := createPolicy(fmt.Sprintf("devcmd-eventqueue-%d", ts), []map[string]interface{}{
+			{"resources": []string{"deviceCommand"}, "access": []string{"EVENTQUEUE"}},
+		})
+		defer cleanupPolicy()
+		cleanupRole := assignRole(entityAId, "", policyID, adminUserId)
+		defer cleanupRole()
+
+		for _, action := range []string{"EVENTQUEUE", "eventqueue"} {
+			status, resp, body := callAuthz(adminToken, entADeviceSerial, action)
+			if status != http.StatusOK || !resp.Allowed || resp.Reason != "ALLOWED" ||
+				resp.Resource != "deviceCommand" || resp.Action != "EVENTQUEUE" ||
+				resp.SerialNumber != entADeviceSerial || resp.PolicyID != policyID {
+				t.Fatalf("Expected EVENTQUEUE authorization, got status=%d resp=%+v body=%s", status, resp, body)
+			}
+		}
+		status, resp, body := callAuthz(adminToken, entADeviceSerial, "REBOOT")
+		if status != http.StatusOK || resp.Allowed || resp.Reason != "ACTION_NOT_GRANTED" {
+			t.Fatalf("EVENTQUEUE-only policy must deny REBOOT, got status=%d resp=%+v body=%s", status, resp, body)
+		}
+		status, resp, body = callAuthz(adminToken, entBDeviceSerial, "EVENTQUEUE")
+		if status != http.StatusOK || resp.Allowed || resp.Reason != "OUT_OF_SCOPE" {
+			t.Fatalf("EVENTQUEUE must respect device scope, got status=%d resp=%+v body=%s", status, resp, body)
 		}
 	})
 

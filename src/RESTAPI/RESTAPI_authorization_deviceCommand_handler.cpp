@@ -14,7 +14,8 @@ namespace OpenWifi {
 	static std::string CanonicalDeviceCommandAction(const std::string &action) {
 		const std::string upper = Poco::toUpper(action);
 		if (upper == "REBOOT" || upper == "CONFIGURE" || upper == "TELEMETRY" ||
-			upper == "UPGRADE" || upper == "TRACE" || upper == "RTTY" || upper == "SCRIPT") {
+			upper == "UPGRADE" || upper == "TRACE" || upper == "RTTY" || upper == "SCRIPT" ||
+			upper == "EVENTQUEUE") {
 			return upper;
 		}
 		if (upper == "BLINK" || upper == "LEDS") {
