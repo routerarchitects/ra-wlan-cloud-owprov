@@ -1076,8 +1076,8 @@ static void test_partition_rebalance_during_in_flight_processing() {
 	releaseConsumerA.set_value();
 
 	// 8. Wait, with a bounded timeout, for Consumer-A's worker to finish naturally, without calling Stop() first.
-	// When Consumer-A detects partition revocation in RetryOp("Commit"), it marks itself FAILED via FailConsumer(),
-	// stops without committing, and breaks out of run(), naturally causing consumerA.IsRunning() to become false.
+	// Ownership loss or exhausted commits from a revoked member must leave the worker FAILED,
+	// without committing. librdkafka may surface broker errors before assignment_lost().
 	auto consumerAWait = std::chrono::steady_clock::now();
 	while (consumerA.IsRunning() &&
 	       std::chrono::steady_clock::now() - consumerAWait < std::chrono::seconds(15)) {
@@ -1089,8 +1089,15 @@ static void test_partition_rebalance_during_in_flight_processing() {
 		"Consumer-A must be marked as FAILED when partition ownership is lost during active message processing");
 	TEST_ASSERT(consumerA.StatusString() == "FAILED",
 		"Consumer-A StatusString() must report 'FAILED'");
-	TEST_ASSERT(consumerA.FailureReason().find("assignment_lost") != std::string::npos,
-		"Failure reason must indicate assignment_lost: " + consumerA.FailureReason());
+	const auto failureReason = consumerA.FailureReason();
+	const auto lastCommitError = consumerA.LastCommitError();
+	const bool revokedMemberCommit =
+		lastCommitError == cppkafka::Error(RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID).to_string() ||
+		lastCommitError == cppkafka::Error(RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION).to_string() ||
+		lastCommitError == cppkafka::Error(RD_KAFKA_RESP_ERR__ASSIGNMENT_LOST).to_string();
+	TEST_ASSERT(failureReason.find("[assignment_lost]") != std::string::npos ||
+		(revokedMemberCommit && failureReason.find("[Commit_retries_exhausted]") != std::string::npos),
+		"Failure reason must identify ownership loss or revoked-member commit failure: " + failureReason);
 	TEST_ASSERT(consumerA.FailureReason().find(rebalanceTopic) != std::string::npos,
 		"Failure reason must include topic name: " + consumerA.FailureReason());
 	TEST_ASSERT(consumerA.FailureReason().find("p=0") != std::string::npos,
@@ -1099,6 +1106,8 @@ static void test_partition_rebalance_during_in_flight_processing() {
 		"Failure reason must include message key: " + consumerA.FailureReason());
 	TEST_ASSERT(consumerA.FailureReason().find(g_MockInstanceId) != std::string::npos,
 		"Failure reason must include instance ID: " + consumerA.FailureReason());
+	TEST_ASSERT(failureReason.find("off=" + std::to_string(msgB.get_offset())) != std::string::npos,
+		"Failure reason must include the uncommitted message offset: " + failureReason);
 
 	// 9. Assert the broker offset remains uncommitted (RD_KAFKA_OFFSET_INVALID).
 	// This proves Consumer-A completed its commit decision and avoided committing due to partition revocation.
@@ -1109,6 +1118,8 @@ static void test_partition_rebalance_during_in_flight_processing() {
 	// 10. Call Stop() only afterward to unregister and cleanly join the worker.
 	KafkaManager()->UnregisterTopicWatcher(rebalanceTopic, wIdA, KafkaConsumerType::Group);
 	consumerA.Stop();
+	TEST_ASSERT(consumerA.StatusString() == "FAILED", "Stop() must preserve the ownership-loss failure state");
+	TEST_ASSERT(consumerA.FailureReason() == failureReason, "Stop() must preserve the ownership-loss failure reason");
 
 	// 11. Allow Consumer-B to commit the replayed message and verify its offset.
 	rawConsumerB.commit(msgB);
