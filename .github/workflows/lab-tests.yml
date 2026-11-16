@@ -435,6 +435,37 @@ jobs:
           -- Role 4: Valid - References existing policy
           INSERT INTO roles (id, name, description, notes, created, modified, managementPolicy, users, inUse, tags)
           VALUES ('mig-role-valid-004', 'Role With Valid Policy', 'Should survive migration', '[]', 1600000000, 1600000000, 'mig-valid-policy-001', '[]', '[]', '[]');
+
+          -- 5. Existing inventory table (to simulate brownfield database before unique index release)
+          CREATE TABLE IF NOT EXISTS inventory (
+              id VARCHAR(64) PRIMARY KEY,
+              name TEXT,
+              description TEXT,
+              notes TEXT,
+              created BIGINT,
+              modified BIGINT,
+              serialNumber TEXT,
+              venue TEXT,
+              entity TEXT,
+              subscriber TEXT,
+              deviceType TEXT,
+              qrcode TEXT,
+              geocode TEXT,
+              location TEXT,
+              contact TEXT,
+              deviceConfiguration TEXT,
+              deviceRules TEXT,
+              tags TEXT,
+              managementPolicy TEXT,
+              state TEXT,
+              devClass TEXT,
+              locale VARCHAR(16),
+              realMacAddress TEXT,
+              doNotAllowOverrides BOOLEAN,
+              imported BIGINT,
+              connected BIGINT,
+              platform TEXT DEFAULT 'AP'
+          );
           EOF
             then
               echo "Legacy schema and dirty test data successfully seeded."
@@ -450,6 +481,14 @@ jobs:
             docker logs postgres
             exit 1
           fi
+
+      # ── Execute pre-deployment database migration ────────────────────────────
+      - name: Execute pre-deployment database migration
+        run: |
+          set -euo pipefail
+          echo "Executing pre-deployment migration: inventory_serial_canonical_unique_idx..."
+          docker exec -i postgres psql -v ON_ERROR_STOP=1 -U owprov -d owprov < migrations/001_inventory_serial_canonical_unique_idx.sql
+          echo "Pre-deployment database migration completed successfully."
 
       # ── Start owprov container ────────────────────────────────────────────────
       - name: Start owprov container
@@ -562,6 +601,15 @@ jobs:
           echo "roles_management_policy_idx index count: ${INDEX_COUNT}"
           if [ "${INDEX_COUNT}" -ne 1 ]; then
             echo "ERROR: roles_management_policy_idx index missing from catalog!"
+            exit 1
+          fi
+
+          # 5c. Verify inventory_serial_canonical_unique_idx index exists in catalog
+          INV_INDEX_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c \
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND lower(tablename) = 'inventory' AND lower(indexname) = 'inventory_serial_canonical_unique_idx';")
+          echo "inventory_serial_canonical_unique_idx index count: ${INV_INDEX_COUNT}"
+          if [ "${INV_INDEX_COUNT}" -ne 1 ]; then
+            echo "ERROR: inventory_serial_canonical_unique_idx index missing from catalog!"
             exit 1
           fi
 

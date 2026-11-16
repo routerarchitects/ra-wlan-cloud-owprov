@@ -94,12 +94,6 @@ namespace OpenWifi {
 		try {
 			Poco::Data::Session Session = Pool_.get();
 
-			// Create separately named unique index on lower(serialnumber), keeping inventory_serial_index intact.
-			std::string CreateIndexSQL = fmt::format(
-				"CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} ({})",
-				kSerialCanonicalUniqueIndex, TableName_, kCanonicalSerialExprSQL);
-			Session << CreateIndexSQL, Poco::Data::Keywords::now;
-
 			// Verify via PostgreSQL catalogs that the required unique index exists, is valid,
 			// is not partial, has one key attribute, and covers lower(serialnumber).
 			bool Verified = false;
@@ -126,20 +120,23 @@ namespace OpenWifi {
 
 			if (!Verified) {
 				Logger().critical(fmt::format(
-					"InventoryDB: PostgreSQL unique index '{}' on '{}' failed verification.",
-					kSerialCanonicalUniqueIndex, TableName_));
+					"InventoryDB: Required PostgreSQL unique index '{}' on table '{}' is missing or invalid. "
+					"Create the index through the controlled database migration before starting OWPROV: "
+					"'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({});'.",
+					kSerialCanonicalUniqueIndex, TableName_,
+					kSerialCanonicalUniqueIndex, TableName_, kCanonicalSerialExprSQL));
 				return false;
 			}
 
 			return true;
 		} catch (const std::exception &E) {
 			Logger().critical(fmt::format(
-				"InventoryDB: Failed to create or verify unique index '{}' on '{}': {}",
+				"InventoryDB: Failed to verify unique index '{}' on '{}': {}",
 				kSerialCanonicalUniqueIndex, TableName_, E.what()));
 			return false;
 		} catch (...) {
 			Logger().critical(fmt::format(
-				"InventoryDB: Failed to create or verify unique index '{}' on '{}': unknown exception",
+				"InventoryDB: Failed to verify unique index '{}' on '{}': unknown exception",
 				kSerialCanonicalUniqueIndex, TableName_));
 			return false;
 		}
