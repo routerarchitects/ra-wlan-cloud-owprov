@@ -142,17 +142,9 @@ namespace OpenWifi {
 			}
 
 			const std::string LowerSerial = Poco::toLower(SerialNumber);
-			if (LowerSerial.empty() || LowerSerial.size() > 16 || !Utils::ValidSerialNumber(LowerSerial)) {
+			if (LowerSerial.size() != 12 || !Utils::ValidSerialNumber(LowerSerial)) {
 				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
 					fmt::format("Invalid or malformed serial number '{}' on 'connection' topic, Key: {}", SerialNumber, Key));
-			}
-			try {
-				(void)std::stoull(LowerSerial, nullptr, 16);
-				std::string rev(LowerSerial.rbegin(), LowerSerial.rend());
-				(void)std::stoull(rev, nullptr, 16);
-			} catch (...) {
-				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
-					fmt::format("Out of range hex serial number '{}' on 'connection' topic, Key: {}", SerialNumber, Key));
 			}
 		} catch (const Poco::Exception &E) {
 			return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,

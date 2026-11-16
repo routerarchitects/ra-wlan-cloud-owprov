@@ -646,15 +646,12 @@ static void test_commit_isolation_contract_mock_only() {
 }
 
 // Test 18: Verify the serial-number validation rules enforced by
-// AutoDiscovery::ConnectionReceived() (AutoDiscovery.cpp L144-156).
+// AutoDiscovery::ConnectionReceived() (AutoDiscovery.cpp) and
+// InventoryDB::CreateFromConnection() (storage_inventory.cpp).
 //
-// The predicate below is a verbatim inline copy of the two gates in production:
-//   Gate 1 — AutoDiscovery.cpp L145:
-//       serial.empty() || serial.size() > 16 || !Utils::ValidSerialNumber(serial)
-//     where Utils::ValidSerialNumber (framework/utils.cpp L36-39) is:
-//       serial.size() < SERIAL_NUMBER_LENGTH && std::all_of(..., std::isxdigit)
-//   Gate 2 — AutoDiscovery.cpp L149-153:
-//       std::stoull forward + std::stoull reversed (overflow guard)
+// Both production paths enforce:
+//   serial.size() != 12 || !Utils::ValidSerialNumber(serial)
+// ensuring exactly 12 hexadecimal characters are accepted as canonical.
 //
 // utils.cpp is not compiled into this test binary because it pulls in unresolvable
 // symbols (AppServiceRegistry, DNS resolver) that have no stubs in this target.
@@ -667,59 +664,31 @@ static void test_commit_isolation_contract_mock_only() {
 static void test_malformed_serial_numbers_validation_and_startup_safety() {
 	std::cout << "  Starting test_malformed_serial_numbers_validation_and_startup_safety..." << std::endl;
 
-	// Verbatim copy of the two production gates (AutoDiscovery.cpp L144-156).
-	// Keep in sync with Utils::ValidSerialNumber (framework/utils.cpp L36-39) and
-	// AutoDiscovery::ConnectionReceived() L145, L149-153.
+	// Mirrors the production gate (AutoDiscovery.cpp & storage_inventory.cpp)
 	auto validateSerial = [](const std::string &serialRaw) -> bool {
 		std::string serial = Poco::toLower(serialRaw);
-		// Gate 1 — mirrors AutoDiscovery.cpp L145 / Utils::ValidSerialNumber L37-38
-		if (serial.empty() || serial.size() > 16 ||
+		if (serial.size() != 12 ||
 		    !std::all_of(serial.begin(), serial.end(),
 		                 [](unsigned char c) { return std::isxdigit(c); }))
 			return false;
-		// Gate 2 — mirrors AutoDiscovery.cpp L149-153
-		try {
-			(void)std::stoull(serial, nullptr, 16);
-			std::string rev(serial.rbegin(), serial.rend());
-			(void)std::stoull(rev, nullptr, 16);
-			return true;
-		} catch (...) {
-			return false;
-		}
+		return true;
 	};
 
-	// Valid serials that must be accepted
+	// Valid serials that must be accepted (exactly 12 hex characters)
 	TEST_ASSERT(validateSerial("24f5a2012345"), "Standard 12-char hex serial must be valid");
 	TEST_ASSERT(validateSerial("0123456789ab"), "Sequential 12-char hex serial must be valid");
 	TEST_ASSERT(validateSerial("AABBCCDDEEFF"), "Uppercase hex serial must be valid (lowercased)");
-	TEST_ASSERT(validateSerial("123456"), "Short hex serial within range must be valid");
-	TEST_ASSERT(validateSerial("ffffffffffffffff"), "Max 64-bit hex serial (16 chars) must be valid");
+	TEST_ASSERT(validateSerial("000000000abc"), "12-char leading-zero hex serial must be valid");
 
 	// Malformed / invalid serials that must be rejected before DB operations
 	TEST_ASSERT(!validateSerial(""), "Empty serial must be rejected");
+	TEST_ASSERT(!validateSerial("123456"), "Short hex serial (< 12 chars) must be rejected");
+	TEST_ASSERT(!validateSerial("ffffffffffffffff"), "16-char hex serial must be rejected (must be exactly 12 chars)");
+	TEST_ASSERT(!validateSerial("00000000000000001"), "17-digit serial must be rejected");
 	TEST_ASSERT(!validateSerial("invalid-serial"), "Serial with hyphens/non-hex must be rejected");
 	TEST_ASSERT(!validateSerial("24:f5:a2:01:23:45"), "Serial with colons must be rejected");
-	TEST_ASSERT(!validateSerial("12345g"), "Non-hex character 'g' must be rejected");
-	TEST_ASSERT(!validateSerial("123 456"), "Serial with space must be rejected");
-
-	// Overflow cases: 17 hex digits
-	TEST_ASSERT(!validateSerial("10000000000000000"), "17-digit hex overflowing uint64_t must be rejected");
-	TEST_ASSERT(!validateSerial("fffffffffffffffff"), "Overflowing hex serial must be rejected");
-
-	// 17-digit leading-zero case identified in P1 review:
-	// "00000000000000001" has numeric value 1, but reversed is "10000000000000000" which overflows uint64_t!
-	TEST_ASSERT(!validateSerial("00000000000000001"), "17-digit leading-zero serial must be rejected to prevent reversed overflow in cache");
-
-	// Verify that the reversed representation would throw in std::stoull if not caught
-	std::string badSerial = "00000000000000001";
-	std::string revBad(badSerial.rbegin(), badSerial.rend());
-	bool revThrew = false;
-	try {
-		(void)std::stoull(revBad, nullptr, 16);
-	} catch (const std::out_of_range &) {
-		revThrew = true;
-	}
-	TEST_ASSERT(revThrew, "Reversed 17-digit serial '10000000000000000' must throw out_of_range in std::stoull");
+	TEST_ASSERT(!validateSerial("12345g012345"), "Non-hex character 'g' must be rejected");
+	TEST_ASSERT(!validateSerial("123 56012345"), "Serial with space must be rejected");
 
 	std::cout << "  PASS: test_malformed_serial_numbers_validation_and_startup_safety" << std::endl;
 }
