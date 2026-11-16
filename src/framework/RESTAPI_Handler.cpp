@@ -20,10 +20,12 @@ namespace OpenWifi {
 			return true;
 		}
 
-		// Track 1: Authenticated internal service requests with forwarded subscriber token
-		// (e.g. signup Flow A / internal proxying) proceed through internal flow.
+		// Track 1: Authenticated internal service registration/signup workflow (Flow A).
+		// When an internal service creates a subscriber record, allow the signup handler
+		// even if a subscriber Bearer token was forwarded.
 		if (IsInternalServiceAuthenticated() &&
-			UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER) {
+			UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER &&
+			Path == "/api/v1/subscriber" && Method == Poco::Net::HTTPRequest::HTTP_POST) {
 			return true;
 		}
 
