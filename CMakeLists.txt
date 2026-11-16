@@ -301,6 +301,7 @@ add_executable(kafka_consumer_roles_test
         tests/framework_tests/KafkaConsumerRoles_test.cpp
         src/framework/KafkaManager.cpp
 )
+target_compile_definitions(kafka_consumer_roles_test PRIVATE OWPROV_KAFKA_TESTING)
 target_link_libraries(kafka_consumer_roles_test PRIVATE
         ${Poco_LIBRARIES}
         CppKafka::cppkafka

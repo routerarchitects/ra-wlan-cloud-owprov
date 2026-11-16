@@ -97,6 +97,19 @@ namespace OpenWifi {
 		[[nodiscard]] int64_t GetCommittedOffset(const std::string &Topic, int Partition = 0) const;
 
 		using AckCallback = std::function<Types::KafkaHandlerOutcome(const std::string &, const std::string &, std::string &)>;
+#ifdef OWPROV_KAFKA_TESTING
+		// Compiled only into the integration test. The hook issues synchronous
+		// OffsetCommit requests through the production consumer's broker connection.
+		using CommitHook = std::function<void(int, cppkafka::Consumer &, const cppkafka::Message &)>;
+		void SetCommitHook(CommitHook Hook) {
+			std::lock_guard Lock(ConsumerMutex_);
+			CommitHook_ = std::move(Hook);
+		}
+		[[nodiscard]] std::string LastCommitError() const {
+			std::lock_guard Lock(ConsumerMutex_);
+			return LastCommitError_;
+		}
+#endif
 
 	  private:
 		KafkaConsumerType 		ConsumerType_ = KafkaConsumerType::Group;
@@ -112,6 +125,10 @@ namespace OpenWifi {
 		std::set<std::string>	Topics_;
 		std::thread::id			DispatchThread_;
 		std::string				FailureReason_;
+#ifdef OWPROV_KAFKA_TESTING
+		CommitHook				CommitHook_;
+		std::string				LastCommitError_;
+#endif
 
 		void run() override;
 		void MarkFailed(const std::string &Reason);

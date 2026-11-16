@@ -123,7 +123,9 @@ jobs:
             test_commit_retry_topic \
             test_retry_scenario_topic \
             test_non_retry_scenario_topic \
-            test_shutdown_scenario_topic; do
+            test_shutdown_scenario_topic \
+            test_rebalance_scenario_topic \
+            test_commit_fail_topic; do
             docker exec kafka /opt/kafka/bin/kafka-topics.sh \
               --bootstrap-server localhost:9092 \
               --create \

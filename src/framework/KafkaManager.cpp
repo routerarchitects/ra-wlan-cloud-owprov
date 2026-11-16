@@ -229,6 +229,9 @@ namespace OpenWifi {
 		if (!Running_ && !Worker_.isRunning()) {
 			Failed_ = false;
 			FailureReason_.clear();
+#ifdef OWPROV_KAFKA_TESTING
+			LastCommitError_.clear();
+#endif
 			Running_ = true;
 			Worker_.start(*this);
 		}
@@ -349,6 +352,12 @@ namespace OpenWifi {
 				{"auto.offset.reset", GetAutoOffsetReset()},
 				{"enable.partition.eof", false}
 			});
+			std::string maxPoll = MicroServiceConfigGetString("openwifi.kafka.max.poll.interval.ms", "");
+			if (!maxPoll.empty()) {
+				Config.set("max.poll.interval.ms", maxPoll);
+			}
+			const auto sessionTimeout = MicroServiceConfigGetString("openwifi.kafka.session.timeout.ms", "");
+			if (!sessionTimeout.empty()) Config.set("session.timeout.ms", sessionTimeout);
 			AddKafkaSecurity(Config);
 			Config.set_log_callback(KafkaLoggerFun);
 			Config.set_error_callback(KafkaErrorFun);
@@ -429,6 +438,15 @@ namespace OpenWifi {
 				auto RetryOp = [&](const char *Stage, auto &&Op) {
 					std::string Reason;
 					for (int Attempt = 0; Attempt < MaxAttempts && Running_; ++Attempt) {
+						// Revocation callbacks are dispatched by poll(), which cannot run
+						// while a handler is in flight. The background group state can
+						// already know ownership was lost (e.g. max.poll.interval.ms).
+						if (rd_kafka_assignment_lost(Consumer_->get_handle())) {
+							poco_warning(Logger_, fmt::format(
+								"Partition ownership lost during {} for '{}' p={} off={}; stopping without committing.",
+								Stage, msg.get_topic(), msg.get_partition(), msg.get_offset()));
+							return false;
+						}
 						Reason.clear();
 						if (Op(Attempt, Reason)) return true;
 						if (fatalError || !Running_) return false;
@@ -505,16 +523,27 @@ namespace OpenWifi {
 					return true;
 				})) break;
 
-				if (!RetryOp("Commit", [&](int, std::string &Reason) {
+				if (!RetryOp("Commit", [&]([[maybe_unused]] int Attempt, std::string &Reason) {
 					try {
 						std::lock_guard G(ConsumerMutex_);
 						if (!Consumer_) throw std::runtime_error("Consumer handle unavailable");
+#ifdef OWPROV_KAFKA_TESTING
+						if (CommitHook_) {
+							CommitHook_(Attempt, *Consumer_, msg);
+						}
+#endif
 						Consumer_->commit(msg);
 						return true;
 					} catch (const std::exception &E) {
 						Reason = E.what();
+#ifdef OWPROV_KAFKA_TESTING
+						LastCommitError_ = Reason;
+#endif
 					} catch (...) {
 						Reason = "unknown commit exception";
+#ifdef OWPROV_KAFKA_TESTING
+						LastCommitError_ = Reason;
+#endif
 					}
 					return false;
 				})) break;

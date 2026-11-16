@@ -18,6 +18,8 @@
 
 #include "Poco/ConsoleChannel.h"
 #include "Poco/UUIDGenerator.h"
+#include "Poco/Data/Session.h"
+#include "Poco/Data/SQLite/Connector.h"
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
 #include "framework/utils.h"
@@ -37,11 +39,15 @@ namespace OpenWifi {
 	static std::string g_MockClientId = "prov1";
 	static std::string g_MockInstanceId = "owprov-1-550e8400-e29b-41d4-a716-446655440000";
 	static std::string g_MockPrivateEndPoint = "https://owprov-internal:17005";
+	static std::string g_MockMaxPollIntervalMs = "";
+	static std::string g_MockSessionTimeoutMs = "";
 	static uint64_t g_MockSystemId = 12345;
 
 	std::string MicroServiceConfigGetString(const std::string &Key, const std::string &DefaultValue) {
 		if (Key == "openwifi.kafka.group.id") return g_MockGroupId;
 		if (Key == "openwifi.kafka.client.id") return g_MockClientId;
+		if (Key == "openwifi.kafka.max.poll.interval.ms") return g_MockMaxPollIntervalMs;
+		if (Key == "openwifi.kafka.session.timeout.ms") return g_MockSessionTimeoutMs;
 		if (Key == "openwifi.kafka.brokerlist") {
 			const char *env = std::getenv("KAFKA_BROKERLIST");
 			return env ? std::string(env) : DefaultValue;
@@ -591,61 +597,7 @@ static void test_callback_outcome_contract_and_dispatch() {
 	std::cout << "  PASS: test_callback_outcome_contract_and_dispatch" << std::endl;
 }
 
-// Test 17: Structural contract check — processing callback is NOT re-invoked during the
-// commit-retry loop (idempotency contract).
-//
-// SCOPE: This is a mock-only structural test. It simulates the two-stage loop shape
-// (processing → commit) with a local lambda. It does NOT:
-//   - inject real Kafka commit failures into the production RetryOp("Commit") path
-//   - exercise KafkaManager::run() or any production code path
-//   - detect regressions where RetryOp("Commit") is broken or omitted
-//
-// KNOWN GAP: Genuine broker-level commit-failure regression coverage requires a
-// fault-injecting Kafka proxy (e.g. Toxiproxy). That is left as a future integration test.
-// This test is retained only as a structural/contract sanity check.
-static void test_commit_isolation_contract_mock_only() {
-	std::cout << "  Starting test_commit_isolation_contract_mock_only (mock-only structural check)..." << std::endl;
-
-	std::atomic<int> processingCallbackCount{0};
-	std::atomic<int> commitAttempts{0};
-
-	// Processing callback returns Success exactly once
-	KafkaConsumer::AckCallback processCb = [&](const std::string &, const std::string &, std::string &) {
-		processingCallbackCount++;
-		return Types::KafkaHandlerOutcome::Success;
-	};
-
-	// Logical contract: processing runs once; commit retries loop WITHOUT re-invoking processing.
-	// This mirrors what KafkaManager::run() does: RetryOp("Processing") runs the callback once,
-	// then RetryOp("Commit") loops separately without calling the callback again.
-	auto verifyCommitIsolation = [&](int commitFailuresBeforeSuccess) -> bool {
-		std::string dummyReason;
-		// Step 1 — Processing stage: invoke callback exactly once
-		auto outcome = processCb("k1", "payload1", dummyReason);
-		if (outcome != Types::KafkaHandlerOutcome::Success) return false;
-
-		// Step 2 — Commit stage: retry commit without re-invoking processing callback
-		constexpr int maxAttempts = 5;
-		for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-			commitAttempts++;
-			if (attempt >= commitFailuresBeforeSuccess) {
-				return true; // commit succeeded
-			}
-		}
-		return false;
-	};
-
-	// Case: commit fails twice, succeeds on attempt 3
-	bool ok = verifyCommitIsolation(2);
-	TEST_ASSERT(ok, "Commit should eventually succeed");
-	TEST_ASSERT(commitAttempts == 3, "Commit was retried 3 times");
-	TEST_ASSERT(processingCallbackCount == 1,
-		"Processing callback must NEVER be re-invoked during commit retries (idempotency guarantee)");
-
-	std::cout << "  PASS: test_commit_isolation_contract_mock_only" << std::endl;
-}
-
-// Test 18: Verify the serial-number validation rules enforced by
+// Test 17: Verify the serial-number validation rules enforced by
 // AutoDiscovery::ConnectionReceived() (AutoDiscovery.cpp) and
 // InventoryDB::CreateFromConnection() (storage_inventory.cpp).
 //
@@ -693,7 +645,24 @@ static void test_malformed_serial_numbers_validation_and_startup_safety() {
 	std::cout << "  PASS: test_malformed_serial_numbers_validation_and_startup_safety" << std::endl;
 }
 
-// Test 19: Real broker-backed Kafka offset commit, bounded retry, timing measurement, and shutdown.
+// Helper: query committed offset for a topic using an independent, ephemeral consumer
+// so the measurement is not coupled to the consumer-under-test's handle lifecycle.
+static int64_t queryCommittedOffsetIndependently(const std::string &topic, int partition = 0) {
+	const char *broker = std::getenv("KAFKA_BROKERLIST");
+	if (!broker || std::string(broker).empty()) return RD_KAFKA_OFFSET_INVALID;
+	cppkafka::Configuration cfg = {
+		{"metadata.broker.list", std::string(broker)},
+		{"group.id", g_MockGroupId},
+		{"enable.auto.commit", "false"},
+	};
+	cppkafka::Consumer probe(cfg);
+	cppkafka::TopicPartitionList tpl{{topic, partition}};
+	auto committed = probe.get_offsets_committed(tpl);
+	if (!committed.empty()) return committed.front().get_offset();
+	return RD_KAFKA_OFFSET_INVALID;
+}
+
+// Test 18: Real broker-backed Kafka offset commit, bounded retry, timing measurement, and shutdown.
 // Each scenario runs on its own pre-created topic so leftover messages from earlier scenarios
 // cannot contaminate later ones. The topics are created by the CI workflow topic-creation step.
 static void test_broker_backed_kafka_commit_retry_and_shutdown() {
@@ -720,35 +689,6 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 	producer.Start();
 
 	auto &consumer = KafkaManager()->GroupConsumer();
-
-	// Helper: query committed offset for a topic using an independent, ephemeral consumer
-	// so the measurement is not coupled to the consumer-under-test's handle lifecycle.
-	// This is the correct way to read the group's persisted offset from the broker after
-	// the consumer-under-test has been stopped (its handle is gone, GetCommittedOffset() = -1).
-	//
-	// Exceptions are NOT swallowed here: a broker-query failure is a test infrastructure
-	// failure (not an "uncommitted offset") and must abort the test immediately. This avoids
-	// the false-PASS where a silently-failed query returns -1, which is then accepted by an
-	// assertion that only checks for a negative value.
-	//
-	// Return value semantics:
-	//   >= 0                      — broker reports a committed offset for this group/topic/partition
-	//   RD_KAFKA_OFFSET_INVALID   — broker confirms no committed offset exists (never committed)
-	//   throws std::runtime_error — broker query itself failed; caller must let the test abort
-	auto queryCommittedOffsetIndependently = [&](const std::string &topic, int partition) -> int64_t {
-		cppkafka::Configuration cfg = {
-			{"metadata.broker.list", std::string(broker)},
-			{"group.id", g_MockGroupId},
-			{"enable.auto.commit", "false"},
-		};
-		cppkafka::Consumer probe(cfg);
-		cppkafka::TopicPartitionList tpl{{topic, partition}};
-		auto committed = probe.get_offsets_committed(tpl);
-		if (!committed.empty()) return committed.front().get_offset();
-		// Empty list means the broker has no information for this partition at all.
-		// Return OFFSET_INVALID (-1001) to distinguish from a committed offset of 0.
-		return RD_KAFKA_OFFSET_INVALID;
-	};
 
 	// ──────────────────────────────────────────────────────────────────────────────
 	// Scenario 1: Success → offset advances, commit happens AFTER processing returns
@@ -998,19 +938,397 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 	std::cout << "  PASS: test_broker_backed_kafka_commit_retry_and_shutdown" << std::endl;
 }
 
-// GAP: test_unfinished_processing_after_rebalance
+// Test 19: Partition rebalance during in-flight processing.
 //
-// What is NOT covered by Test 19 (Scenario 4 — shutdown during backoff):
-//   Scenario 4 verifies that a consumer Stop() during retry backoff does not spuriously commit.
-//   It does NOT verify what happens when a partition rebalance (triggered by another consumer
-//   joining the group) interrupts in-flight processing. This behavior is not covered by this
-//   test suite. A dedicated integration test would be needed that:
-//     1. Starts two GroupConsumer instances in the same group.
-//     2. Publishes a message and blocks the first consumer's callback mid-processing.
-//     3. Forces a rebalance by having the second consumer join.
-//     4. Verifies the first consumer does not commit and the second consumer receives and
-//        commits the message on retry.
-//   This test requires coordination between two consumer handles and is left as future work.
+// Verifies that:
+//   1. Consumer-A receives a message and begins processing (blocks in flight).
+//   2. While Consumer-A is blocked in its callback, Consumer-B joins the same group.
+//   3. A test-specific short max.poll.interval.ms is used so Consumer-A loses partition
+//      ownership while its processing callback remains blocked (coordinator revokes partition).
+//   4. Partition ownership observably transfers to Consumer-B (verified via assignment callback).
+//   5. Consumer-B receives the replayed message without message loss during assignment polling.
+//   6. While Consumer-A is still blocked, independent query confirms broker offset is RD_KAFKA_OFFSET_INVALID.
+//   7. Consumer-A is released; its worker finishes naturally without Stop() upon handling partition revocation.
+//   8. Broker offset remains RD_KAFKA_OFFSET_INVALID after Consumer-A terminates naturally without committing.
+//   9. Consumer-A is stopped cleanly afterward to clean up resources.
+//  10. Consumer-B commits the replayed message; broker offset advances to msgB.get_offset() + 1.
+//  11. Both consumers cleanly shut down.
+static void test_partition_rebalance_during_in_flight_processing() {
+	const char *broker = std::getenv("KAFKA_BROKERLIST");
+	if (!broker || std::string(broker).empty()) {
+		std::cout << "  SKIPPED: test_partition_rebalance_during_in_flight_processing (KAFKA_BROKERLIST not set)" << std::endl;
+		return;
+	}
+
+	std::cout << "  Running test_partition_rebalance_during_in_flight_processing..." << std::endl;
+
+	std::string token = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+	const std::string groupId = "test_rebalance_grp_" + token;
+	const std::string rebalanceTopic   = "test_rebalance_scenario_topic";
+	const std::string rebalanceKey     = "k_rebalance_" + token;
+	const std::string rebalancePayload = "rebalance_payload_" + token;
+
+	const std::string savedGroupId    = g_MockGroupId;
+	const std::string savedInstanceId = g_MockInstanceId;
+	g_MockGroupId    = groupId;
+	g_MockInstanceId = "owprov-rebalance-A-" + token;
+
+	// Use a test-specific short max.poll.interval.ms (6s) for Consumer-A so that holding
+	// the callback causes librdkafka to exceed the poll interval, triggering coordinator revocation.
+	g_MockMaxPollIntervalMs = "6000";
+
+	// Latch: holds Consumer-A's callback until partition transfer to Consumer-B is observable.
+	std::promise<void> releaseConsumerA;
+	std::shared_future<void> releaseFutureA = releaseConsumerA.get_future().share();
+	std::atomic<bool> consumerAEnteredCallback{false};
+
+	// Consumer-A: registered via KafkaManager's GroupConsumer.
+	auto &consumerA = KafkaManager()->GroupConsumer();
+	uint64_t wIdA = KafkaManager()->RegisterTopicWatcher(rebalanceTopic,
+		[&](const std::string &key, const std::string &, std::string &) -> Types::KafkaHandlerOutcome {
+			if (key != rebalanceKey) return Types::KafkaHandlerOutcome::Success;
+			consumerAEnteredCallback = true;
+			releaseFutureA.wait(); // Block until partition transfer to Consumer-B is confirmed
+			return Types::KafkaHandlerOutcome::Success;
+		},
+		KafkaConsumerType::Group);
+
+	consumerA.Start();
+	TEST_ASSERT(consumerA.IsRunning(), "Consumer-A must be running");
+	TEST_ASSERT(consumerA.WaitForPartitionAssignment(10000), "Consumer-A must receive initial partition assignment");
+
+	KafkaProducer producer;
+	producer.Start();
+	producer.Produce(rebalanceTopic.c_str(), rebalanceKey, rebalancePayload);
+
+	// 1. Consumer-A receives the Kafka message and blocks inside its callback.
+	auto waitStart = std::chrono::steady_clock::now();
+	while (!consumerAEnteredCallback &&
+	       std::chrono::steady_clock::now() - waitStart < std::chrono::seconds(15)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(consumerAEnteredCallback,
+		"Consumer-A must have received the message and be actively processing in-flight");
+
+	// 2. Consumer-B joins the same group using a direct cppkafka consumer.
+	// With 2 consumers in the group and 1 partition, the coordinator assigns partition 0 to Consumer-B
+	// after Consumer-A's max.poll.interval.ms expires while blocked.
+	std::atomic<bool> consumerBOwnsPartition{false};
+	cppkafka::Configuration cfgB = {
+		{"metadata.broker.list", std::string(broker)},
+		{"group.id", groupId},
+		{"client.id", "owprov-rebalance-B-" + token},
+		{"enable.auto.commit", "false"},
+	};
+	cfgB.set_default_topic_configuration({{"auto.offset.reset", "smallest"}});
+	cppkafka::Consumer rawConsumerB(cfgB);
+
+	rawConsumerB.set_assignment_callback([&](cppkafka::TopicPartitionList &parts) {
+		for (const auto &p : parts) {
+			if (p.get_topic() == rebalanceTopic && p.get_partition() == 0) {
+				consumerBOwnsPartition = true;
+			}
+		}
+	});
+	rawConsumerB.subscribe({rebalanceTopic});
+
+	// Fix 1: Declare cppkafka::Message msgB before assignment-wait loop and capture returned message.
+	// 3. Confirm Consumer-B actually receives assignment of the target partition.
+	cppkafka::Message msgB;
+	auto rebalanceWait = std::chrono::steady_clock::now();
+	while (!consumerBOwnsPartition &&
+	       std::chrono::steady_clock::now() - rebalanceWait < std::chrono::seconds(25)) {
+		auto polled = rawConsumerB.poll(std::chrono::milliseconds(200));
+		if (polled && !polled.get_error() && std::string(polled.get_key()) == rebalanceKey) {
+			msgB = std::move(polled);
+		}
+	}
+	TEST_ASSERT(consumerBOwnsPartition,
+		"Partition ownership must observably transfer to Consumer-B during Consumer-A in-flight processing");
+
+	// 4. Confirm Consumer-B receives the replayed message.
+	// If msgB was not yet returned during the assignment wait, poll until it arrives.
+	if (!msgB || msgB.get_error()) {
+		auto msgWait = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() - msgWait < std::chrono::seconds(15)) {
+			auto polled = rawConsumerB.poll(std::chrono::milliseconds(200));
+			if (polled && !polled.get_error() && std::string(polled.get_key()) == rebalanceKey) {
+				msgB = std::move(polled);
+				break;
+			}
+		}
+	}
+	TEST_ASSERT(msgB && !msgB.get_error(), "Consumer-B must receive the replayed message after rebalance");
+	TEST_ASSERT(std::string(msgB.get_key()) == rebalanceKey, "Consumer-B must receive the expected key");
+	TEST_ASSERT(std::string(msgB.get_payload()) == rebalancePayload, "Consumer-B must receive the expected payload");
+
+	// 5. While Consumer-A is still blocked, query the committed offset independently.
+	int64_t offsetBeforeRelease = queryCommittedOffsetIndependently(rebalanceTopic, 0);
+
+	// 6. Assert the offset is RD_KAFKA_OFFSET_INVALID, proving unfinished processing was not acknowledged while in flight.
+	TEST_ASSERT(offsetBeforeRelease == RD_KAFKA_OFFSET_INVALID,
+		"Unfinished processing by Consumer-A must not be acknowledged (broker offset must be RD_KAFKA_OFFSET_INVALID)");
+
+	// 7. Release Consumer-A from its blocked callback.
+	releaseConsumerA.set_value();
+
+	// 8. Wait, with a bounded timeout, for Consumer-A's worker to finish naturally, without calling Stop() first.
+	// When Consumer-A detects partition revocation in RetryOp("Commit"), it stops without committing
+	// and breaks out of run(), naturally causing consumerA.IsRunning() to become false.
+	auto consumerAWait = std::chrono::steady_clock::now();
+	while (consumerA.IsRunning() &&
+	       std::chrono::steady_clock::now() - consumerAWait < std::chrono::seconds(15)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(!consumerA.IsRunning(),
+		"Consumer-A worker must finish naturally upon handling partition revocation during commit");
+
+	// 9. Assert the broker offset remains uncommitted (RD_KAFKA_OFFSET_INVALID).
+	// This proves Consumer-A completed its commit decision and avoided committing due to partition revocation.
+	int64_t offsetAfterAFinished = queryCommittedOffsetIndependently(rebalanceTopic, 0);
+	TEST_ASSERT(offsetAfterAFinished == RD_KAFKA_OFFSET_INVALID,
+		"Broker offset must remain RD_KAFKA_OFFSET_INVALID after Consumer-A terminates naturally without committing");
+
+	// 10. Call Stop() only afterward to unregister and cleanly join the worker.
+	KafkaManager()->UnregisterTopicWatcher(rebalanceTopic, wIdA, KafkaConsumerType::Group);
+	consumerA.Stop();
+
+	// 11. Allow Consumer-B to commit the replayed message and verify its offset.
+	rawConsumerB.commit(msgB);
+
+	int64_t offsetAfterBCommit = RD_KAFKA_OFFSET_INVALID;
+	auto commitWait = std::chrono::steady_clock::now();
+	while (std::chrono::steady_clock::now() - commitWait < std::chrono::seconds(5)) {
+		offsetAfterBCommit = queryCommittedOffsetIndependently(rebalanceTopic, 0);
+		if (offsetAfterBCommit == msgB.get_offset() + 1) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	TEST_ASSERT(offsetAfterBCommit == msgB.get_offset() + 1,
+		"Committed offset must advance to message offset + 1 after Consumer-B commits");
+
+	rawConsumerB.unsubscribe();
+	producer.Stop();
+
+	g_MockMaxPollIntervalMs.clear();
+	g_MockGroupId    = savedGroupId;
+	g_MockInstanceId = savedInstanceId;
+
+	std::cout << "  PASS: test_partition_rebalance_during_in_flight_processing" << std::endl;
+}
+
+// Test 20: Kafka commit failure after successful processing (failure-injection isolation).
+//
+// This test exercises the production RetryOp("Commit") path in KafkaConsumer::run()
+// using an actual Kafka broker. Simulated Kafka commit exceptions are injected directly into
+// the message commit operation via SetCommitHook() to verify:
+//   1. Injected Kafka commit errors trigger the production bounded retry mechanism.
+//   2. The exact Kafka error is verified during retries and upon exhaustion.
+//   3. Broker offsets remain uncommitted during failed commit attempts.
+//   4. A successful database operation in the callback is performed exactly once
+//      and never repeated during commit retries (database operation isolation).
+//   5. A subsequent successful commit advances the offset on the broker.
+//   6. Exhausted commit retries leave the offset uncommitted.
+static void test_broker_backed_commit_failure_isolation() {
+	const char *broker = std::getenv("KAFKA_BROKERLIST");
+	if (!broker || std::string(broker).empty()) {
+		std::cout << "  SKIPPED: test_broker_backed_commit_failure_isolation (KAFKA_BROKERLIST not set)" << std::endl;
+		return;
+	}
+
+	std::cout << "  Running test_broker_backed_commit_failure_isolation..." << std::endl;
+
+	std::string token = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+	const std::string savedGroupId = g_MockGroupId;
+	const std::string savedInstanceId = g_MockInstanceId;
+	g_MockGroupId    = "test_commit_fail_grp_" + token;
+	g_MockInstanceId = "owprov-commit-fail-test-" + token;
+
+	const std::string commitFailTopic   = "test_commit_fail_topic";
+	const std::string commitFailKey     = "k_commitfail_" + token;
+	const std::string commitFailPayload = "commitfail_payload_" + token;
+
+	// Database operation isolation setup: in-memory SQLite table with primary key constraint.
+	// If the callback were mistakenly re-executed during commit retries, the INSERT would
+	// fail with a duplicate primary key exception.
+	Poco::Data::SQLite::Connector::registerConnector();
+	Poco::Data::Session db("SQLite", ":memory:");
+	db << "CREATE TABLE commit_isolation_records (id TEXT PRIMARY KEY, processed_time INTEGER, write_count INTEGER)",
+		Poco::Data::Keywords::now;
+
+	const std::string expectedKafkaErr = cppkafka::Error(RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE).to_string();
+
+	std::atomic<int> processingCount{0};
+	std::atomic<int> commitAttemptCount{0};
+
+	auto &consumer = KafkaManager()->GroupConsumer();
+
+	// Scenario A: Injected Kafka commit error into the message's commit operation.
+	// Attempts 0 and 1: Inject RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE.
+	// Broker offset remains uncommitted during these failed attempts.
+	// Attempt 2: Hook does not throw; allows production Consumer_->commit(msg) to succeed.
+	consumer.SetCommitHook([&](int attempt, cppkafka::Consumer &, const cppkafka::Message &) {
+		commitAttemptCount++;
+		if (attempt < 2) {
+			int64_t uncommitted = queryCommittedOffsetIndependently(commitFailTopic, 0);
+			TEST_ASSERT(uncommitted < 0, "Broker offset must remain uncommitted during failed commit attempts");
+
+			// Inject Kafka commit exception directly into the message's commit operation
+			throw cppkafka::HandleException(cppkafka::Error(RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE));
+		}
+	});
+
+	uint64_t wId = KafkaManager()->RegisterTopicWatcher(commitFailTopic,
+		[&](const std::string &key, const std::string &payload, std::string &) -> Types::KafkaHandlerOutcome {
+			TEST_ASSERT(key == commitFailKey, "Commit-fail scenario must receive exact key");
+			TEST_ASSERT(payload == commitFailPayload, "Commit-fail scenario must receive exact payload");
+			processingCount++;
+
+			// Execute actual database operation
+			int nowSec = static_cast<int>(std::time(nullptr));
+			db << "INSERT INTO commit_isolation_records (id, processed_time, write_count) VALUES (?, ?, 1)",
+				Poco::Data::Keywords::use(key),
+				Poco::Data::Keywords::use(nowSec),
+				Poco::Data::Keywords::now;
+
+			return Types::KafkaHandlerOutcome::Success;
+		},
+		KafkaConsumerType::Group);
+
+	consumer.Start();
+	TEST_ASSERT(consumer.IsRunning(), "GroupConsumer must be running");
+
+	KafkaProducer producer;
+	producer.Start();
+	producer.Produce(commitFailTopic.c_str(), commitFailKey, commitFailPayload);
+
+	// Wait for commit retries and eventual successful commit (attempt 2).
+	// Total backoff: 200ms + 400ms = ~600ms.
+	auto start = std::chrono::steady_clock::now();
+	while (std::chrono::steady_clock::now() - start < std::chrono::seconds(15) && commitAttemptCount < 3) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+
+	TEST_ASSERT(processingCount == 1,
+		"Processing callback must be executed exactly ONCE and NEVER re-dispatched during commit retries");
+	TEST_ASSERT(commitAttemptCount == 3,
+		"Commit must have been retried exactly 3 times (2 broker errors + 1 success)");
+	TEST_ASSERT(!consumer.HasFailed(), "Consumer must not fail when commit eventually succeeds");
+
+	// Verify exact Kafka error occurred during retries
+	TEST_ASSERT(consumer.LastCommitError() == expectedKafkaErr,
+		"LastCommitError must match exact Kafka error: expected '" + expectedKafkaErr + "', got '" + consumer.LastCommitError() + "'");
+
+	// Verify database operation was executed exactly once and not repeated
+	int dbRowCount = 0;
+	int dbWriteCount = 0;
+	db << "SELECT COUNT(*), write_count FROM commit_isolation_records WHERE id = ?",
+		Poco::Data::Keywords::into(dbRowCount),
+		Poco::Data::Keywords::into(dbWriteCount),
+		Poco::Data::Keywords::use(commitFailKey),
+		Poco::Data::Keywords::now;
+	TEST_ASSERT(dbRowCount == 1, "Database row count must be exactly 1");
+	TEST_ASSERT(dbWriteCount == 1, "Database operation must NOT be repeated during commit retries");
+
+	// Verify committed offset advanced on broker
+	int64_t committedOffset = -1;
+	auto pollStart = std::chrono::steady_clock::now();
+	while (std::chrono::steady_clock::now() - pollStart < std::chrono::seconds(5)) {
+		committedOffset = queryCommittedOffsetIndependently(commitFailTopic, 0);
+		if (committedOffset > 0) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+
+	TEST_ASSERT(committedOffset > 0,
+		"Committed offset must advance on broker after commit retries succeed");
+
+	// Reset commit hook
+	consumer.SetCommitHook(nullptr);
+	KafkaManager()->UnregisterTopicWatcher(commitFailTopic, wId, KafkaConsumerType::Group);
+	consumer.Stop();
+	producer.Stop();
+
+	// Scenario B: Commit retries exhausted (all 5 attempts fail with injected Kafka commit errors)
+	// Verifies consumer enters FAILED state, broker offset remains unchanged,
+	// exact Kafka error is verified, and database operation is not repeated.
+	{
+		std::string tokenExhaust = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+		g_MockInstanceId = "owprov-commit-fail-exhaust-" + tokenExhaust;
+
+		const std::string commitExhaustKey     = "k_commitfail_ex_" + tokenExhaust;
+		const std::string commitExhaustPayload = "commitfail_ex_payload_" + tokenExhaust;
+
+		std::atomic<int> exhaustProcessingCount{0};
+		std::atomic<int> exhaustCommitAttempts{0};
+
+		consumer.SetCommitHook([&](int, cppkafka::Consumer &, const cppkafka::Message &) {
+			exhaustCommitAttempts++;
+			// Inject Kafka commit exception on every attempt
+			throw cppkafka::HandleException(cppkafka::Error(RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE));
+		});
+
+		uint64_t wIdEx = KafkaManager()->RegisterTopicWatcher(commitFailTopic,
+			[&](const std::string &key, const std::string &, std::string &) -> Types::KafkaHandlerOutcome {
+				if (key != commitExhaustKey) return Types::KafkaHandlerOutcome::Success;
+				exhaustProcessingCount++;
+
+				int nowSec = static_cast<int>(std::time(nullptr));
+				db << "INSERT INTO commit_isolation_records (id, processed_time, write_count) VALUES (?, ?, 1)",
+					Poco::Data::Keywords::use(key),
+					Poco::Data::Keywords::use(nowSec),
+					Poco::Data::Keywords::now;
+
+				return Types::KafkaHandlerOutcome::Success;
+			},
+			KafkaConsumerType::Group);
+
+		consumer.Start();
+		TEST_ASSERT(consumer.IsRunning(), "GroupConsumer must be running");
+
+		producer.Start();
+		producer.Produce(commitFailTopic.c_str(), commitExhaustKey, commitExhaustPayload);
+
+		// Wait for consumer to exhaust all 5 commit attempts (backoff: 200 + 400 + 800 + 1600 = ~3.0s)
+		auto startEx = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() - startEx < std::chrono::seconds(15) && !consumer.HasFailed()) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+
+		TEST_ASSERT(exhaustProcessingCount == 1,
+			"Processing callback must be executed exactly ONCE and not repeated during commit retries");
+		TEST_ASSERT(exhaustCommitAttempts == 5,
+			"Commit must have been retried exactly 5 times before exhaustion");
+		TEST_ASSERT(consumer.HasFailed(), "Consumer must fail after commit retries exhausted");
+		TEST_ASSERT(consumer.FailureReason().find("Commit_retries_exhausted") != std::string::npos,
+			"Failure reason must indicate Commit_retries_exhausted: " + consumer.FailureReason());
+		TEST_ASSERT(consumer.FailureReason().find(expectedKafkaErr) != std::string::npos,
+			"Failure reason must verify the exact Kafka error: " + consumer.FailureReason());
+
+		// Verify database state: row exists, write_count == 1, never re-inserted
+		int exRowCount = 0;
+		int exWriteCount = 0;
+		db << "SELECT COUNT(*), write_count FROM commit_isolation_records WHERE id = ?",
+			Poco::Data::Keywords::into(exRowCount),
+			Poco::Data::Keywords::into(exWriteCount),
+			Poco::Data::Keywords::use(commitExhaustKey),
+			Poco::Data::Keywords::now;
+		TEST_ASSERT(exRowCount == 1, "Exhaustion scenario database row count must be exactly 1");
+		TEST_ASSERT(exWriteCount == 1, "Exhaustion scenario database operation must not be repeated");
+
+		consumer.SetCommitHook(nullptr);
+		KafkaManager()->UnregisterTopicWatcher(commitFailTopic, wIdEx, KafkaConsumerType::Group);
+		consumer.Stop();
+		producer.Stop();
+
+		int64_t offsetAfterExhaustion = queryCommittedOffsetIndependently(commitFailTopic, 0);
+		TEST_ASSERT(offsetAfterExhaustion == committedOffset,
+			"Committed offset must NOT advance after commit retries exhausted");
+	}
+
+	g_MockGroupId = savedGroupId;
+	g_MockInstanceId = savedInstanceId;
+
+	std::cout << "  PASS: test_broker_backed_commit_failure_isolation" << std::endl;
+}
 
 int main() {
 	Poco::AutoPtr<Poco::ConsoleChannel> pChannel(new Poco::ConsoleChannel);
@@ -1035,13 +1353,12 @@ int main() {
 	test_consumer_shutdown_with_registered_topics();
 	test_concurrent_dynamic_subscription_updates_while_polling();
 
-	// Phase 3 Kafka retry/commit/idempotency tests (Issue #120)
-	// NOTE: test_commit_isolation_contract_mock_only (Test 17) is a mock-only structural check.
-	// It does NOT exercise the production RetryOp("Commit") path. See test body for the known gap.
+	// Phase 3 Kafka retry/commit/idempotency tests (Issue #120 / Issue #121)
 	test_callback_outcome_contract_and_dispatch();
-	test_commit_isolation_contract_mock_only();
 	test_malformed_serial_numbers_validation_and_startup_safety();
 	test_broker_backed_kafka_commit_retry_and_shutdown();
+	test_partition_rebalance_during_in_flight_processing();
+	test_broker_backed_commit_failure_isolation();
 
 	std::cout << "ALL KAFKA CONSUMER ROLES TESTS PASSED!" << std::endl;
 	return 0;
