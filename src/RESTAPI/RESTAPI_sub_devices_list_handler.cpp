@@ -21,23 +21,9 @@ namespace OpenWifi {
 			return ReturnObject("subscriberDevices", entries);
 		}
 
-		// --- Administrative / Inter-service path ---
-		auto subscriberId = ORM::Escape(GetParameter("subscriberId"));
+		// --- Administrative / Inter-service path (restored to upstream main) ---
 		auto operatorId = ORM::Escape(GetParameter("operatorId"));
-
-		if (!subscriberId.empty()) {
-			std::string whereClause = fmt::format(" subscriberId='{}' ", subscriberId);
-			if (!operatorId.empty()) {
-				whereClause += fmt::format(" and operatorId='{}' ", operatorId);
-			}
-			if (QB_.CountOnly) {
-				auto C = DB_.Count(whereClause);
-				return ReturnCountOnly(C);
-			}
-			SubscriberDeviceDB::RecordVec entries;
-			DB_.GetRecords(QB_.Offset, QB_.Limit, entries, whereClause, "");
-			return ReturnObject("subscriberDevices", entries);
-		}
+		auto subscriberId = ORM::Escape(GetParameter("subscriberId"));
 
 		if (!operatorId.empty() && !StorageService()->OperatorDB().Exists("id", operatorId)) {
 			return BadRequest(RESTAPI::Errors::OperatorIdMustExist);

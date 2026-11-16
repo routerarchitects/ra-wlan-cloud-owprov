@@ -11,7 +11,8 @@ namespace OpenWifi {
 	void RESTAPI_venue_list_handler::DoGet() {
 		auto subscriberId = GetParameter("subscriberId", "");
 
-		if (!subscriberId.empty()) {
+		// Pure internal microservice calls (e.g. UserPortal owsub location/topology synthesis)
+		if (IsInternalServiceOnly() && !subscriberId.empty()) {
 			if (!Utils::ValidUUID(subscriberId)) {
 				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			}
@@ -33,13 +34,27 @@ namespace OpenWifi {
 
 		if (isRoot) {
 			auto RRMvendor = GetParameter("RRMvendor","");
-			if(RRMvendor.empty()) {
+			std::string Where;
+			if (!RRMvendor.empty()) {
+				Where = fmt::format(" deviceRules LIKE '%{}%' ", ORM::Escape(RRMvendor));
+			}
+			if (!subscriberId.empty()) {
+				if (!Utils::ValidUUID(subscriberId)) {
+					return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+				}
+				std::string SubWhere = fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId));
+				Where = Where.empty() ? SubWhere : "(" + Where + ") AND (" + SubWhere + ")";
+			}
+			if (Where.empty()) {
 				return ListHandler<VenueDB>("venues", DB_, *this);
 			}
+			if (QB_.CountOnly) {
+				auto C = DB_.Count(Where);
+				return ReturnCountOnly(C);
+			}
 			VenueDB::RecordVec Venues;
-			auto Where = fmt::format(" deviceRules LIKE '%{}%' ", RRMvendor);
 			DB_.GetRecords(QB_.Offset, QB_.Limit, Venues, Where, " ORDER BY name ");
-			return ReturnObject("venues",Venues);
+			return ReturnObject("venues", Venues);
 		}
 
 		// Standard user flow:
@@ -100,11 +115,6 @@ namespace OpenWifi {
 
 		std::string ScopeWhere = makeInClause("id", VisibleVenues);
 
-		if (QB_.CountOnly) {
-			auto C = DB_.Count(ScopeWhere);
-			return ReturnCountOnly(C);
-		}
-
 		auto RRMvendor = GetParameter("RRMvendor", "");
 		std::string FinalWhere = ScopeWhere;
 		if (!RRMvendor.empty()) {
@@ -114,6 +124,22 @@ namespace OpenWifi {
 			} else {
 				FinalWhere = RRMWhere;
 			}
+		}
+		if (!subscriberId.empty()) {
+			if (!Utils::ValidUUID(subscriberId)) {
+				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
+			}
+			std::string SubWhere = fmt::format(" subscriber='{}' ", ORM::Escape(subscriberId));
+			if (!FinalWhere.empty()) {
+				FinalWhere = "(" + FinalWhere + ") AND (" + SubWhere + ")";
+			} else {
+				FinalWhere = SubWhere;
+			}
+		}
+
+		if (QB_.CountOnly) {
+			auto C = DB_.Count(FinalWhere);
+			return ReturnCountOnly(C);
 		}
 
 		VenueDB::RecordVec FilteredVenues;

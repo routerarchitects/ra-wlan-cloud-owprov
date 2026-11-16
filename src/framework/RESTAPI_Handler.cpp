@@ -23,9 +23,10 @@ namespace OpenWifi {
 		// Track 1: Authenticated internal service registration/signup workflow (Flow A).
 		// When an internal service creates a subscriber record, allow the signup handler
 		// even if a subscriber Bearer token was forwarded.
+		const auto requestPath = Poco::URI(Path).getPath();
 		if (IsInternalServiceAuthenticated() &&
 			UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER &&
-			Path == "/api/v1/subscriber" && Method == Poco::Net::HTTPRequest::HTTP_POST) {
+			requestPath == "/api/v1/subscriber" && Method == Poco::Net::HTTPRequest::HTTP_POST) {
 			return true;
 		}
 

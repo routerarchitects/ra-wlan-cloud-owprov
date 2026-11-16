@@ -185,6 +185,31 @@ func TestInternalRegistrationRouting(t *testing.T) {
 		})
 	}
 
+	// Internal signup carrying query parameters (e.g. ?email=...&registrationId=...)
+	// must normalize the URI path and reach the handler rather than being denied with 403.
+	t.Run("signup with query parameters", func(t *testing.T) {
+		req, err := http.NewRequest("POST", base+"/subscriber?email=test%40example.com&registrationId=operator1", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		token := f.token
+		if !strings.HasPrefix(token, "Bearer ") {
+			token = "Bearer " + token
+		}
+		req.Header.Set("Authorization", token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-KEY", key)
+		req.Header.Set("X-INTERNAL-NAME", name)
+		resp, err := f.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected %d, got %d", http.StatusBadRequest, resp.StatusCode)
+		}
+	})
+
 	// Internal credentials combined with a subscriber Bearer token must still be denied
 	// on unrelated restricted endpoints by standard subscriber RBAC.
 	t.Run("unrelated restricted endpoint denied", func(t *testing.T) {
