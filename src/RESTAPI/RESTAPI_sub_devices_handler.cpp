@@ -35,10 +35,15 @@ namespace OpenWifi {
 										StorageService()->InventoryDB().Prefix(), inventoryId);
 		}
 
-		if (!configurationDB.DeleteRecord("id", deviceConfiguration)) {
-			poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete "
-											   "configuration [{}].",
-											   deviceConfiguration));
+		// Only delete dedicated subscriber configuration records. Never delete administrator templates.
+		ProvObjects::DeviceConfiguration configRecord;
+		if (configurationDB.GetRecord("id", deviceConfiguration, configRecord) &&
+			configRecord.subscriberOnly) {
+			if (!configurationDB.DeleteRecord("id", deviceConfiguration)) {
+				poco_warning(Logger(), fmt::format("[SUBSCRIBER_DEVICE_DELETE]: Failed to delete "
+												   "configuration [{}].",
+												   deviceConfiguration));
+			}
 		}
 	}
 
@@ -560,7 +565,9 @@ namespace OpenWifi {
 			inventoryRecord.subscriber = newObject.subscriberId;
 			inventoryRecord.deviceType = newObject.deviceType;
 			inventoryRecord.managementPolicy = newObject.managementPolicy;
-			inventoryRecord.deviceConfiguration = newObject.deviceConfiguration;
+			if (!newObject.deviceConfiguration.empty()) {
+				inventoryRecord.deviceConfiguration = newObject.deviceConfiguration;
+			}
 			inventoryRecord.deviceRules = newObject.deviceRules;
 			inventoryRecord.state = newObject.state;
 			inventoryRecord.locale = newObject.locale;
