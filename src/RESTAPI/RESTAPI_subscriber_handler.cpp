@@ -406,10 +406,6 @@ namespace OpenWifi {
 		if (subscriberId.empty())
 			return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 
-		ProvObjects::SignupEntry signupRecord;
-		if (!StorageService()->SignupDB().GetRecord("userid", subscriberId, signupRecord))
-			return NotFound();
-
 		bool inventoryQuerySucceeded = false, deviceQuerySucceeded = false;
 		auto &inventoryDB = StorageService()->InventoryDB();
 		auto &deviceDB = StorageService()->SubscriberDeviceDB();
@@ -419,6 +415,10 @@ namespace OpenWifi {
 			deviceDB.OP("subscriberId", ORM::EQ, subscriberId), &deviceQuerySucceeded);
 		if (!inventoryQuerySucceeded || !deviceQuerySucceeded || inventoryCount || deviceCount)
 			return BadRequest(RESTAPI::Errors::StillInUse);
+
+		ProvObjects::SignupEntry signupRecord;
+		if (!StorageService()->SignupDB().GetRecord("userid", subscriberId, signupRecord))
+			return NotFound();
 
 		// Inspect every page before deleting anything. Deleting while advancing an
 		// offset would skip venues, and a populated later page must abort all deletion.
