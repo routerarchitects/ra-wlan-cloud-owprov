@@ -667,35 +667,36 @@ jobs:
       - name: Execute Subscriber RBAC Integration Tests
         run: |
           set -e
-          export OWPROV_INTERNAL_API_KEY="$(printf '%s' 'https://localhost:16005' | sha256sum | cut -d ' ' -f1)"
+          # MicroService::LoadMyConfig uses SHA-256 of SYSTEM_URI_PUBLIC as its access key
+          export OWPROV_INTERNAL_KEY="$(printf '%s' 'https://localhost:16005' | sha256sum | cut -d ' ' -f1)"
 
-          # 1. Seed disposable inventory item for Claim/Unclaim test
-          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/sub-claim-serial-01" \
+          # 1. Seed disposable inventory item for Claim/Unclaim test (12-hex MAC)
+          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/24f5a2000001" \
             -H "Authorization: Bearer root-test-token" \
             -H "Content-Type: application/json" \
-            -d '{"name":"claim-test-device","serialNumber":"sub-claim-serial-01","deviceType":"edgecore_eap101","devClass":"any"}'
+            -d '{"name":"claim-test-device","serialNumber":"24f5a2000001","deviceType":"edgecore_eap101","devClass":"any"}'
 
-          # 2. Seed an owned device for the subscriber
-          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/owned-serial-01" \
+          # 2. Seed an owned device for the subscriber (12-hex MAC)
+          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/24f5a2000002" \
             -H "Authorization: Bearer root-test-token" \
             -H "Content-Type: application/json" \
-            -d '{"name":"owned-device","serialNumber":"owned-serial-01","deviceType":"edgecore_eap101","devClass":"any"}'
+            -d '{"name":"owned-device","serialNumber":"24f5a2000002","deviceType":"edgecore_eap101","devClass":"any"}'
 
           curl -k -s -X POST "https://localhost:16005/api/v1/subscriberDevice/0" \
             -H "Authorization: Bearer subscriber-test-token" \
             -H "Content-Type: application/json" \
-            -d '{"name":"my-owned-router","serialNumber":"owned-serial-01","deviceGroup":"olg"}'
+            -d '{"name":"my-owned-router","serialNumber":"24f5a2000002","deviceGroup":"olg"}'
 
-          # 3. Seed a foreign device owned by another subscriber
-          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/foreign-serial-02" \
+          # 3. Seed a foreign device owned by another subscriber (12-hex MAC)
+          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/24f5a2000003" \
             -H "Authorization: Bearer root-test-token" \
             -H "Content-Type: application/json" \
-            -d '{"name":"foreign-device","serialNumber":"foreign-serial-02","deviceType":"edgecore_eap101","devClass":"any"}'
+            -d '{"name":"foreign-device","serialNumber":"24f5a2000003","deviceType":"edgecore_eap101","devClass":"any"}'
 
-          curl -k -s -X POST "https://localhost:16005/api/v1/subscriberDevice" \
+          curl -k -s -X POST "https://localhost:16005/api/v1/subscriberDevice/0" \
             -H "Authorization: Bearer root-test-token" \
             -H "Content-Type: application/json" \
-            -d '{"name":"foreign-ap","serialNumber":"foreign-serial-02","deviceGroup":"olg","subscriberId":"00000000-0000-0000-0000-000000000099"}'
+            -d '{"name":"foreign-ap","serialNumber":"24f5a2000003","deviceGroup":"olg","subscriberId":"00000000-0000-0000-0000-000000000099"}'
 
           # 4. Execute all tests in the subscriber suite
           go test -v ./...
@@ -705,12 +706,11 @@ jobs:
           SUBSCRIBER_TOKEN: "subscriber-test-token"
           SUBSCRIBER_ID: "00000000-0000-0000-0000-000000000005"
           OWPROV_INTERNAL_URL: "https://localhost:17005/api/v1"
-          OWPROV_INTERNAL_KEY: "$OWPROV_INTERNAL_API_KEY"
           OWPROV_INTERNAL_NAME: "https://owprov-integration-test.local"
           OWPROV_TEST_INSECURE_TLS: "1"
-          SUBSCRIBER_CLAIM_SERIAL: "sub-claim-serial-01"
-          SUBSCRIBER_DEVICE_ID: "owned-serial-01"
-          FOREIGN_SUBSCRIBER_DEVICE_ID: "foreign-serial-02"
+          SUBSCRIBER_CLAIM_SERIAL: "24f5a2000001"
+          SUBSCRIBER_DEVICE_ID: "24f5a2000002"
+          FOREIGN_SUBSCRIBER_DEVICE_ID: "24f5a2000003"
 
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts
