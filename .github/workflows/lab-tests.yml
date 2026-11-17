@@ -687,16 +687,11 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"name":"my-owned-router","serialNumber":"24f5a2000002","deviceGroup":"olg"}'
 
-          # 3. Seed a foreign device owned by another subscriber (12-hex MAC)
+          # 3. Seed a foreign device in inventory (12-hex MAC)
           curl -k -s -X POST "https://localhost:16005/api/v1/inventory/24f5a2000003" \
             -H "Authorization: Bearer root-test-token" \
             -H "Content-Type: application/json" \
             -d '{"name":"foreign-device","serialNumber":"24f5a2000003","deviceType":"edgecore_eap101","devClass":"any"}'
-
-          curl -k -s -X POST "https://localhost:16005/api/v1/subscriberDevice/0" \
-            -H "Authorization: Bearer root-test-token" \
-            -H "Content-Type: application/json" \
-            -d '{"name":"foreign-ap","serialNumber":"24f5a2000003","deviceGroup":"olg","subscriberId":"00000000-0000-0000-0000-000000000099"}'
 
           # 4. Execute all tests in the subscriber suite
           go test -v ./...
@@ -709,6 +704,7 @@ jobs:
           OWPROV_INTERNAL_NAME: "https://owprov-integration-test.local"
           OWPROV_TEST_INSECURE_TLS: "1"
           SUBSCRIBER_CLAIM_SERIAL: "24f5a2000001"
+          SUBSCRIBER_CLAIM_GROUP: "ap"
           SUBSCRIBER_DEVICE_ID: "24f5a2000002"
           FOREIGN_SUBSCRIBER_DEVICE_ID: "24f5a2000003"
 
