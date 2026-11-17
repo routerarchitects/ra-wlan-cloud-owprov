@@ -25,17 +25,20 @@ namespace OpenWifi {
 		auto Prefix = ORM::Escape(O->get("serial_prefix").toString());
 		Poco::toLowerInPlace(Prefix);
 		Logger().information(Poco::format("serial_number_search: %s", Prefix));
-		if (!Prefix.empty() && Prefix.length() < 13) {
-			std::vector<uint64_t> Numbers;
-			SerialNumberCache()->FindNumbers(Prefix, 50, Numbers);
-			Poco::JSON::Array Arr;
-			for (const auto &i : Numbers)
-				Arr.add(Utils::int_to_hex(i));
-			Poco::JSON::Object RetObj;
-			RetObj.set("serialNumbers", Arr);
-			std::ostringstream SS;
-			Poco::JSON::Stringifier::stringify(RetObj, SS);
-			Answer = SS.str();
+		if (!Prefix.empty()) {
+			const std::size_t maxLen = (Prefix.front() == '*') ? 31 : 30;
+			if (Prefix.length() <= maxLen) {
+				std::vector<std::string> Numbers;
+				SerialNumberCache()->FindNumbers(Prefix, 50, Numbers);
+				Poco::JSON::Array Arr;
+				for (const auto &i : Numbers)
+					Arr.add(i);
+				Poco::JSON::Object RetObj;
+				RetObj.set("serialNumbers", Arr);
+				std::ostringstream SS;
+				Poco::JSON::Stringifier::stringify(RetObj, SS);
+				Answer = SS.str();
+			}
 		}
 	}
 

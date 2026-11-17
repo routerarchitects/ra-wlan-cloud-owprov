@@ -23,6 +23,7 @@
 #include "framework/KafkaManager.h"
 #include "framework/KafkaTopics.h"
 #include "framework/utils.h"
+#include "SerialNumberCache.h"
 
 #define TEST_ASSERT(cond, msg)                                                                   \
 	do {                                                                                         \
@@ -597,50 +598,126 @@ static void test_callback_outcome_contract_and_dispatch() {
 	std::cout << "  PASS: test_callback_outcome_contract_and_dispatch" << std::endl;
 }
 
-// Test 17: Verify the serial-number validation rules enforced by
-// AutoDiscovery::ConnectionReceived() (AutoDiscovery.cpp) and
-// InventoryDB::CreateFromConnection() (storage_inventory.cpp).
+// Test 17: Verify serial number compatibility, string-based cache correctness,
+// and Kafka replay vs ACK outcome contracts for supported and malformed serial numbers.
 //
-// Both production paths enforce:
-//   serial.size() != 12 || !Utils::ValidSerialNumber(serial)
-// ensuring exactly 12 hexadecimal characters are accepted as canonical.
-//
-// utils.cpp is not compiled into this test binary because it pulls in unresolvable
-// symbols (AppServiceRegistry, DNS resolver) that have no stubs in this target.
-// The inline copy is intentional and kept minimal to exactly mirror the production gate.
-//
-// KNOWN GAP: The full end-to-end path (Kafka message → ConnectionReceived()
-// → InventoryDB::CreateFromConnection()) requires a live StorageService and is NOT
-// exercised here. DB-layer rejection of an invalid serial cannot be verified in this
-// unit test.
+// Mango Cloud supports 1–30 hexadecimal characters inclusive (^[0-9a-fA-F]{1,30}$),
+// canonicalized to lowercase while preserving leading zeros as identity.
 static void test_malformed_serial_numbers_validation_and_startup_safety() {
 	std::cout << "  Starting test_malformed_serial_numbers_validation_and_startup_safety..." << std::endl;
 
-	// Mirrors the production gate (AutoDiscovery.cpp & storage_inventory.cpp)
+	// 1. Direct validation using production OpenWifi::Utils::ValidSerialNumber
 	auto validateSerial = [](const std::string &serialRaw) -> bool {
 		std::string serial = Poco::toLower(serialRaw);
-		if (serial.size() != 12 ||
-		    !std::all_of(serial.begin(), serial.end(),
-		                 [](unsigned char c) { return std::isxdigit(c); }))
-			return false;
-		return true;
+		return OpenWifi::Utils::ValidSerialNumber(serial);
 	};
 
-	// Valid serials that must be accepted (exactly 12 hex characters)
+	// Boundary length tests: 1, 12, 16, 17, 29, 30 chars
+	TEST_ASSERT(validateSerial("a"), "1-char hex serial must be valid");
+	TEST_ASSERT(validateSerial("0"), "1-char zero serial must be valid");
+	TEST_ASSERT(validateSerial("f"), "1-char 'f' serial must be valid");
 	TEST_ASSERT(validateSerial("24f5a2012345"), "Standard 12-char hex serial must be valid");
 	TEST_ASSERT(validateSerial("0123456789ab"), "Sequential 12-char hex serial must be valid");
-	TEST_ASSERT(validateSerial("AABBCCDDEEFF"), "Uppercase hex serial must be valid (lowercased)");
-	TEST_ASSERT(validateSerial("000000000abc"), "12-char leading-zero hex serial must be valid");
+	TEST_ASSERT(validateSerial("0123456789abcdef"), "16-char hex serial must be valid");
+	TEST_ASSERT(validateSerial("00000000000000001"), "17-char hex serial must be valid");
+	TEST_ASSERT(validateSerial("0123456789abcdef0123456789abc"), "29-char hex serial must be valid");
+	TEST_ASSERT(validateSerial("0123456789abcdef0123456789abcd"), "30-char hex serial must be valid");
 
-	// Malformed / invalid serials that must be rejected before DB operations
+	// Uppercase canonicalization
+	TEST_ASSERT(validateSerial("A"), "1-char uppercase must be valid");
+	TEST_ASSERT(validateSerial("AABBCCDDEEFF"), "Uppercase 12-char hex serial must be valid");
+	TEST_ASSERT(validateSerial("0123456789ABCDEF0123456789ABCD"), "Uppercase 30-char hex serial must be valid");
+
+	// Distinct leading-zero identities
+	std::string s1 = Poco::toLower(std::string("0123456789ab"));
+	std::string s2 = Poco::toLower(std::string("123456789ab"));
+	TEST_ASSERT(validateSerial(s1) && validateSerial(s2), "Both serials must be valid");
+	TEST_ASSERT(s1 != s2, "Leading-zero serial must have distinct identity from without leading zero");
+
+	std::string s3 = Poco::toLower(std::string("00000000000000001"));
+	std::string s4 = Poco::toLower(std::string("1"));
+	TEST_ASSERT(validateSerial(s3) && validateSerial(s4), "17-char with leading zeros and 1-char must both be valid");
+	TEST_ASSERT(s3 != s4, "17-char with leading zeros must be distinct from 1");
+
+	// Malformed / invalid serials rejected
 	TEST_ASSERT(!validateSerial(""), "Empty serial must be rejected");
-	TEST_ASSERT(!validateSerial("123456"), "Short hex serial (< 12 chars) must be rejected");
-	TEST_ASSERT(!validateSerial("ffffffffffffffff"), "16-char hex serial must be rejected (must be exactly 12 chars)");
-	TEST_ASSERT(!validateSerial("00000000000000001"), "17-digit serial must be rejected");
+	TEST_ASSERT(!validateSerial("0123456789abcdef0123456789abcde"), "31-char serial (> 30 chars) must be rejected");
 	TEST_ASSERT(!validateSerial("invalid-serial"), "Serial with hyphens/non-hex must be rejected");
 	TEST_ASSERT(!validateSerial("24:f5:a2:01:23:45"), "Serial with colons must be rejected");
 	TEST_ASSERT(!validateSerial("12345g012345"), "Non-hex character 'g' must be rejected");
 	TEST_ASSERT(!validateSerial("123 56012345"), "Serial with space must be rejected");
+
+	// 2. Direct testing of production OpenWifi::SerialNumberCache singleton
+	auto cache = OpenWifi::SerialNumberCache();
+
+	// Insert supported boundary serial lengths into cache
+	std::vector<std::string> testSerials = {
+		"a",
+		"24f5a2012345",
+		"0123456789abcdef",
+		"00000000000000001",
+		"0123456789abcdef0123456789abc",
+		"0123456789abcdef0123456789abcd"
+	};
+	for (const auto &sn : testSerials) {
+		cache->AddSerialNumber(sn, "AP");
+	}
+
+	// Verify all exist in production cache
+	TEST_ASSERT(cache->NumberExists("a"), "Cache must find 1-char serial");
+	TEST_ASSERT(cache->NumberExists("24f5a2012345"), "Cache must find 12-char serial");
+	TEST_ASSERT(cache->NumberExists("0123456789abcdef"), "Cache must find 16-char serial");
+	TEST_ASSERT(cache->NumberExists("00000000000000001"), "Cache must find 17-char serial without overflow");
+	TEST_ASSERT(cache->NumberExists("0123456789abcdef0123456789abc"), "Cache must find 29-char serial");
+	TEST_ASSERT(cache->NumberExists("0123456789abcdef0123456789abcd"), "Cache must find 30-char serial");
+
+	// Uppercase lookup matches lowercase in cache
+	TEST_ASSERT(cache->NumberExists("A"), "Cache must find uppercase 1-char serial");
+	TEST_ASSERT(cache->NumberExists("24F5A2012345"), "Cache must find uppercase 12-char serial");
+	TEST_ASSERT(cache->NumberExists("00000000000000001"), "Cache must find 17-char serial");
+
+	// Uppercase insertion stored as lowercase in cache
+	cache->AddSerialNumber("AABBCCDDEEFF", "AP");
+	auto copy = cache->GetCacheCopy();
+	TEST_ASSERT(std::find(copy.begin(), copy.end(), "aabbccddeeff") != copy.end(),
+		"Uppercase serial must be stored in lowercase in cache");
+	TEST_ASSERT(std::find(copy.begin(), copy.end(), "AABBCCDDEEFF") == copy.end(),
+		"Uppercase serial must NOT be stored in uppercase in cache");
+	cache->DeleteSerialNumber("AABBCCDDEEFF");
+	TEST_ASSERT(!cache->NumberExists("aabbccddeeff"),
+		"Deleting via uppercase must remove the lowercase entry");
+
+	// Distinct leading-zero identities in production cache
+	cache->AddSerialNumber("0123456789ab", "AP");
+	cache->AddSerialNumber("123456789ab", "AP");
+	TEST_ASSERT(cache->NumberExists("0123456789ab"), "Cache must contain leading-zero serial");
+	TEST_ASSERT(cache->NumberExists("123456789ab"), "Cache must contain without-leading-zero serial");
+	cache->DeleteSerialNumber("123456789ab");
+	TEST_ASSERT(!cache->NumberExists("123456789ab"), "Deleted serial without leading zero must no longer exist");
+	TEST_ASSERT(cache->NumberExists("0123456789ab"), "Serial with leading zero must retain separate identity and remain in cache");
+
+	// Prefix search in production cache
+	std::vector<std::string> prefixMatches;
+	cache->FindNumbers("0123456789abcdef0123456789", 10, prefixMatches);
+	TEST_ASSERT(prefixMatches.size() == 2, "Prefix match must return 29- and 30-char serials");
+
+	// Wildcard suffix search (*suffix) in production cache
+	std::vector<std::string> suffixMatches;
+	cache->FindNumbers("*abcd", 10, suffixMatches);
+	TEST_ASSERT(!suffixMatches.empty() && suffixMatches[0] == "0123456789abcdef0123456789abcd",
+		"Wildcard suffix search must find 30-char serial");
+
+	// Wildcard suffix search with '*' + full 30-char serial (31 chars total)
+	std::vector<std::string> fullSuffixMatches;
+	cache->FindNumbers("*0123456789abcdef0123456789abcd", 10, fullSuffixMatches);
+	TEST_ASSERT(!fullSuffixMatches.empty() && fullSuffixMatches[0] == "0123456789abcdef0123456789abcd",
+		"Wildcard suffix search with 30-char suffix (* + 30 chars = 31 chars) must succeed");
+
+	// Clean up production cache test entries
+	for (const auto &sn : testSerials) {
+		cache->DeleteSerialNumber(sn);
+	}
+	cache->DeleteSerialNumber("0123456789ab");
 
 	std::cout << "  PASS: test_malformed_serial_numbers_validation_and_startup_safety" << std::endl;
 }

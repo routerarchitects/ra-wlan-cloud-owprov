@@ -184,7 +184,7 @@ namespace OpenWifi {
 										   const bool isConnection) {
 
 		const std::string SerialNumber = Poco::toLower(SerialNumberRaw);
-		if (SerialNumber.size() != 12 || !Utils::ValidSerialNumber(SerialNumber)) {
+		if (!Utils::ValidSerialNumber(SerialNumber)) {
 			Logger().error(fmt::format(
 				"CreateFromConnection called with invalid serial number '{}'.", SerialNumberRaw));
 			return false;
@@ -476,10 +476,8 @@ namespace OpenWifi {
 		// get a local copy of the cache - this could be expensive.
 		auto C = SerialNumberCache()->GetCacheCopy();
 
-		for (const auto &i : C) {
-			ProvObjects::InventoryTag Tag;
+		for (const auto &SerialNumber : C) {
 			ProvObjects::DeviceRules Rules;
-			std::string SerialNumber = Utils::IntToSerialNumber(i);
 			if (EvaluateDeviceSerialNumberRules(SerialNumber, Rules)) {
 				if (Rules.rrm != "no" && Rules.rrm != "inherit")
 					DeviceList.push_back(SerialNumber);

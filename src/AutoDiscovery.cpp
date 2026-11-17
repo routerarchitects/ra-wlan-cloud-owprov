@@ -142,7 +142,7 @@ namespace OpenWifi {
 			}
 
 			const std::string LowerSerial = Poco::toLower(SerialNumber);
-			if (LowerSerial.size() != 12 || !Utils::ValidSerialNumber(LowerSerial)) {
+			if (!Utils::ValidSerialNumber(LowerSerial)) {
 				return fail(Types::KafkaHandlerOutcome::NonRetryableFailure,
 					fmt::format("Invalid or malformed serial number '{}' on 'connection' topic, Key: {}", SerialNumber, Key));
 			}

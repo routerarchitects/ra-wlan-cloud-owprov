@@ -33,11 +33,6 @@ namespace OpenWifi::Utils {
 		return true;
 	}
 
-	[[nodiscard]] bool ValidSerialNumber(const std::string &Serial) {
-		return ((Serial.size() < uCentralProtocol::SERIAL_NUMBER_LENGTH) &&
-				std::all_of(Serial.begin(), Serial.end(), [](auto i) { return std::isxdigit(i); }));
-	}
-
 	[[nodiscard]] bool ValidSerialNumbers(const std::vector<std::string> &numbers) {
 		return std::all_of(numbers.begin(),numbers.end(),[](auto &number) {return ValidSerialNumber(number);});
 	}

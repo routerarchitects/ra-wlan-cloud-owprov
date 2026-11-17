@@ -5,7 +5,11 @@
 #pragma once
 
 #include "framework/SubSystemServer.h"
+#include "framework/utils.h"
+#include <algorithm>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace OpenWifi {
 	class SerialNumberCache : public SubSystemServer {
@@ -20,14 +24,15 @@ namespace OpenWifi {
 		void AddSerialNumber(const std::string &SerialNumber,
 							 [[maybe_unused]] const std::string &DeviceType);
 		void DeleteSerialNumber(const std::string &SerialNumber);
-		void FindNumbers(const std::string &SerialNumber, uint HowMany, std::vector<uint64_t> &A);
-		inline std::vector<uint64_t> GetCacheCopy() {
+		void FindNumbers(const std::string &SerialNumber, uint HowMany, std::vector<std::string> &A);
+		inline std::vector<std::string> GetCacheCopy() {
 			std::lock_guard G(Mutex_);
 			return SNs_;
 		}
-		inline bool NumberExists(uint64_t SerialNumber) {
+		inline bool NumberExists(const std::string &SerialNumber) {
 			std::lock_guard G(Mutex_);
-			return std::find(SNs_.begin(), SNs_.end(), SerialNumber) != SNs_.end();
+			auto S = Poco::toLower(SerialNumber);
+			return std::binary_search(SNs_.begin(), SNs_.end(), S);
 		}
 
 		static inline std::string ReverseSerialNumber(const std::string &S) {
@@ -37,11 +42,11 @@ namespace OpenWifi {
 		}
 
 	  private:
-		std::vector<uint64_t> SNs_;
-		std::vector<uint64_t> Reverse_SNs_;
+		std::vector<std::string> SNs_;
+		std::vector<std::string> Reverse_SNs_;
 
-		void ReturnNumbers(const std::string &S, uint HowMany, const std::vector<uint64_t> &SNArr,
-						   std::vector<uint64_t> &A, bool ReverseResult);
+		void ReturnNumbers(const std::string &S, uint HowMany, const std::vector<std::string> &SNArr,
+						   std::vector<std::string> &A, bool ReverseResult);
 
 		SerialNumberCache() noexcept
 			: SubSystemServer("SerialNumberCache", "SNCACHE-SVR", "serialcache") {
