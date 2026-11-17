@@ -277,7 +277,7 @@ namespace OpenWifi {
 			}
 			if (StorageService()->SubscriberDeviceDB().Exists("serialNumber", macAddress) ||
 				StorageService()->InventoryDB().Exists("serialNumber", macAddress) ||
-				StorageService()->SignupDB().Exists("macAddress", macAddress)) {
+				(SE.macAddress != macAddress && StorageService()->SignupDB().Exists("macAddress", macAddress))) {
 				return BadRequest(RESTAPI::Errors::RecordNotUpdated);
 			}
 			poco_information(Logger(), fmt::format("Updating Signup device to [{}] for subscriber: [{}].", macAddress, SE.email));

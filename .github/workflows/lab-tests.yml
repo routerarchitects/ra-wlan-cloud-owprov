@@ -663,6 +663,55 @@ jobs:
           TOKEN_ADMIN_OPERATOR_A: "Bearer user-admin-operator-a-token"
           TOKEN_VENUE_SHADOWED: "Bearer user-venue-shadowed-token"
 
+      # ── Run Subscriber RBAC Integration Tests (Auto-Seeded) ─────────────────
+      - name: Execute Subscriber RBAC Integration Tests
+        run: |
+          set -e
+          export OWPROV_INTERNAL_API_KEY="$(printf '%s' 'https://localhost:16005' | sha256sum | cut -d ' ' -f1)"
+
+          # 1. Seed disposable inventory item for Claim/Unclaim test
+          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/sub-claim-serial-01" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"claim-test-device","serialNumber":"sub-claim-serial-01","deviceType":"edgecore_eap101","devClass":"any"}'
+
+          # 2. Seed an owned device for the subscriber
+          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/owned-serial-01" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"owned-device","serialNumber":"owned-serial-01","deviceType":"edgecore_eap101","devClass":"any"}'
+
+          curl -k -s -X POST "https://localhost:16005/api/v1/subscriberDevice/0" \
+            -H "Authorization: Bearer subscriber-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"my-owned-router","serialNumber":"owned-serial-01","deviceGroup":"olg"}'
+
+          # 3. Seed a foreign device owned by another subscriber
+          curl -k -s -X POST "https://localhost:16005/api/v1/inventory/foreign-serial-02" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"foreign-device","serialNumber":"foreign-serial-02","deviceType":"edgecore_eap101","devClass":"any"}'
+
+          curl -k -s -X POST "https://localhost:16005/api/v1/subscriberDevice" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"foreign-ap","serialNumber":"foreign-serial-02","deviceGroup":"olg","subscriberId":"00000000-0000-0000-0000-000000000099"}'
+
+          # 4. Execute all tests in the subscriber suite
+          go test -v ./...
+        working-directory: ${{ github.workspace }}/tests/subscriber_rbac
+        env:
+          OWPROV_SUBSCRIBER_URL: "https://localhost:16005/api/v1"
+          SUBSCRIBER_TOKEN: "subscriber-test-token"
+          SUBSCRIBER_ID: "00000000-0000-0000-0000-000000000005"
+          OWPROV_INTERNAL_URL: "https://localhost:17005/api/v1"
+          OWPROV_INTERNAL_KEY: "$OWPROV_INTERNAL_API_KEY"
+          OWPROV_INTERNAL_NAME: "https://owprov-integration-test.local"
+          OWPROV_TEST_INSECURE_TLS: "1"
+          SUBSCRIBER_CLAIM_SERIAL: "sub-claim-serial-01"
+          SUBSCRIBER_DEVICE_ID: "owned-serial-01"
+          FOREIGN_SUBSCRIBER_DEVICE_ID: "foreign-serial-02"
+
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts
         if: always()

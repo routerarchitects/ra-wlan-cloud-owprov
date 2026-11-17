@@ -377,6 +377,10 @@ namespace OpenWifi {
 				return false;
 			}
 			newObject.deviceType = inventory.deviceType;
+			newObject.managementPolicy = inventory.managementPolicy;
+			newObject.deviceRules = inventory.deviceRules;
+			newObject.state = inventory.state;
+			newObject.locale = inventory.locale;
 		}
 
 		return true;
