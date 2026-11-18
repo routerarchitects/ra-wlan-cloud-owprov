@@ -871,6 +871,20 @@ namespace OpenWifi {
 			auto Allowed = !InternalName.empty() && !ApiKey.empty() &&
 						   MicroServiceIsValidAPIKEY(*Request);
 			if (!Allowed) {
+				if (Request->has("Authorization") && ValidateBearerToken(Expired, Contacted, Sub)) {
+					if (Server_.LogIt(Request->getMethod(), true)) {
+						poco_debug(
+							Logger_,
+							fmt::format("I-REQ-ALLOWED({}): TID={} Service='{}' User='{}' Method={} "
+										"Path={}",
+										Utils::FormatIPv6(Request->clientAddress().toString()),
+										TransactionId_,
+										InternalName.empty() ? "bearer-only" : InternalName,
+										UserInfo_.userinfo.email, Request->getMethod(),
+										Request->getURI()));
+					}
+					return true;
+				}
 				Contacted = true;
 				if (Server_.LogBadTokens(false)) {
 					poco_debug(Logger_,
