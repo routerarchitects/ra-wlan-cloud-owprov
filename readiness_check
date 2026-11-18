@@ -13,6 +13,10 @@ then
   exit 1
 fi
 
+# Verify GroupConsumer operational readiness on the local instance
+export ALB_PORT=$(grep 'alb.port' $OWPROV_CONFIG/owprov.properties | awk -F '=' '{print $2}' | xargs | envsubst)
+curl -fsS "http://localhost:${ALB_PORT}/ready"
+
 if [[ "${READINESS_METHOD}" == "systeminfo" ]]
 then
   if [[ "${OWSEC}" == "" ]]
@@ -59,7 +63,4 @@ then
   exit_code=$?
   jq < /tmp/result.json
   exit $exit_code
-else
-  export ALB_PORT=$(grep 'alb.port' $OWPROV_CONFIG/owprov.properties | awk -F '=' '{print $2}' | xargs | envsubst)
-  curl localhost:$ALB_PORT
 fi

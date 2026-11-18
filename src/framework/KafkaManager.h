@@ -88,6 +88,9 @@ namespace OpenWifi {
 
 		[[nodiscard]] bool IsRunning() const { return Running_; }
 		[[nodiscard]] bool HasFailed() const { return Failed_; }
+		[[nodiscard]] bool IsReady() const;
+		[[nodiscard]] std::string ReadinessStatus() const;
+		[[nodiscard]] std::string SanitizedReadinessReason() const;
 		[[nodiscard]] std::string FailureReason() const;
 		[[nodiscard]] std::string StatusString() const;
 		[[nodiscard]] std::set<std::string> Topics() const;
@@ -120,6 +123,8 @@ namespace OpenWifi {
 		mutable std::atomic_bool Running_ = false;
 		mutable std::atomic_bool Assigned_ = false;
 		mutable std::atomic_bool Failed_ = false;
+		mutable std::atomic_bool Started_ = false;
+		mutable std::atomic_bool StopRequested_ = false;
 		uint64_t 				FunctionId_ = 1;
 		std::unique_ptr<cppkafka::Consumer> 			Consumer_;
 		std::set<std::string>	Topics_;
@@ -205,6 +210,9 @@ namespace OpenWifi {
 		[[nodiscard]] bool HasGroupConsumerFailed() const { return GroupConsumerThr_.HasFailed(); }
 		[[nodiscard]] std::string GroupConsumerFailureReason() const { return GroupConsumerThr_.FailureReason(); }
 		[[nodiscard]] std::string GroupConsumerStatus() const { return GroupConsumerThr_.StatusString(); }
+		[[nodiscard]] bool IsGroupConsumerReady() const;
+		[[nodiscard]] std::string GroupConsumerReadinessStatus() const;
+		[[nodiscard]] std::string GroupConsumerSanitizedReason() const;
 		[[nodiscard]] KafkaConsumer &BroadcastConsumer() { return BroadcastConsumerThr_; }
 		[[nodiscard]] KafkaProducer &Producer() { return ProducerThr_; }
 

@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,7 +21,17 @@
 #include "Poco/UUIDGenerator.h"
 #include "Poco/Data/Session.h"
 #include "Poco/Data/SQLite/Connector.h"
+#include "Poco/Net/HTTPClientSession.h"
+#include "Poco/Net/HTTPRequest.h"
+#include "Poco/Net/HTTPResponse.h"
+#include "Poco/Net/HTTPServer.h"
+#include "Poco/Net/HTTPServerParams.h"
+#include "Poco/Net/ServerSocket.h"
+#include "Poco/StreamCopier.h"
+#include "framework/ALBserver.h"
+#define private public
 #include "framework/KafkaManager.h"
+#undef private
 #include "framework/KafkaTopics.h"
 #include "framework/utils.h"
 #include "SerialNumberCache.h"
@@ -35,6 +46,55 @@
 	} while (0)
 
 namespace OpenWifi {
+
+	struct KafkaTestAccessor {
+		static bool HasStarted(const KafkaConsumer &c) { return c.Started_; }
+		static bool IsStopRequested(const KafkaConsumer &c) { return c.StopRequested_; }
+		static uint64_t RegisterTopicWatcher(KafkaConsumer &c, const std::string &topic, KafkaConsumer::AckCallback f) {
+			return c.RegisterTopicWatcher(topic, std::move(f));
+		}
+		static void UnregisterTopicWatcher(KafkaConsumer &c, const std::string &topic, uint64_t id) {
+			c.UnregisterTopicWatcher(topic, id);
+		}
+		static void SimulateUnexpectedStop(KafkaConsumer &c) {
+			{
+				std::lock_guard lock(c.ConsumerMutex_);
+				c.Running_ = false;
+				c.StopRequested_ = false;
+				c.TopicCV_.notify_all();
+			}
+			try {
+				c.Worker_.join();
+			} catch (...) {
+			}
+			std::lock_guard lock(c.ConsumerMutex_);
+			c.Started_ = true;
+			c.Running_ = false;
+			c.StopRequested_ = false;
+			c.Failed_ = false;
+		}
+		static void SimulateFailure(KafkaConsumer &c, const std::string &reason) {
+			{
+				std::lock_guard lock(c.ConsumerMutex_);
+				c.Running_ = false;
+				c.StopRequested_ = false;
+				c.TopicCV_.notify_all();
+			}
+			try {
+				c.Worker_.join();
+			} catch (...) {
+			}
+			std::lock_guard lock(c.ConsumerMutex_);
+			c.Started_ = true;
+			c.Running_ = false;
+			c.StopRequested_ = false;
+			c.Failed_ = true;
+			c.FailureReason_ = reason;
+		}
+		static void SetKafkaEnabled(bool e) {
+			KafkaManager()->KafkaEnabled_ = e;
+		}
+	};
 
 	static std::string g_MockGroupId = "prov";
 	static std::string g_MockClientId = "prov1";
@@ -912,6 +972,16 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 		TEST_ASSERT(consumer.HasFailed(), "GroupConsumer must be marked Failed after retries exhausted");
 		TEST_ASSERT(consumer.FailureReason().find("Processing_retries_exhausted") != std::string::npos,
 			"Failure reason must indicate retries exhausted: " + consumer.FailureReason());
+		TEST_ASSERT(!consumer.IsReady(), "Exhausted consumer must not be ready");
+		TEST_ASSERT(consumer.ReadinessStatus() == "FAILED", "ReadinessStatus must be FAILED");
+		TEST_ASSERT(consumer.SanitizedReadinessReason() == "group_consumer_failed",
+			"Sanitized reason must be group_consumer_failed");
+		TEST_ASSERT(!KafkaManager()->IsGroupConsumerReady(),
+			"KafkaManager must report not ready when GroupConsumer failed");
+		TEST_ASSERT(KafkaManager()->GroupConsumerReadinessStatus() == "FAILED",
+			"KafkaManager status must be FAILED");
+		TEST_ASSERT(KafkaManager()->GroupConsumerSanitizedReason() == "group_consumer_failed",
+			"KafkaManager sanitized reason must be group_consumer_failed");
 
 		KafkaManager()->UnregisterTopicWatcher(retryTopic, wId, KafkaConsumerType::Group);
 		consumer.Stop();
@@ -932,6 +1002,7 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 		std::string tokenNonRetry = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
 		g_MockGroupId = "test_non_retry_grp_" + tokenNonRetry;
 		std::atomic<int> nonRetryAttempts{0};
+		std::atomic<bool> failAttempt{true};
 
 		const std::string nonRetryKey     = "k_non_retry_" + tokenNonRetry;
 		const std::string nonRetryPayload = "non_retry_payload_" + tokenNonRetry;
@@ -941,8 +1012,11 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 				TEST_ASSERT(key == nonRetryKey, "Non-retry scenario must receive exact key");
 				TEST_ASSERT(payload == nonRetryPayload, "Non-retry scenario must receive exact payload");
 				nonRetryAttempts++;
-				reason = "simulated non-retryable invalid schema";
-				return Types::KafkaHandlerOutcome::NonRetryableFailure;
+				if (failAttempt) {
+					reason = "simulated non-retryable invalid schema";
+					return Types::KafkaHandlerOutcome::NonRetryableFailure;
+				}
+				return Types::KafkaHandlerOutcome::Success;
 			},
 			KafkaConsumerType::Group);
 
@@ -960,6 +1034,54 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 		TEST_ASSERT(consumer.HasFailed(), "GroupConsumer must be marked Failed on NonRetryableFailure");
 		TEST_ASSERT(consumer.FailureReason().find("non_retryable") != std::string::npos,
 			"Failure reason must indicate non_retryable: " + consumer.FailureReason());
+		TEST_ASSERT(!consumer.IsReady(), "NonRetryableFailure consumer must not be ready");
+		TEST_ASSERT(consumer.ReadinessStatus() == "FAILED", "ReadinessStatus must be FAILED");
+		TEST_ASSERT(consumer.SanitizedReadinessReason() == "group_consumer_failed",
+			"Sanitized reason must be group_consumer_failed");
+
+		// Wait for worker thread to naturally exit on permanent failure
+		auto workerExitWait = std::chrono::steady_clock::now();
+		while (consumer.IsRunning() &&
+		       std::chrono::steady_clock::now() - workerExitWait < std::chrono::seconds(5)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		TEST_ASSERT(!consumer.IsRunning(), "Worker thread must exit naturally on permanent failure");
+		TEST_ASSERT(consumer.HasFailed(), "Failed state must persist after worker thread exits");
+		TEST_ASSERT(!consumer.IsReady(), "Exited failed consumer must not be ready");
+
+		// Stop cleanly to join worker thread before recovery Start()
+		consumer.Stop();
+		TEST_ASSERT(consumer.HasFailed(), "Stop() must preserve FAILED status until Start()");
+		TEST_ASSERT(!consumer.IsReady(), "Stopped failed consumer must remain not-ready");
+
+		// Recovery verification: call Start() after permanent failure.
+		// Start() must reset Failed_, clear FailureReason_, restart worker thread, and restore RUNNING / IsReady().
+		failAttempt = false;
+		consumer.Start();
+
+		auto recoverWait = std::chrono::steady_clock::now();
+		while (!consumer.IsReady() &&
+		       std::chrono::steady_clock::now() - recoverWait < std::chrono::seconds(10)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		TEST_ASSERT(!consumer.HasFailed(), "Failed flag must be cleared on Start() recovery");
+		TEST_ASSERT(consumer.FailureReason().empty(), "FailureReason must be cleared on Start() recovery");
+		TEST_ASSERT(consumer.IsRunning(), "Consumer must be running after recovery Start()");
+		TEST_ASSERT(consumer.IsReady(), "Recovered consumer must be ready");
+		TEST_ASSERT(consumer.ReadinessStatus() == "RUNNING", "Readiness status must recover to RUNNING");
+		TEST_ASSERT(consumer.SanitizedReadinessReason().empty(), "Sanitized reason must be empty after recovery");
+
+		// Verify the uncommitted message was replayed upon recovery and succeeded
+		auto replayWait = std::chrono::steady_clock::now();
+		while (nonRetryAttempts < 2 &&
+		       std::chrono::steady_clock::now() - replayWait < std::chrono::seconds(10)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		TEST_ASSERT(nonRetryAttempts == 2, "Uncommitted message must be replayed and processed after recovery");
+
+		// And independent offset query proves the replayed message committed
+		int64_t offsetAfterRecovery = queryCommittedOffsetIndependently(nonRetryTopic, 0);
+		TEST_ASSERT(offsetAfterRecovery >= 1, "Offset must be committed after successful replay on recovery");
 
 		KafkaManager()->UnregisterTopicWatcher(nonRetryTopic, wId, KafkaConsumerType::Group);
 		consumer.Stop();
@@ -1000,6 +1122,9 @@ static void test_broker_backed_kafka_commit_retry_and_shutdown() {
 		// Signal shutdown during retry backoff
 		consumer.Stop();
 		TEST_ASSERT(!consumer.IsRunning(), "Consumer must stop immediately on Stop()");
+		TEST_ASSERT(!consumer.IsReady(), "Stopped consumer must not be ready");
+		TEST_ASSERT(consumer.ReadinessStatus() == "STOPPING", "ReadinessStatus must be STOPPING");
+		TEST_ASSERT(consumer.SanitizedReadinessReason() == "stopping", "Sanitized reason must be stopping");
 
 		// Query offset via independent consumer — handle is gone, verifies no spurious commit.
 		// queryCommittedOffsetIndependently() throws on broker-query failure, so a negative
@@ -1408,6 +1533,10 @@ static void test_broker_backed_commit_failure_isolation() {
 			"Failure reason must indicate Commit_retries_exhausted: " + consumer.FailureReason());
 		TEST_ASSERT(consumer.FailureReason().find(expectedKafkaErr) != std::string::npos,
 			"Failure reason must verify the exact Kafka error: " + consumer.FailureReason());
+		TEST_ASSERT(!consumer.IsReady(), "Commit exhausted consumer must not be ready");
+		TEST_ASSERT(consumer.ReadinessStatus() == "FAILED", "ReadinessStatus must be FAILED");
+		TEST_ASSERT(consumer.SanitizedReadinessReason() == "group_consumer_failed",
+			"Sanitized reason must be group_consumer_failed");
 
 		// Verify database state: row exists, write_count == 1, never re-inserted
 		int exRowCount = 0;
@@ -1436,6 +1565,274 @@ static void test_broker_backed_commit_failure_isolation() {
 	std::cout << "  PASS: test_broker_backed_commit_failure_isolation" << std::endl;
 }
 
+static void test_group_consumer_readiness_lifecycle() {
+	std::cout << "  Starting test_group_consumer_readiness_lifecycle..." << std::endl;
+
+	KafkaConsumer consumer(KafkaConsumerType::Group);
+
+	// 1. Unstarted state
+	TEST_ASSERT(!KafkaTestAccessor::HasStarted(consumer), "Consumer must not be started initially");
+	TEST_ASSERT(!consumer.IsRunning(), "Consumer must not be running initially");
+	TEST_ASSERT(!consumer.HasFailed(), "Consumer must not be failed initially");
+	TEST_ASSERT(!consumer.IsReady(), "Unstarted consumer must not be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "STARTING", "Unstarted consumer status must be STARTING");
+	TEST_ASSERT(consumer.SanitizedReadinessReason() == "not_started", "Unstarted reason must be not_started");
+
+	// 2. Start() without registered topics -> worker thread runs waiting for topics, but IsReady() must be FALSE
+	consumer.Start();
+	TEST_ASSERT(consumer.IsRunning(), "Consumer worker must be running after Start()");
+	TEST_ASSERT(!KafkaTestAccessor::HasStarted(consumer), "Consumer must not have Started_ true while waiting for topics");
+	TEST_ASSERT(!consumer.HasFailed(), "Consumer must not be failed after Start()");
+	TEST_ASSERT(!KafkaTestAccessor::IsStopRequested(consumer), "StopRequested must be false after Start()");
+	TEST_ASSERT(!consumer.IsReady(), "Consumer without topics must NOT be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "STARTING", "Consumer without topics status must be STARTING");
+	TEST_ASSERT(consumer.SanitizedReadinessReason() == "not_started", "Consumer without topics reason must be not_started");
+
+	// 3. Register a topic watcher -> thread subscribes, sets Started_ = true, becomes READY
+#ifdef OWPROV_KAFKA_TESTING
+	uint64_t wId = KafkaTestAccessor::RegisterTopicWatcher(consumer, "test_readiness_lifecycle_topic",
+		[](const std::string &, const std::string &, std::string &) {
+			return Types::KafkaHandlerOutcome::Success;
+		});
+
+	auto readyWait = std::chrono::steady_clock::now();
+	while (!consumer.IsReady() &&
+	       std::chrono::steady_clock::now() - readyWait < std::chrono::seconds(5)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(KafkaTestAccessor::HasStarted(consumer), "Consumer must have Started_ true once subscribed");
+	TEST_ASSERT(consumer.IsReady(), "Subscribed running consumer must be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "RUNNING", "Running consumer status must be RUNNING");
+	TEST_ASSERT(consumer.SanitizedReadinessReason().empty(), "Running consumer sanitized reason must be empty");
+
+	// 4. Orderly Stop
+	consumer.Stop();
+	TEST_ASSERT(!consumer.IsRunning(), "Consumer must not be running after Stop()");
+	TEST_ASSERT(!consumer.HasFailed(), "Orderly stop must NOT set failed");
+	TEST_ASSERT(KafkaTestAccessor::IsStopRequested(consumer), "StopRequested must be true after Stop()");
+	TEST_ASSERT(!consumer.IsReady(), "Stopped consumer must not be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "STOPPING", "Status during/after stop request must be STOPPING");
+	TEST_ASSERT(consumer.SanitizedReadinessReason() == "stopping", "Reason must be stopping");
+
+	// 5. Recovery / Restart after stop (watcher still registered)
+	consumer.Start();
+	readyWait = std::chrono::steady_clock::now();
+	while (!consumer.IsReady() &&
+	       std::chrono::steady_clock::now() - readyWait < std::chrono::seconds(5)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(consumer.IsRunning(), "Consumer must be running after restart");
+	TEST_ASSERT(!KafkaTestAccessor::IsStopRequested(consumer), "StopRequested must be cleared on restart");
+	TEST_ASSERT(!consumer.HasFailed(), "Consumer must not be failed on restart");
+	TEST_ASSERT(consumer.IsReady(), "Restarted consumer must be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "RUNNING", "Restarted consumer status must be RUNNING");
+
+	// 6. Unexpected stop (via test-only helper)
+	KafkaTestAccessor::SimulateUnexpectedStop(consumer);
+	TEST_ASSERT(!consumer.IsRunning(), "Consumer must not be running");
+	TEST_ASSERT(!KafkaTestAccessor::IsStopRequested(consumer), "StopRequested must be false in unexpected stop");
+	TEST_ASSERT(!consumer.HasFailed(), "Failed must be false in unexpected stop");
+	TEST_ASSERT(KafkaTestAccessor::HasStarted(consumer), "Started must be true in unexpected stop");
+	TEST_ASSERT(!consumer.IsReady(), "Unexpectedly stopped consumer must not be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "STOPPED", "Status must be STOPPED");
+	TEST_ASSERT(consumer.SanitizedReadinessReason() == "unexpected_stop", "Reason must be unexpected_stop");
+
+	// Recover again from unexpected stop
+	consumer.Start();
+	readyWait = std::chrono::steady_clock::now();
+	while (!consumer.IsReady() &&
+	       std::chrono::steady_clock::now() - readyWait < std::chrono::seconds(5)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(consumer.IsReady(), "Consumer must recover from unexpected stop");
+	TEST_ASSERT(consumer.ReadinessStatus() == "RUNNING", "Status must be RUNNING");
+
+	// 7. Failure state and recovery
+	KafkaTestAccessor::SimulateFailure(consumer, "Permanent GroupConsumer failure [non_retryable]");
+	TEST_ASSERT(!consumer.IsRunning(), "Consumer must not be running in failed state");
+	TEST_ASSERT(consumer.HasFailed(), "Consumer must be failed after failure");
+	TEST_ASSERT(!consumer.IsReady(), "Failed consumer must not be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "FAILED", "Failed consumer status must be FAILED");
+	TEST_ASSERT(consumer.SanitizedReadinessReason() == "group_consumer_failed",
+		"Sanitized reason must be group_consumer_failed");
+
+	// Stop after failure preserves FAILED status until Start()
+	consumer.Stop();
+	TEST_ASSERT(consumer.HasFailed(), "Consumer must remain failed after Stop()");
+	TEST_ASSERT(!consumer.IsReady(), "Failed consumer after Stop() must remain not-ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "FAILED", "Failed consumer status takes precedence over STOPPING");
+	TEST_ASSERT(consumer.SanitizedReadinessReason() == "group_consumer_failed",
+		"Sanitized reason must remain group_consumer_failed");
+
+	// Recovery / Restart after failure: Start() clears Failed_ and restores RUNNING / IsReady()
+	consumer.Start();
+	readyWait = std::chrono::steady_clock::now();
+	while (!consumer.IsReady() &&
+	       std::chrono::steady_clock::now() - readyWait < std::chrono::seconds(5)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(!consumer.HasFailed(), "Failed flag must be reset on Start() recovery");
+	TEST_ASSERT(consumer.FailureReason().empty(), "FailureReason must be cleared on Start() recovery");
+	TEST_ASSERT(consumer.IsRunning(), "Consumer must be running after recovery Start()");
+	TEST_ASSERT(consumer.IsReady(), "Recovered consumer must be ready");
+	TEST_ASSERT(consumer.ReadinessStatus() == "RUNNING", "Recovered consumer status must be RUNNING");
+	TEST_ASSERT(consumer.SanitizedReadinessReason().empty(), "Sanitized reason must be empty after recovery");
+
+	KafkaTestAccessor::UnregisterTopicWatcher(consumer, "test_readiness_lifecycle_topic", wId);
+#endif
+
+	consumer.Stop();
+
+	// 8. KafkaManager disabled readiness
+#ifdef OWPROV_KAFKA_TESTING
+	KafkaTestAccessor::SetKafkaEnabled(false);
+	TEST_ASSERT(KafkaManager()->IsGroupConsumerReady(), "Disabled Kafka must report ready");
+	TEST_ASSERT(KafkaManager()->GroupConsumerReadinessStatus() == "DISABLED",
+		"Disabled Kafka status must be DISABLED");
+	TEST_ASSERT(KafkaManager()->GroupConsumerSanitizedReason().empty(),
+		"Disabled Kafka reason must be empty");
+	KafkaTestAccessor::SetKafkaEnabled(true);
+#endif
+
+	std::cout << "  PASS: test_group_consumer_readiness_lifecycle" << std::endl;
+}
+
+static void test_alb_health_endpoint_liveness_and_readiness() {
+	const char *broker = std::getenv("KAFKA_BROKERLIST");
+	if (!broker || std::string(broker).empty()) {
+		std::cout << "  SKIPPED: test_alb_health_endpoint_liveness_and_readiness (KAFKA_BROKERLIST not set)" << std::endl;
+		return;
+	}
+
+	std::cout << "  Running test_alb_health_endpoint_liveness_and_readiness..." << std::endl;
+
+	Poco::Net::ServerSocket srvSocket(0);
+	Poco::UInt16 port = srvSocket.address().port();
+	Poco::Net::HTTPServerParams *params = new Poco::Net::HTTPServerParams;
+	Poco::Logger &albLogger = Poco::Logger::get("TEST-ALB");
+	Poco::Net::HTTPServer server(new ALBRequestHandlerFactory(albLogger), srvSocket, params);
+	server.start();
+
+	auto sendGet = [&](const std::string &path, int &status, std::string &body) {
+		Poco::Net::HTTPClientSession session("127.0.0.1", port);
+		Poco::Net::HTTPRequest request(Poco::Net::HTTPRequest::HTTP_GET, path, Poco::Net::HTTPMessage::HTTP_1_1);
+		request.setKeepAlive(false);
+		session.sendRequest(request);
+		Poco::Net::HTTPResponse response;
+		std::istream &rs = session.receiveResponse(response);
+		status = response.getStatus();
+		std::ostringstream ss;
+		Poco::StreamCopier::copyStream(rs, ss);
+		body = ss.str();
+	};
+
+	// 1. Kafka disabled: Liveness (/) == 200, Readiness (/ready) == 200 with status DISABLED
+#ifdef OWPROV_KAFKA_TESTING
+	KafkaTestAccessor::SetKafkaEnabled(false);
+#endif
+	{
+		int status = 0;
+		std::string body;
+		sendGet("/", status, body);
+		TEST_ASSERT(status == 200, "Liveness GET / must return 200 when Kafka is disabled");
+
+		sendGet("/ready", status, body);
+		TEST_ASSERT(status == 200, "Readiness GET /ready must return 200 when Kafka is disabled");
+		TEST_ASSERT(body.find(R"("ready":true)") != std::string::npos, "Body must indicate ready:true");
+		TEST_ASSERT(body.find(R"("status":"DISABLED")") != std::string::npos, "Body status must be DISABLED");
+	}
+
+	// 2. Kafka enabled and GroupConsumer running: Liveness == 200, Readiness == 200 with status RUNNING
+#ifdef OWPROV_KAFKA_TESTING
+	KafkaTestAccessor::SetKafkaEnabled(true);
+#endif
+	std::string token = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+	const std::string albTopic = "test_alb_health_topic";
+	const std::string albKey = "k_alb_" + token;
+	const std::string savedGroupId = g_MockGroupId;
+	const std::string savedInstanceId = g_MockInstanceId;
+	g_MockGroupId = "test_alb_grp_" + token;
+	g_MockInstanceId = "owprov-alb-test-" + token;
+
+	KafkaProducer producer;
+	producer.Start();
+
+	std::atomic<bool> failMessageHandled{false};
+	auto &groupConsumer = KafkaManager()->GroupConsumer();
+	uint64_t wId = KafkaManager()->RegisterTopicWatcher(albTopic,
+		[&](const std::string &key, const std::string &, std::string &reason) -> Types::KafkaHandlerOutcome {
+			if (key == albKey) {
+				failMessageHandled = true;
+				reason = "fatal unrecoverable error for health probe test";
+				return Types::KafkaHandlerOutcome::NonRetryableFailure;
+			}
+			return Types::KafkaHandlerOutcome::Success;
+		},
+		KafkaConsumerType::Group);
+
+	groupConsumer.Start();
+
+	auto readyWait = std::chrono::steady_clock::now();
+	while (!KafkaManager()->IsGroupConsumerReady() &&
+	       std::chrono::steady_clock::now() - readyWait < std::chrono::seconds(5)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	TEST_ASSERT(KafkaManager()->IsGroupConsumerReady(), "GroupConsumer must be ready after startup and subscription");
+
+	{
+		int status = 0;
+		std::string body;
+		sendGet("/", status, body);
+		TEST_ASSERT(status == 200, "Liveness GET / must return 200 when running");
+
+		sendGet("/ready", status, body);
+		TEST_ASSERT(status == 200, "Readiness GET /ready must return 200 when running");
+		TEST_ASSERT(body.find(R"("ready":true)") != std::string::npos, "Body must indicate ready:true");
+		TEST_ASSERT(body.find(R"("status":"RUNNING")") != std::string::npos, "Body status must be RUNNING");
+	}
+
+	// 3. Induce real NonRetryableFailure -> Liveness (/) stays 200, Readiness (/ready) returns 503
+	producer.Produce(albTopic.c_str(), albKey, "payload");
+
+	auto failWait = std::chrono::steady_clock::now();
+	while (!KafkaManager()->HasGroupConsumerFailed() &&
+	       std::chrono::steady_clock::now() - failWait < std::chrono::seconds(10)) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	TEST_ASSERT(failMessageHandled.load(), "Fail message must be processed");
+	TEST_ASSERT(KafkaManager()->HasGroupConsumerFailed(), "GroupConsumer must report failure");
+
+	{
+		int status = 0;
+		std::string body;
+		// Liveness must remain 200 OK so deployment health check does NOT enter restart loops
+		sendGet("/", status, body);
+		TEST_ASSERT(status == 200, "Liveness GET / must remain 200 even after GroupConsumer failure");
+
+		// Readiness must return 503 Service Unavailable with sanitized reason
+		sendGet("/ready", status, body);
+		TEST_ASSERT(status == 503, "Readiness GET /ready must return 503 after GroupConsumer failure");
+		TEST_ASSERT(body.find(R"("ready":false)") != std::string::npos, "Body must indicate ready:false");
+		TEST_ASSERT(body.find(R"("status":"FAILED")") != std::string::npos, "Body status must be FAILED");
+		TEST_ASSERT(body.find(R"("reason":"group_consumer_failed")") != std::string::npos,
+			"Body reason must be sanitized group_consumer_failed");
+		// Verify raw exception/internal details are NOT leaked
+		TEST_ASSERT(body.find("fatal unrecoverable error") == std::string::npos,
+			"Body must NOT leak internal failure reason string");
+	}
+
+	// Cleanup
+	KafkaManager()->UnregisterTopicWatcher(albTopic, wId, KafkaConsumerType::Group);
+	groupConsumer.Stop();
+	producer.Stop();
+	server.stopAll();
+
+	g_MockGroupId = savedGroupId;
+	g_MockInstanceId = savedInstanceId;
+
+	std::cout << "  PASS: test_alb_health_endpoint_liveness_and_readiness" << std::endl;
+}
+
 int main() {
 	Poco::AutoPtr<Poco::ConsoleChannel> pChannel(new Poco::ConsoleChannel);
 	Poco::Logger::root().setChannel(pChannel);
@@ -1462,9 +1859,11 @@ int main() {
 	// Phase 3 Kafka retry/commit/idempotency tests (Issue #120 / Issue #121)
 	test_callback_outcome_contract_and_dispatch();
 	test_malformed_serial_numbers_validation_and_startup_safety();
+	test_group_consumer_readiness_lifecycle();
 	test_broker_backed_kafka_commit_retry_and_shutdown();
 	test_partition_rebalance_during_in_flight_processing();
 	test_broker_backed_commit_failure_isolation();
+	test_alb_health_endpoint_liveness_and_readiness();
 
 	std::cout << "ALL KAFKA CONSUMER ROLES TESTS PASSED!" << std::endl;
 	return 0;
