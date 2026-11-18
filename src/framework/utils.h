@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -69,7 +71,12 @@ namespace OpenWifi::Utils {
 		std::string ContentType;
 	};
 
-	[[nodiscard]] bool ValidSerialNumber(const std::string &Serial);
+	[[nodiscard]] inline bool ValidSerialNumber(const std::string &Serial) {
+		return (!Serial.empty() &&
+				(Serial.size() <= uCentralProtocol::SERIAL_NUMBER_LENGTH) &&
+				std::all_of(Serial.begin(), Serial.end(),
+							[](auto i) { return std::isxdigit(static_cast<unsigned char>(i)); }));
+	}
 	[[nodiscard]] bool ValidSerialNumbers(const std::vector<std::string> &Serial);
 	[[nodiscard]] bool ValidUUID(const std::string &UUID);
 	[[nodiscard]] bool ValidHostname(const std::string &hostname);

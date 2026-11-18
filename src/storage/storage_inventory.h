@@ -44,6 +44,7 @@ namespace OpenWifi {
         bool GetDevicesForVenue(const std::string &uuid, std::vector<ProvObjects::InventoryTag> &devices);
 
 	  private:
+		bool EnsureSerialUniqueIndex();
 		bool EvaluateDeviceRules(const ProvObjects::InventoryTag &T,
 								 ProvObjects::DeviceRules &Rules);
 	};

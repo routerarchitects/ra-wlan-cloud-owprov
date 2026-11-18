@@ -5,6 +5,7 @@
 #include "ALBserver.h"
 
 #include "fmt/format.h"
+#include "framework/KafkaManager.h"
 #include "framework/MicroServiceFuncs.h"
 #include "framework/utils.h"
 
@@ -18,13 +19,38 @@ namespace OpenWifi {
 				Logger_.debug(fmt::format("ALB-REQUEST({}): ALB Request {}.",
 										  Request.clientAddress().toString(), id_));
 			}
+
+			const bool isReady = (Request.getURI() == "/ready");
 			Response.setChunkedTransferEncoding(true);
-			Response.setContentType("text/html");
 			Response.setDate(Poco::Timestamp());
-			Response.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
 			Response.setKeepAlive(true);
 			Response.set("Connection", "keep-alive");
 			Response.setVersion(Poco::Net::HTTPMessage::HTTP_1_1);
+
+			if (isReady) {
+				Response.setContentType("application/json");
+				Response.setKeepAlive(false);
+				Response.set("Connection", "close");
+				if (!KafkaManager()->IsGroupConsumerReady()) {
+					Response.setStatus(Poco::Net::HTTPResponse::HTTP_SERVICE_UNAVAILABLE);
+					std::ostream &Answer = Response.send();
+					Answer << fmt::format(
+						R"({{"ready":false,"status":"{}","reason":"{}"}})",
+						KafkaManager()->GroupConsumerReadinessStatus(),
+						KafkaManager()->GroupConsumerSanitizedReason());
+					return;
+				}
+
+				Response.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
+				std::ostream &Answer = Response.send();
+				Answer << fmt::format(
+					R"({{"ready":true,"status":"{}"}})",
+					KafkaManager()->GroupConsumerReadinessStatus());
+				return;
+			}
+
+			Response.setContentType("text/html");
+			Response.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
 			std::ostream &Answer = Response.send();
 			Answer << ALBHealthCheckServer()->CallbackText();
 		} catch (...) {
@@ -35,7 +61,8 @@ namespace OpenWifi {
 
 	ALBRequestHandler *
 	ALBRequestHandlerFactory::createRequestHandler(const Poco::Net::HTTPServerRequest &request) {
-		if (request.getURI() == "/")
+		const auto &uri = request.getURI();
+		if (uri == "/" || uri == "/ready")
 			return new ALBRequestHandler(Logger_, req_id_++);
 		else
 			return nullptr;

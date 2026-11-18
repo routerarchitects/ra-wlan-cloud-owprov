@@ -4,10 +4,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "Poco/Notification.h"
 #include "Poco/NotificationQueue.h"
@@ -84,26 +87,58 @@ namespace OpenWifi {
 		[[nodiscard]] static std::string GenerateAutoOffsetReset(KafkaConsumerType Type);
 
 		[[nodiscard]] bool IsRunning() const { return Running_; }
+		[[nodiscard]] bool HasFailed() const { return Failed_; }
+		[[nodiscard]] bool IsReady() const;
+		[[nodiscard]] std::string ReadinessStatus() const;
+		[[nodiscard]] std::string SanitizedReadinessReason() const;
+		[[nodiscard]] std::string FailureReason() const;
+		[[nodiscard]] std::string StatusString() const;
 		[[nodiscard]] std::set<std::string> Topics() const;
 		[[nodiscard]] std::vector<std::string> Subscriptions() const;
 		[[nodiscard]] bool HasPartitionAssignment() const { return Assigned_; }
 		bool WaitForPartitionAssignment(uint64_t TimeoutMs = 5000) const;
+		[[nodiscard]] int64_t GetCommittedOffset(const std::string &Topic, int Partition = 0) const;
+
+		using AckCallback = std::function<Types::KafkaHandlerOutcome(const std::string &, const std::string &, std::string &)>;
+#ifdef OWPROV_KAFKA_TESTING
+		// Compiled only into the integration test. The hook issues synchronous
+		// OffsetCommit requests through the production consumer's broker connection.
+		using CommitHook = std::function<void(int, cppkafka::Consumer &, const cppkafka::Message &)>;
+		void SetCommitHook(CommitHook Hook) {
+			std::lock_guard Lock(ConsumerMutex_);
+			CommitHook_ = std::move(Hook);
+		}
+		[[nodiscard]] std::string LastCommitError() const {
+			std::lock_guard Lock(ConsumerMutex_);
+			return LastCommitError_;
+		}
+#endif
 
 	  private:
 		KafkaConsumerType 		ConsumerType_ = KafkaConsumerType::Group;
 		mutable std::mutex 		ConsumerMutex_;
 		std::condition_variable TopicCV_;
-		Types::NotifyTable 		Notifiers_;
+		std::map<std::string, std::list<std::pair<AckCallback, uint64_t>>> Notifiers_;
 		Poco::Thread 			Worker_;
 		mutable std::atomic_bool Running_ = false;
 		mutable std::atomic_bool Assigned_ = false;
+		mutable std::atomic_bool Failed_ = false;
+		mutable std::atomic_bool Started_ = false;
+		mutable std::atomic_bool StopRequested_ = false;
 		uint64_t 				FunctionId_ = 1;
 		std::unique_ptr<cppkafka::Consumer> 			Consumer_;
 		std::set<std::string>	Topics_;
+		std::thread::id			DispatchThread_;
+		std::string				FailureReason_;
+#ifdef OWPROV_KAFKA_TESTING
+		CommitHook				CommitHook_;
+		std::string				LastCommitError_;
+#endif
 
 		void run() override;
+		void MarkFailed(const std::string &Reason);
 		friend class KafkaManager;
-		std::uint64_t RegisterTopicWatcher(const std::string &Topic, Types::TopicNotifyFunction &F);
+		std::uint64_t RegisterTopicWatcher(const std::string &Topic, AckCallback F);
 		void UnregisterTopicWatcher(const std::string &Topic, uint64_t Id);
 	};
 
@@ -133,6 +168,28 @@ namespace OpenWifi {
 		inline std::uint64_t RegisterTopicWatcher(const std::string &Topic,
 		                                          Types::TopicNotifyFunction &F,
 		                                          KafkaConsumerType ConsumerType) {
+			if (ConsumerType == KafkaConsumerType::Group) {
+				poco_error(Logger(), Poco::format("Rejecting legacy void callback for GroupConsumer topic '%s'; explicit outcome required.", Topic));
+				throw std::invalid_argument("GroupConsumer requires an explicit KafkaHandlerOutcome callback");
+			}
+			return BroadcastConsumerThr_.RegisterTopicWatcher(Topic,
+				[F](const std::string &Key, const std::string &Payload, std::string &) {
+					F(Key, Payload);
+					return Types::KafkaHandlerOutcome::Success;
+				});
+		}
+
+		inline std::uint64_t RegisterTopicWatcher(const std::string &Topic,
+		                                          const std::function<Types::KafkaHandlerOutcome(const std::string &, const std::string &)> &F,
+		                                          KafkaConsumerType ConsumerType) {
+			return RegisterTopicWatcher(Topic,
+				KafkaConsumer::AckCallback([F](const std::string &Key, const std::string &Payload, std::string &) {
+					return F(Key, Payload);
+				}),
+				ConsumerType);
+		}
+
+		inline std::uint64_t RegisterTopicWatcher(const std::string &Topic, const KafkaConsumer::AckCallback &F, KafkaConsumerType ConsumerType) {
 			return (ConsumerType == KafkaConsumerType::Broadcast)
 				? BroadcastConsumerThr_.RegisterTopicWatcher(Topic, F)
 				: GroupConsumerThr_.RegisterTopicWatcher(Topic, F);
@@ -149,6 +206,13 @@ namespace OpenWifi {
 		}
 
 		[[nodiscard]] KafkaConsumer &GroupConsumer() { return GroupConsumerThr_; }
+		[[nodiscard]] const KafkaConsumer &GroupConsumer() const { return GroupConsumerThr_; }
+		[[nodiscard]] bool HasGroupConsumerFailed() const { return GroupConsumerThr_.HasFailed(); }
+		[[nodiscard]] std::string GroupConsumerFailureReason() const { return GroupConsumerThr_.FailureReason(); }
+		[[nodiscard]] std::string GroupConsumerStatus() const { return GroupConsumerThr_.StatusString(); }
+		[[nodiscard]] bool IsGroupConsumerReady() const;
+		[[nodiscard]] std::string GroupConsumerReadinessStatus() const;
+		[[nodiscard]] std::string GroupConsumerSanitizedReason() const;
 		[[nodiscard]] KafkaConsumer &BroadcastConsumer() { return BroadcastConsumerThr_; }
 		[[nodiscard]] KafkaProducer &Producer() { return ProducerThr_; }
 

@@ -4,6 +4,7 @@
 
 #include "KafkaManager.h"
 
+#include <librdkafka/rdkafka.h>
 #include "fmt/format.h"
 #include "framework/MicroServiceFuncs.h"
 #include "cppkafka/utils/consumer_dispatcher.h"
@@ -225,8 +226,18 @@ namespace OpenWifi {
 	}
 
 	void KafkaConsumer::Start() {
+		if (!Running_ && Worker_.isRunning()) {
+			try { Worker_.join(); } catch (...) {}
+		}
 		std::lock_guard Lock(ConsumerMutex_);
 		if (!Running_ && !Worker_.isRunning()) {
+			Failed_ = false;
+			FailureReason_.clear();
+			StopRequested_ = false;
+			Started_ = false;
+#ifdef OWPROV_KAFKA_TESTING
+			LastCommitError_.clear();
+#endif
 			Running_ = true;
 			Worker_.start(*this);
 		}
@@ -235,12 +246,65 @@ namespace OpenWifi {
 	void KafkaConsumer::Stop() {
 		{
 			std::lock_guard Lock(ConsumerMutex_);
+			StopRequested_ = true;
 			if (!Running_ && !Worker_.isRunning()) return;
 			Running_ = false;
 			Assigned_ = false;
 			TopicCV_.notify_all();
 		}
 		if (Worker_.isRunning()) Worker_.join();
+		std::lock_guard Lock(ConsumerMutex_);
+		Started_ = false;
+	}
+
+	void KafkaConsumer::MarkFailed(const std::string &Reason) {
+		std::lock_guard Lock(ConsumerMutex_);
+		if (!Running_) return;
+		FailureReason_ = Reason;
+		Failed_ = true;
+	}
+
+	std::string KafkaConsumer::FailureReason() const {
+		std::lock_guard Lock(ConsumerMutex_);
+		return FailureReason_;
+	}
+
+	std::string KafkaConsumer::StatusString() const {
+		if (Failed_) return "FAILED";
+		if (Running_) return "RUNNING";
+		return "STOPPED";
+	}
+
+	bool KafkaConsumer::IsReady() const {
+		if (Failed_) return false;
+		if (StopRequested_) return false;
+		if (!Started_) return false;
+		if (!Running_) return false;
+		std::lock_guard Lock(ConsumerMutex_);
+		if (Topics_.empty()) return false;
+		return true;
+	}
+
+	std::string KafkaConsumer::ReadinessStatus() const {
+		if (Failed_) return "FAILED";
+		if (StopRequested_) return "STOPPING";
+		if (Started_ && !Running_) return "STOPPED";
+		{
+			std::lock_guard Lock(ConsumerMutex_);
+			if (!Started_ || Topics_.empty()) return "STARTING";
+		}
+		return "RUNNING";
+	}
+
+	std::string KafkaConsumer::SanitizedReadinessReason() const {
+		if (Failed_) return "group_consumer_failed";
+		if (Started_ && !Running_ && !StopRequested_) return "unexpected_stop";
+		if (StopRequested_) return "stopping";
+		{
+			std::lock_guard Lock(ConsumerMutex_);
+			if (!Started_ || Topics_.empty()) return "not_started";
+		}
+		return "";
 	}
 
 	bool KafkaConsumer::WaitForPartitionAssignment(uint64_t TimeoutMs) const {
@@ -255,6 +319,19 @@ namespace OpenWifi {
 		return Assigned_;
 	}
 
+	int64_t KafkaConsumer::GetCommittedOffset(const std::string &Topic, int Partition) const {
+		std::lock_guard Lock(ConsumerMutex_);
+		if (!Consumer_) return -1;
+		try {
+			cppkafka::TopicPartitionList tpl{{Topic, Partition}};
+			auto committed = Consumer_->get_offsets_committed(tpl);
+			if (!committed.empty()) {
+				return committed.front().get_offset();
+			}
+		} catch (...) {}
+		return -1;
+	}
+
 	inline void KafkaConsumer::run() {
 		std::string RoleName = (ConsumerType_ == KafkaConsumerType::Broadcast) ? "BroadcastConsumer" : "GroupConsumer";
 		Utils::SetThreadName((ConsumerType_ == KafkaConsumerType::Broadcast) ? "Kafka:Bcast" : "Kafka:GrpCons");
@@ -264,17 +341,35 @@ namespace OpenWifi {
 		poco_information(Logger_, fmt::format("Starting {} (group.id='{}', client.id='{}', auto.offset.reset='{}')...",
 			RoleName, GetGroupId(), GetClientId(), GetAutoOffsetReset()));
 
+		auto FailConsumer = [&](const std::string &Reason) {
+			if (ConsumerType_ == KafkaConsumerType::Group) {
+				MarkFailed(Reason);
+				if (!Failed_) return;
+			}
+			poco_critical(Logger_, Reason);
+		};
+
+		if (ConsumerType_ == KafkaConsumerType::Group &&
+		    MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)) {
+			poco_error(Logger_, "openwifi.kafka.auto.commit=true ignored for GroupConsumer.");
+		}
+
 		struct Cleanup {
 			KafkaConsumer &Self;
 			~Cleanup() {
-				std::lock_guard Lock(Self.ConsumerMutex_);
-				Self.Consumer_.reset();
-				Self.Running_ = false;
-				Self.Assigned_ = false;
-				Self.TopicCV_.notify_all();
+				std::unique_ptr<cppkafka::Consumer> Old;
+				{
+					std::lock_guard Lock(Self.ConsumerMutex_);
+					Old = std::move(Self.Consumer_);
+					Self.Running_ = false;
+					Self.Assigned_ = false;
+					Self.TopicCV_.notify_all();
+				}
+				if (Old) { try { Old->unsubscribe(); } catch (...) {} }
 			}
 		} Guard{*this};
 
+		bool shouldRun = false;
 		{
 			std::unique_lock Lock(ConsumerMutex_);
 			while (Running_ && Topics_.empty()) {
@@ -282,48 +377,55 @@ namespace OpenWifi {
 					return !Running_ || !Topics_.empty();
 				});
 			}
-			if (!Running_ || Topics_.empty()) {
-				poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
-				return;
-			}
+			shouldRun = Running_ && !Topics_.empty();
 		}
 
-		bool CleanShutdown = false;
-		try {
-			cppkafka::Configuration Config({
-				{"client.id", GetClientId()},
-				{"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
-				{"group.id", GetGroupId()},
-				{"enable.auto.commit", MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
-				{"auto.offset.reset", GetAutoOffsetReset()},
-				{"enable.partition.eof", false}
-			});
-			AddKafkaSecurity(Config);
-			Config.set_log_callback(KafkaLoggerFun);
-			Config.set_error_callback(KafkaErrorFun);
-			Config.set_default_topic_configuration({{"auto.offset.reset", GetAutoOffsetReset()}});
-
-			auto LocalConsumer = std::make_unique<cppkafka::Consumer>(Config);
-			LocalConsumer->set_assignment_callback([&](cppkafka::TopicPartitionList &parts) {
-				if (!parts.empty()) {
-					poco_information(Logger_, fmt::format("Partition assigned: {}...", parts.front().get_partition()));
-					Assigned_ = true;
+		if (shouldRun) {
+			try {
+				cppkafka::Configuration Config({
+					{"client.id", GetClientId()},
+					{"metadata.broker.list", MicroServiceConfigGetString("openwifi.kafka.brokerlist", "")},
+					{"group.id", GetGroupId()},
+					{"enable.auto.commit", ConsumerType_ == KafkaConsumerType::Group ? false
+					                       : MicroServiceConfigGetBool("openwifi.kafka.auto.commit", false)},
+					{"auto.offset.reset", GetAutoOffsetReset()},
+					{"enable.partition.eof", false}
+				});
+				std::string maxPoll = MicroServiceConfigGetString("openwifi.kafka.max.poll.interval.ms", "");
+				if (!maxPoll.empty()) {
+					Config.set("max.poll.interval.ms", maxPoll);
 				}
-			});
-			LocalConsumer->set_revocation_callback([&](const cppkafka::TopicPartitionList &parts) {
-				if (!parts.empty()) {
-					poco_information(Logger_, fmt::format("Partition revocation: {}...", parts.front().get_partition()));
-					Assigned_ = false;
+				const auto sessionTimeout = MicroServiceConfigGetString("openwifi.kafka.session.timeout.ms", "");
+				if (!sessionTimeout.empty()) Config.set("session.timeout.ms", sessionTimeout);
+				AddKafkaSecurity(Config);
+				Config.set_log_callback(KafkaLoggerFun);
+				Config.set_error_callback(KafkaErrorFun);
+				Config.set_default_topic_configuration({{"auto.offset.reset", GetAutoOffsetReset()}});
+
+				auto LocalConsumer = std::make_unique<cppkafka::Consumer>(Config);
+				LocalConsumer->set_assignment_callback([&](cppkafka::TopicPartitionList &parts) {
+					if (!parts.empty()) {
+						poco_information(Logger_, fmt::format("Partition assigned: {}...", parts.front().get_partition()));
+						Assigned_ = true;
+					}
+				});
+				LocalConsumer->set_revocation_callback([&](const cppkafka::TopicPartitionList &parts) {
+					if (!parts.empty()) {
+						poco_information(Logger_, fmt::format("Partition revocation: {}...", parts.front().get_partition()));
+						Assigned_ = false;
+					}
+				});
+
+				{
+					std::lock_guard Lock(ConsumerMutex_);
+					if (Running_) {
+						Consumer_ = std::move(LocalConsumer);
+						Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
+						Started_ = true;
+					}
 				}
-			});
 
-			{
-				std::lock_guard Lock(ConsumerMutex_);
-				if (!Running_) return;
-				Consumer_ = std::move(LocalConsumer);
-				Consumer_->subscribe(Types::StringVec(Topics_.begin(), Topics_.end()));
-			}
-
+				bool fatalError = false;
 			while (Running_) {
 				cppkafka::Message msg = Consumer_->poll(std::chrono::milliseconds(100));
 				if (!msg) {
@@ -337,45 +439,190 @@ namespace OpenWifi {
 					}
 					continue;
 				}
-				{
-					std::lock_guard G(ConsumerMutex_);
-					auto It = Notifiers_.find(msg.get_topic());
-					if (It != Notifiers_.end()) {
-						for (const auto &[CallbackFunc, _] : It->second) {
-							try { CallbackFunc(msg.get_key(), msg.get_payload()); }
+
+				struct DispatchGuard {
+					KafkaConsumer &S;
+					~DispatchGuard() {
+						std::lock_guard G(S.ConsumerMutex_);
+						S.DispatchThread_ = {};
+						S.TopicCV_.notify_all();
+					}
+				};
+
+				if (ConsumerType_ == KafkaConsumerType::Broadcast) {
+					{
+						std::vector<AckCallback> cbs;
+						{
+							std::lock_guard G(ConsumerMutex_);
+							if (auto It = Notifiers_.find(msg.get_topic()); It != Notifiers_.end()) {
+								for (const auto &[cb, _] : It->second) cbs.push_back(cb);
+							}
+							DispatchThread_ = std::this_thread::get_id();
+						}
+						DispatchGuard DGuard{*this};
+						std::string cbReason;
+						for (const auto &cb : cbs) {
+							try { cb(msg.get_key(), msg.get_payload(), cbReason); }
 							catch (const std::exception &E) { poco_warning(Logger_, fmt::format("Callback exception: {}", E.what())); }
 							catch (...) { poco_error(Logger_, "Unknown callback exception"); }
 						}
 					}
+					{
+						std::lock_guard G(ConsumerMutex_);
+						if (Consumer_) Consumer_->commit(msg);
+					}
+					continue;
 				}
-				if (Consumer_) Consumer_->commit(msg);
-			}
 
-			std::lock_guard Lock(ConsumerMutex_);
-			if (Consumer_) { try { Consumer_->unsubscribe(); } catch (...) {} }
-			CleanShutdown = true;
+				constexpr int MaxAttempts = 5;
+				constexpr int RetryDelaysMs[4] = {200, 400, 800, 1600};
+				auto RetryOp = [&](const char *Stage, auto &&Op) {
+					std::string Reason;
+					for (int Attempt = 0; Attempt < MaxAttempts && Running_; ++Attempt) {
+						// Revocation callbacks are dispatched by poll(), which cannot run
+						// while a handler is in flight. The background group state can
+						// already know ownership was lost (e.g. max.poll.interval.ms).
+						if (rd_kafka_assignment_lost(Consumer_->get_handle())) {
+							FailConsumer(fmt::format(
+								"Permanent {} failure [assignment_lost] id='{}' topic='{}' p={} off={} key='{}' reason='Partition ownership lost during {}'; stopping without committing.",
+								RoleName, MicroServiceRuntimeInstanceId(), msg.get_topic(), msg.get_partition(),
+								msg.get_offset(), std::string(msg.get_key()), Stage));
+							fatalError = true;
+							return false;
+						}
+						Reason.clear();
+						if (Op(Attempt, Reason)) return true;
+						if (fatalError || !Running_) return false;
+						if (Attempt + 1 < MaxAttempts) {
+							poco_warning(Logger_, fmt::format("{} failed for '{}' p={} off={} key='{}' id='{}' attempt={}/{} ({}); retrying in {} ms.",
+								Stage, msg.get_topic(), msg.get_partition(), msg.get_offset(), std::string(msg.get_key()),
+								MicroServiceRuntimeInstanceId(), Attempt + 1, MaxAttempts, Reason, RetryDelaysMs[Attempt]));
+							std::unique_lock Lock(ConsumerMutex_);
+							if (TopicCV_.wait_for(Lock, std::chrono::milliseconds(RetryDelaysMs[Attempt]), [this]() { return !Running_; })) return false;
+						} else {
+							FailConsumer(fmt::format(
+								"Permanent {} failure [{}_retries_exhausted] id='{}' topic='{}' p={} off={} key='{}' attempts={}/{} reason='{}'; stopping without committing.",
+								RoleName, Stage, MicroServiceRuntimeInstanceId(), msg.get_topic(), msg.get_partition(),
+								msg.get_offset(), std::string(msg.get_key()), Attempt + 1, MaxAttempts, Reason));
+							fatalError = true;
+							return false;
+						}
+					}
+					return false;
+				};
+
+				if (!RetryOp("Processing", [&](int Attempt, std::string &Reason) {
+					std::vector<AckCallback> cbs;
+					bool noWatcher = false;
+					{
+						std::lock_guard G(ConsumerMutex_);
+						if (auto It = Notifiers_.find(msg.get_topic()); It != Notifiers_.end()) {
+							for (const auto &[cb, _] : It->second) cbs.push_back(cb);
+						}
+						if (cbs.empty()) {
+							noWatcher = true;
+						} else {
+							DispatchThread_ = std::this_thread::get_id();
+						}
+					}
+					if (noWatcher) {
+						FailConsumer(fmt::format(
+							"Permanent {} failure [missing_watcher] id='{}' topic='{}' p={} off={} key='{}' reason='No registered topic watcher'; stopping without committing.",
+							RoleName, MicroServiceRuntimeInstanceId(), msg.get_topic(), msg.get_partition(),
+							msg.get_offset(), std::string(msg.get_key())));
+						fatalError = true;
+						return false;
+					}
+					DispatchGuard DGuard{*this};
+					for (const auto &cb : cbs) {
+						try {
+							std::string cbReason;
+							auto outcome = cb(msg.get_key(), msg.get_payload(), cbReason);
+							if (outcome == Types::KafkaHandlerOutcome::RetryableFailure) {
+								Reason = cbReason.empty() ? "callback returned RetryableFailure" : cbReason;
+								return false;
+							}
+							if (outcome == Types::KafkaHandlerOutcome::NonRetryableFailure) {
+								if (cbReason.empty()) cbReason = "callback returned NonRetryableFailure";
+								FailConsumer(fmt::format(
+									"Permanent {} failure [non_retryable] id='{}' topic='{}' p={} off={} key='{}' reason='{}'; stopping without committing (no durable dead-letter record).",
+									RoleName, MicroServiceRuntimeInstanceId(), msg.get_topic(), msg.get_partition(),
+									msg.get_offset(), std::string(msg.get_key()), cbReason));
+								fatalError = true;
+								return false;
+							}
+						} catch (const std::exception &E) {
+							Reason = E.what();
+							poco_error(Logger_, fmt::format("Callback exception '{}' p={} off={} attempt={}/{}: {}",
+								msg.get_topic(), msg.get_partition(), msg.get_offset(), Attempt + 1, MaxAttempts, E.what()));
+							return false;
+						} catch (...) {
+							Reason = "unknown callback exception";
+							poco_error(Logger_, fmt::format("Unknown callback exception '{}' p={} off={} attempt={}/{}",
+								msg.get_topic(), msg.get_partition(), msg.get_offset(), Attempt + 1, MaxAttempts));
+							return false;
+						}
+					}
+					return true;
+				})) break;
+
+				if (!RetryOp("Commit", [&]([[maybe_unused]] int Attempt, std::string &Reason) {
+					try {
+						std::lock_guard G(ConsumerMutex_);
+						if (!Consumer_) throw std::runtime_error("Consumer handle unavailable");
+#ifdef OWPROV_KAFKA_TESTING
+						if (CommitHook_) {
+							CommitHook_(Attempt, *Consumer_, msg);
+						}
+#endif
+						Consumer_->commit(msg);
+						return true;
+					} catch (const std::exception &E) {
+						Reason = E.what();
+#ifdef OWPROV_KAFKA_TESTING
+						LastCommitError_ = Reason;
+#endif
+					} catch (...) {
+						Reason = "unknown commit exception";
+#ifdef OWPROV_KAFKA_TESTING
+						LastCommitError_ = Reason;
+#endif
+					}
+					return false;
+				})) break;
+			}
 		} catch (const std::exception &E) {
-			if (!Running_) {
-				CleanShutdown = true;
+			if (StopRequested_) {
+				// Orderly shutdown in progress
+			} else if (ConsumerType_ == KafkaConsumerType::Group) {
+				FailConsumer(fmt::format("Permanent {} failure [terminal_exception] id='{}' group.id='{}' reason='{}'; stopping.",
+					RoleName, MicroServiceRuntimeInstanceId(), GetGroupId(), E.what()));
 			} else {
 				poco_error(Logger_, fmt::format("Unexpected terminal failure in {} (group.id='{}'): {}", RoleName, GetGroupId(), E.what()));
 			}
 		} catch (...) {
-			if (!Running_) {
-				CleanShutdown = true;
+			if (StopRequested_) {
+				// Orderly shutdown in progress
+			} else if (ConsumerType_ == KafkaConsumerType::Group) {
+				FailConsumer(fmt::format("Permanent {} failure [terminal_exception] id='{}' group.id='{}' reason='unknown exception'; stopping.",
+					RoleName, MicroServiceRuntimeInstanceId(), GetGroupId()));
 			} else {
 				poco_error(Logger_, fmt::format("Unexpected terminal failure in {} (group.id='{}'): unknown exception", RoleName, GetGroupId()));
 			}
 		}
-
-		if (CleanShutdown) {
-			poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
-		}
 	}
 
-	std::uint64_t KafkaConsumer::RegisterTopicWatcher(const std::string &Topic, Types::TopicNotifyFunction &F) {
+	if (StopRequested_) {
+		poco_information(Logger_, fmt::format("{} stopped cleanly (group.id='{}').", RoleName, GetGroupId()));
+	} else if (ConsumerType_ == KafkaConsumerType::Group && Started_ && !Failed_) {
+		poco_critical(Logger_, fmt::format("Permanent {} failure [unexpected_stop] id='{}' group.id='{}'; worker thread exited unexpectedly.",
+			RoleName, MicroServiceRuntimeInstanceId(), GetGroupId()));
+	}
+	}
+
+	std::uint64_t KafkaConsumer::RegisterTopicWatcher(const std::string &Topic, AckCallback F) {
 		std::lock_guard G(ConsumerMutex_);
-		Notifiers_[Topic].emplace_back(F, FunctionId_);
+		Notifiers_[Topic].emplace_back(std::move(F), FunctionId_);
 		auto [_, inserted] = Topics_.insert(Topic);
 		TopicCV_.notify_all();
 		if (inserted && Consumer_ && Running_) {
@@ -407,12 +654,15 @@ namespace OpenWifi {
 	}
 
 	void KafkaConsumer::UnregisterTopicWatcher(const std::string &Topic, uint64_t Id) {
-		std::lock_guard G(ConsumerMutex_);
+		std::unique_lock G(ConsumerMutex_);
+		TopicCV_.wait(G, [this]() {
+			return DispatchThread_ == std::thread::id() || DispatchThread_ == std::this_thread::get_id();
+		});
 		auto It = Notifiers_.find(Topic);
 		if (It != Notifiers_.end()) {
 			auto &L = It->second;
 			for (auto it = L.begin(); it != L.end(); ++it) {
-				if (it->second == static_cast<int>(Id)) {
+				if (it->second == Id) {
 					auto RemovedWatcher = *it;
 					L.erase(it);
 					if (L.empty()) {
@@ -443,6 +693,7 @@ namespace OpenWifi {
 				}
 			}
 		}
+		TopicCV_.notify_all();
 	}
 
 	int KafkaManager::Start() {
@@ -485,6 +736,21 @@ namespace OpenWifi {
 	[[nodiscard]] std::string KafkaManager::WrapSystemId(const std::string & PayLoad) {
 		return fmt::format(	R"lit({{ "system" : {{ "id" : {}, "host" : "{}" }}, "payload" : {} }})lit",
 						   MicroServiceID(), MicroServicePrivateEndPoint(), PayLoad ) ;
+	}
+
+	bool KafkaManager::IsGroupConsumerReady() const {
+		if (!KafkaEnabled_) return true;
+		return GroupConsumerThr_.IsReady();
+	}
+
+	std::string KafkaManager::GroupConsumerReadinessStatus() const {
+		if (!KafkaEnabled_) return "DISABLED";
+		return GroupConsumerThr_.ReadinessStatus();
+	}
+
+	std::string KafkaManager::GroupConsumerSanitizedReason() const {
+		if (!KafkaEnabled_) return "";
+		return GroupConsumerThr_.SanitizedReadinessReason();
 	}
 
 	void KafkaManager::PartitionAssignment(const cppkafka::TopicPartitionList &partitions) {
