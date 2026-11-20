@@ -149,6 +149,63 @@ namespace OpenWifi {
 			return true;
 		}
 
+		// Contacts and Locations are stored as Entity-owned records, but a Venue-scoped
+		// role must still be able to read records explicitly associated with, or eligible
+		// for, that Venue. ResolveTargetContext can only recover the owning Entity from a
+		// bound Contact/Location UUID, so perform the association check here after the
+		// normal scope check has failed.
+		if (Method == Poco::Net::HTTPRequest::HTTP_GET && TargetVenue.empty() &&
+			(Resource == "contact" || Resource == "location")) {
+			auto Binding = Bindings_.find("uuid");
+			if (Binding == Bindings_.end()) {
+				Binding = Bindings_.find("id");
+			}
+			if (Binding != Bindings_.end() && !Binding->second.empty()) {
+				const auto &ObjectId = Binding->second;
+				for (const auto &Role : Roles) {
+					if (Role.venue.empty() || !CheckRolePolicy(Role)) {
+						continue;
+					}
+
+					ProvObjects::Venue Venue;
+					if (!StorageService()->VenueDB().GetRecord("id", Role.venue, Venue)) {
+						continue;
+					}
+
+					if (Resource == "contact" &&
+						std::find(Venue.contacts.begin(), Venue.contacts.end(), ObjectId) !=
+							Venue.contacts.end()) {
+						Logger_.information(fmt::format(
+							"AUTH_DEBUG: Granted Contact '{}' through Venue association '{}'",
+							ObjectId, Role.venue));
+						return true;
+					}
+
+					if (Resource == "location") {
+						if (Venue.location == ObjectId) {
+							Logger_.information(fmt::format(
+								"AUTH_DEBUG: Granted Location '{}' through Venue assignment '{}'",
+								ObjectId, Role.venue));
+							return true;
+						}
+
+						std::vector<triplet_t> EligibleLocations;
+						GetLocationsForVenue(Role.venue, EligibleLocations);
+						for (const auto &[Name, Description, UUID] : EligibleLocations) {
+							(void)Name;
+							(void)Description;
+							if (UUID == ObjectId) {
+								Logger_.information(fmt::format(
+									"AUTH_DEBUG: Granted Location '{}' as eligible for Venue '{}'",
+									ObjectId, Role.venue));
+								return true;
+							}
+						}
+					}
+				}
+			}
+		}
+
 		if (Reason.empty()) {
 			Reason = "No authorized role matches the required scope and permission.";
 		}
@@ -505,7 +562,7 @@ namespace OpenWifi {
 		for (const auto &[name, value] : Parameters_) {
 			if (name == "entity")
 				QueryEntity = value;
-			else if (name == "venue")
+			else if (name == "venue" || name == "locationsForVenue")
 				QueryVenue = value;
 			else if (name == "operatorId" || name == "operator" || name == "registrationId")
 				QueryOperator = value;
@@ -718,7 +775,7 @@ namespace OpenWifi {
 		}
 
 		for (const auto &[name, value] : Parameters_) {
-			if (name == "entity" || name == "venue" || name == "operatorId" ||
+			if (name == "entity" || name == "venue" || name == "locationsForVenue" || name == "operatorId" ||
 				name == "operator" || name == "registrationId" ||
 				name == "subscriberId" || name == "signupUUID") {
 				return true;

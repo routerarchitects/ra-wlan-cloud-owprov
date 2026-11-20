@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <type_traits>
 #include <utility>
 
 #include "Poco/StringTokenizer.h"
@@ -227,6 +228,11 @@ namespace OpenWifi {
 		return R.ReturnObject(Answer);
 	}
 
+	template <typename T, typename = void> struct HasSubscriberId : std::false_type {};
+	template <typename T>
+	struct HasSubscriberId<T, std::void_t<decltype(std::declval<T>().subscriberId)>>
+		: std::true_type {};
+
 	inline bool NormalizeMac(std::string &Mac) {
 		Poco::replaceInPlace(Mac, ":", "");
 		Poco::replaceInPlace(Mac, "-", "");
@@ -283,6 +289,156 @@ namespace OpenWifi {
 		}
 	}
 
+	struct ScopedReadAuthorization {
+		std::set<std::string> entities;
+		std::set<std::string> venues;
+	};
+
+	inline bool RoleAllowsResourceRead(RESTAPIHandler &R,
+									   const ProvObjects::ManagementRole &Role,
+									   const std::string &Resource) {
+		ProvObjects::ManagementPolicy Policy;
+		if (!AuthCache::GetInstance()->GetPolicy(Role.managementPolicy, Policy)) {
+			if (!StorageService()->PolicyDB().GetRecord("id", Role.managementPolicy, Policy)) {
+				return false;
+			}
+			AuthCache::GetInstance()->SetPolicy(Role.managementPolicy, Policy);
+		}
+		return R.PolicyAllows(Policy, Resource, Poco::Net::HTTPRequest::HTTP_GET);
+	}
+
+	inline ScopedReadAuthorization ResolveScopedReadAuthorization(RESTAPIHandler &R,
+												 const std::string &Resource) {
+		ScopedReadAuthorization Access;
+		std::set<std::string> DeniedVenues;
+		std::vector<ProvObjects::ManagementRole> Roles;
+		if (!R.FindAllUserRoles(R.UserInfo_.userinfo.id, Roles)) {
+			return Access;
+		}
+
+		// Exact Venue roles shadow Entity-level permission for the same resource.
+		for (const auto &Role : Roles) {
+			if (!Role.venue.empty()) {
+				if (RoleAllowsResourceRead(R, Role, Resource)) {
+					Access.venues.insert(Role.venue);
+				} else {
+					DeniedVenues.insert(Role.venue);
+				}
+			}
+		}
+
+		for (const auto &Role : Roles) {
+			if (Role.venue.empty() && !Role.entity.empty() &&
+				RoleAllowsResourceRead(R, Role, Resource)) {
+				Access.entities.insert(Role.entity);
+			}
+		}
+
+		for (const auto &VenueId : DeniedVenues) {
+			Access.venues.erase(VenueId);
+		}
+		return Access;
+	}
+
+	inline std::string MakeScopedInClause(const std::string &Field,
+										 const std::set<std::string> &Ids) {
+		if (Ids.empty()) {
+			return "";
+		}
+		std::string Result = Field + " IN (";
+		bool First = true;
+		for (const auto &Id : Ids) {
+			if (!First) {
+				Result += ",";
+			}
+			Result += "'" + ORM::Escape(Id) + "'";
+			First = false;
+		}
+		Result += ")";
+		return Result;
+	}
+
+	template <typename DB>
+	void ScopedEntityOwnedListHandler(const char *BlockName, DB &DBInstance,
+									  RESTAPIHandler &R,
+									  const ScopedReadAuthorization &Access,
+									  const std::set<std::string> &AssociatedIds) {
+		typedef typename DB::RecordVec RecVec;
+		typedef typename DB::RecordName RecType;
+
+		auto EntityParam = R.GetParameter("entity", "");
+		auto VenueParam = R.GetParameter("venue", "");
+		if ((!EntityParam.empty() && !Access.entities.count(EntityParam)) ||
+			(!VenueParam.empty() && !Access.venues.count(VenueParam))) {
+			if (R.QB_.CountOnly) {
+				return R.ReturnCountOnly(0);
+			}
+			RecVec Empty;
+			return MakeJSONObjectArray(BlockName, Empty, R);
+		}
+
+		auto IsAuthorized = [&](const RecType &Record) {
+			bool Allowed = Access.entities.count(Record.entity) ||
+						   AssociatedIds.count(Record.info.id);
+			if (!EntityParam.empty()) {
+				Allowed = Allowed && Record.entity == EntityParam;
+			}
+			if (!VenueParam.empty()) {
+				Allowed = Allowed && AssociatedIds.count(Record.info.id);
+			}
+			return Allowed;
+		};
+
+		if (!R.QB_.Select.empty()) {
+			RecVec Selected;
+			for (const auto &Id : R.QB_.Select) {
+				RecType Record;
+				if (DBInstance.GetRecord("id", Id, Record) && IsAuthorized(Record)) {
+					Selected.push_back(Record);
+				}
+			}
+			if (R.QB_.CountOnly) {
+				return R.ReturnCountOnly(Selected.size());
+			}
+			return MakeJSONObjectArray(BlockName, Selected, R);
+		}
+
+		std::string EntityClause = MakeScopedInClause("entity", Access.entities);
+		std::string AssociatedClause = MakeScopedInClause("id", AssociatedIds);
+		std::string ScopeWhere;
+		if (!EntityClause.empty() && !AssociatedClause.empty()) {
+			ScopeWhere = "(" + EntityClause + " OR " + AssociatedClause + ")";
+		} else if (!EntityClause.empty()) {
+			ScopeWhere = EntityClause;
+		} else {
+			ScopeWhere = AssociatedClause;
+		}
+
+		if (!EntityParam.empty()) {
+			ScopeWhere = "(" + ScopeWhere + ") AND entity='" + ORM::Escape(EntityParam) + "'";
+		}
+		if (!VenueParam.empty()) {
+			ScopeWhere = AssociatedClause.empty() ? "" : AssociatedClause;
+		}
+
+		if (ScopeWhere.empty()) {
+			if (R.QB_.CountOnly) {
+				return R.ReturnCountOnly(0);
+			}
+			RecVec Empty;
+			return MakeJSONObjectArray(BlockName, Empty, R);
+		}
+
+		if (R.QB_.CountOnly) {
+			return R.ReturnCountOnly(DBInstance.Count(ScopeWhere));
+		}
+
+		RecVec Records;
+		DBInstance.GetRecords(R.QB_.Offset, R.QB_.Limit, Records, ScopeWhere,
+							  " ORDER BY name ");
+		return MakeJSONObjectArray(BlockName, Records, R);
+	}
+
 	template <typename DB>
 	void ListHandler(const char *BlockName, DB &DBInstance, RESTAPIHandler &R) {
 		auto Entity = R.GetParameter("entity", "");
@@ -290,25 +446,6 @@ namespace OpenWifi {
 
 		typedef typename DB::RecordVec RecVec;
 		typedef typename DB::RecordName RecType;
-
-		if constexpr (std::is_same_v<RecType, ProvObjects::Venue>) {
-			auto LocationsForVenue = R.GetParameter("locationsForVenue", "");
-			if (!LocationsForVenue.empty()) {
-				std::vector<triplet_t> IDs;
-				GetLocationsForVenue(LocationsForVenue, IDs);
-				Poco::JSON::Array A;
-				for (const auto &[name, description, uuid] : IDs) {
-					Poco::JSON::Object O;
-					O.set("name", name);
-					O.set("description", description);
-					O.set("uuid", uuid);
-					A.add(O);
-				}
-				Poco::JSON::Object Answer;
-				Answer.set("locations", A);
-				return R.ReturnObject(Answer);
-			}
-		}
 
 		if (!R.QB_.Select.empty()) {
 			return ReturnRecordList<decltype(DBInstance), RecType>(BlockName, DBInstance, R);
@@ -349,13 +486,33 @@ namespace OpenWifi {
 				? fmt::format(" operatorId='{}'", OperatorId)
 				: fmt::format(" operatorId='{}' and subscriberId='{}' ", OperatorId, subscriberId);
 
+		if (!R.QB_.Select.empty()) {
+			RecVec Entries;
+			for (const auto &Id : R.SelectedRecords()) {
+				RecType Entry;
+				if (!DB.GetRecord("id", Id, Entry)) {
+					// Collection selection intentionally masks missing and out-of-scope IDs.
+					continue;
+				}
+				if (!OperatorId.empty() && Entry.operatorId != OperatorId) {
+					continue;
+				}
+				if constexpr (HasSubscriberId<RecType>::value) {
+					if (!subscriberId.empty() && Entry.subscriberId != subscriberId) {
+						continue;
+					}
+				}
+				Entries.emplace_back(std::move(Entry));
+			}
+			if (R.QB_.CountOnly) {
+				return R.ReturnCountOnly(Entries.size());
+			}
+			return MakeJSONObjectArray(BlockName, Entries, R);
+		}
+
 		if (R.QB_.CountOnly) {
 			auto Count = DB.Count(whereClause);
 			return R.ReturnCountOnly(Count);
-		}
-
-		if (!R.QB_.Select.empty()) {
-			return ReturnRecordList<decltype(DB), RecType>(BlockName, DB, R);
 		}
 
 		RecVec Entries;
