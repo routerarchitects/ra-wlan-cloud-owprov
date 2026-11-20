@@ -77,7 +77,7 @@ int main() {
 	CHECK(resolve("PUT", "/api/v1/subscriber?operation=emailVerified") == Operation::Denied);
 	for (const auto *field : {"name", "serialNumber", "subscriberId", "operatorId", "deviceGroup", "configuration"})
 		CHECK(IsClaimFieldAllowed(field));
-	for (const auto *field : {"managementPolicy", "serviceClass", "deviceRules", "suspended", "billingCode", "id"})
+	for (const auto *field : {"managementPolicy", "serviceClass", "deviceRules", "suspended", "billingCode", "id", "realMacAddress"})
 		CHECK(!IsClaimFieldAllowed(field));
 
 	VenuePages venues;

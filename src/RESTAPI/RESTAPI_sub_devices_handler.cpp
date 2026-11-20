@@ -385,6 +385,7 @@ namespace OpenWifi {
 			newObject.deviceRules = inventory.deviceRules;
 			newObject.state = inventory.state;
 			newObject.locale = inventory.locale;
+			newObject.realMacAddress = inventory.realMacAddress;
 		}
 
 		return true;
@@ -570,7 +571,9 @@ namespace OpenWifi {
 			inventoryRecord.deviceRules = newObject.deviceRules;
 			inventoryRecord.state = newObject.state;
 			inventoryRecord.locale = newObject.locale;
-			inventoryRecord.realMacAddress = newObject.realMacAddress;
+			if (!newObject.realMacAddress.empty()) {
+				inventoryRecord.realMacAddress = newObject.realMacAddress;
+			}
 			if (!resolvedVenueId.empty()) {
 				inventoryRecord.venue = resolvedVenueId;
 			}

@@ -133,6 +133,7 @@ func TestSubscriberDeniedOperations(t *testing.T) {
 		{"subscriberId": ""},
 		{"managementPolicy": "some-policy"},
 		{"deviceConfiguration": "00000000-0000-4000-8000-000000000099"},
+		{"realMacAddress": "24:f5:a2:00:00:99"},
 	} {
 		f.request(t, "POST", "/subscriberDevice/0", payload, http.StatusForbidden)
 	}
@@ -262,13 +263,47 @@ func TestSubscriberClaimUnclaim(t *testing.T) {
 	data := f.request(t, "POST", "/subscriberDevice/0", payload, http.StatusOK)
 	t.Cleanup(func() { f.request(t, "DELETE", "/subscriberDevice/"+url.PathEscape(serial), nil, http.StatusOK) })
 	var device struct {
-		SubscriberID string `json:"subscriberId"`
+		SubscriberID   string `json:"subscriberId"`
+		RealMacAddress string `json:"realMacAddress"`
 	}
 	if err := json.Unmarshal(data, &device); err != nil {
 		t.Fatal(err)
 	}
 	if device.SubscriberID != f.id {
 		t.Fatalf("claim owner is %q; expected %q", device.SubscriberID, f.id)
+	}
+	if expectedMac := os.Getenv("SUBSCRIBER_CLAIM_REAL_MAC"); expectedMac != "" {
+		if device.RealMacAddress != expectedMac {
+			t.Fatalf("expected realMacAddress %q in subscriberDevice, got %q", expectedMac, device.RealMacAddress)
+		}
+		if rootToken := os.Getenv("ROOT_TOKEN"); rootToken != "" {
+			if !strings.HasPrefix(rootToken, "Bearer ") {
+				rootToken = "Bearer " + rootToken
+			}
+			invReq, err := http.NewRequest("GET", f.base+"/inventory/"+url.PathEscape(serial), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invReq.Header.Set("Authorization", rootToken)
+			invResp, err := f.client.Do(invReq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invData, err := io.ReadAll(invResp.Body)
+			invResp.Body.Close()
+			if invResp.StatusCode != http.StatusOK {
+				t.Fatalf("failed to GET inventory %s: %d: %s", serial, invResp.StatusCode, invData)
+			}
+			var inv struct {
+				RealMacAddress string `json:"realMacAddress"`
+			}
+			if err := json.Unmarshal(invData, &inv); err != nil {
+				t.Fatal(err)
+			}
+			if inv.RealMacAddress != expectedMac {
+				t.Fatalf("inventory realMacAddress was erased or altered: expected %q, got %q", expectedMac, inv.RealMacAddress)
+			}
+		}
 	}
 	f.request(t, "GET", "/subscriberDevice/"+url.PathEscape(serial), nil, http.StatusOK)
 	// An account with a claimed device must remain intact.
@@ -432,7 +467,11 @@ func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
 	base := strings.TrimRight(os.Getenv("OWPROV_INTERNAL_URL"), "/")
 	key, name := os.Getenv("OWPROV_INTERNAL_KEY"), os.Getenv("OWPROV_INTERNAL_NAME")
 	subID, opID := os.Getenv("SUBSCRIBER_ID"), os.Getenv("OPERATOR_ID")
-	if base == "" || key == "" || name == "" || subID == "" || opID == "" {
+	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
+		if base == "" || key == "" || name == "" || subID == "" || opID == "" {
+			t.Fatal("missing required environment variables under CI: OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID, OPERATOR_ID")
+		}
+	} else if base == "" || key == "" || name == "" || subID == "" || opID == "" {
 		t.Skip("set OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID and OPERATOR_ID")
 	}
 
@@ -442,6 +481,7 @@ func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
 	defer transport.CloseIdleConnections()
 
 	targetURL := base + "/subscriberDevice?subscriberId=" + url.QueryEscape(subID) + "&operatorId=" + url.QueryEscape(opID)
+	expectedSerial := os.Getenv("SUBSCRIBER_DEVICE_ID")
 
 	// Execute consecutive calls to verify that the 3-request cyclic failure never recurs.
 	for i := 1; i <= 6; i++ {
@@ -476,6 +516,18 @@ func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
 		}
 		if len(list.Devices) == 0 {
 			t.Fatalf("call %d: expected non-empty subscriberDevices, got empty list (cyclic regression detected!)", i)
+		}
+		if expectedSerial != "" {
+			found := false
+			for _, d := range list.Devices {
+				if d.SerialNumber == expectedSerial && d.SubscriberID == subID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("call %d: expected device %s for subscriber %s not found in list: %s", i, expectedSerial, subID, data)
+			}
 		}
 	}
 }
