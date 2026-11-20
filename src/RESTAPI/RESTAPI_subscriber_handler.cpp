@@ -264,21 +264,27 @@ namespace OpenWifi {
 		}
 		/*
 		 - For updateMac operation, the mac parameter must be present.
-		 - Normalized into canonical lowercase 12-hex format (via Utils::NormalizeMac()).
-		 - Verified unassigned across SubscriberDeviceDB, InventoryDB, and SignupDB.
+		 - For subscribers (self-care track):
+		     * Normalized into canonical lowercase 12-hex format (via Utils::NormalizeMac()).
+		     * Verified unassigned across SubscriberDeviceDB, InventoryDB, and SignupDB.
+		 - For administrators:
+		     * Preserves exact legacy behavior: an empty value (mac="") is allowed and
+		       denotes deletion of macAddress/serialNumber from table, with no uniqueness checks.
 		*/
 		if (Operation == "updateMac") {
 			std::string macAddress;
 			if (!HasParameter("mac", macAddress)) {
 				return BadRequest(RESTAPI::Errors::MissingOrInvalidParameters);
 			}
-			if (!Utils::NormalizeMac(macAddress)) {
-				return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
-			}
-			if (StorageService()->SubscriberDeviceDB().Exists("serialNumber", macAddress) ||
-				StorageService()->InventoryDB().Exists("serialNumber", macAddress) ||
-				(SE.macAddress != macAddress && StorageService()->SignupDB().Exists("macAddress", macAddress))) {
-				return BadRequest(RESTAPI::Errors::RecordNotUpdated);
+			if (isSubscriber) {
+				if (!Utils::NormalizeMac(macAddress)) {
+					return BadRequest(RESTAPI::Errors::ConfigBlockInvalid);
+				}
+				if (StorageService()->SubscriberDeviceDB().Exists("serialNumber", macAddress) ||
+					StorageService()->InventoryDB().Exists("serialNumber", macAddress) ||
+					(SE.macAddress != macAddress && StorageService()->SignupDB().Exists("macAddress", macAddress))) {
+					return BadRequest(RESTAPI::Errors::RecordNotUpdated);
+				}
 			}
 			poco_information(Logger(), fmt::format("Updating Signup device to [{}] for subscriber: [{}].", macAddress, SE.email));
 			SE.macAddress = macAddress;

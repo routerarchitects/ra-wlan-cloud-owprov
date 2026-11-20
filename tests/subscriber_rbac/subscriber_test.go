@@ -275,12 +275,131 @@ func TestSubscriberClaimUnclaim(t *testing.T) {
 	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusBadRequest)
 }
 
-func TestSubscriberAccountDeletion(t *testing.T) {
+func TestAdminUpdateMacEmptyAllowed(t *testing.T) {
 	f := setup(t)
+	rootToken := os.Getenv("ROOT_TOKEN")
+	if rootToken == "" {
+		t.Skip("set ROOT_TOKEN for admin updateMac regression test")
+	}
+	if !strings.HasPrefix(rootToken, "Bearer ") {
+		rootToken = "Bearer " + rootToken
+	}
+
+	signupUUID := os.Getenv("DISPOSABLE_SIGNUP_UUID")
+	if signupUUID == "" {
+		signupUUID = "signup-disposable-001"
+	}
+
+	// 1. Administrative PUT with mac="" succeeds
+	putURL := f.base + "/subscriber?operation=updateMac&signupUUID=" + url.QueryEscape(signupUUID) + "&mac="
+	req, err := http.NewRequest("PUT", putURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", rootToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Admin PUT updateMac with empty mac failed: expected 200, got %d: %s", resp.StatusCode, data)
+	}
+
+	// Verify both macAddress and serialNumber are empty in the response
+	var updateResp struct {
+		MacAddress   string `json:"macAddress"`
+		SerialNumber string `json:"serialNumber"`
+	}
+	if err := json.Unmarshal(data, &updateResp); err != nil {
+		t.Fatalf("Failed to parse updateMac response JSON: %v", err)
+	}
+	if updateResp.MacAddress != "" || updateResp.SerialNumber != "" {
+		t.Fatalf("Expected empty macAddress and serialNumber in update response, got macAddress=%q serialNumber=%q",
+			updateResp.MacAddress, updateResp.SerialNumber)
+	}
+
+	// 2. Retrieve the record again and verify both fields persisted as empty
+	getURL := f.base + "/subscriber?signupUUID=" + url.QueryEscape(signupUUID)
+	getReq, err := http.NewRequest("GET", getURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getReq.Header.Set("Authorization", rootToken)
+	getResp, err := f.client.Do(getReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer getResp.Body.Close()
+	getData, err := io.ReadAll(getResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("Admin GET subscriber by signupUUID failed: expected 200, got %d: %s", getResp.StatusCode, getData)
+	}
+
+	var getRecord struct {
+		MacAddress   string `json:"macAddress"`
+		SerialNumber string `json:"serialNumber"`
+	}
+	if err := json.Unmarshal(getData, &getRecord); err != nil {
+		t.Fatalf("Failed to parse GET subscriber response JSON: %v", err)
+	}
+	if getRecord.MacAddress != "" || getRecord.SerialNumber != "" {
+		t.Fatalf("Expected persisted empty macAddress and serialNumber, got macAddress=%q serialNumber=%q",
+			getRecord.MacAddress, getRecord.SerialNumber)
+	}
+
+	// 3. Verify a subscriber submitting mac="" still receives HTTP 400
+	subPutURL := f.base + "/subscriber?operation=updateMac&mac="
+	subReq, err := http.NewRequest("PUT", subPutURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := f.token
+	if !strings.HasPrefix(token, "Bearer ") {
+		token = "Bearer " + token
+	}
+	subReq.Header.Set("Authorization", token)
+	subReq.Header.Set("Content-Type", "application/json")
+	subResp, err := f.client.Do(subReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subResp.Body.Close()
+	subData, _ := io.ReadAll(subResp.Body)
+	if subResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Subscriber PUT updateMac with empty mac: expected 400 Bad Request, got %d: %s",
+			subResp.StatusCode, subData)
+	}
+}
+
+func TestSubscriberAccountDeletion(t *testing.T) {
 	if os.Getenv("SUBSCRIBER_DELETE_ACCOUNT") != "1" {
 		t.Skip("set SUBSCRIBER_DELETE_ACCOUNT=1 only for a disposable empty account")
 	}
+	f := setup(t)
+	targetToken := os.Getenv("SUBSCRIBER_DELETE_TOKEN")
+	targetID := os.Getenv("SUBSCRIBER_DELETE_ID")
+	if targetToken != "" && targetID != "" {
+		f.token = targetToken
+		f.id = targetID
+	}
+
+	// 1. Delete the disposable subscriber account (must succeed with 200 OK)
 	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusOK)
+
+	// 2. Subsequent GET must return 404 Not Found (account was deleted)
+	f.request(t, "GET", "/subscriber", nil, http.StatusNotFound)
+
+	// 3. Repeated DELETE must return 404 Not Found (idempotent / record gone)
+	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusNotFound)
 }
 
 // TestInternalServiceDeviceListConsecutiveCalls verifies that consecutive internal

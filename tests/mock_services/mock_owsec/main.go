@@ -401,6 +401,54 @@ func newMockStore() *MockStore {
 		}
 	}
 
+	seedSubscriber := func(id, email, name, token string) {
+		u := &UserRecord{
+			ID:         id,
+			Email:      email,
+			Username:   email,
+			Password:   "openwifi",
+			UserRole:   "subscriber",
+			Name:       name,
+			UserRights: []UserRight{{Role: "subscriber"}},
+		}
+		s.users[id] = u
+		s.users[email] = u
+		s.tokens[token] = &UserInfoAndPolicy{
+			TokenInfo: TokenInfo{
+				Token:       token,
+				AccessToken: token,
+				UserRole:    "subscriber",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+			},
+			UserInfo: UserInfo{
+				ID:         id,
+				Email:      email,
+				UserRole:   "subscriber",
+				Name:       name,
+				UserRights: []UserRight{{Role: "subscriber"}},
+			},
+			WebToken: WebToken{
+				AccessToken: token,
+				TokenType:   "Bearer",
+				Created:     time.Now().Unix(),
+				Expires:     time.Now().Add(24 * time.Hour).Unix(),
+				ExpiresIn:   86400,
+				ID:          id,
+			},
+			ExpiresOn: time.Now().Add(24 * time.Hour).Unix(),
+		}
+	}
+
+	// Foreign subscriber for cross-subscriber ownership testing
+	foreignSubID := "00000000-0000-0000-0000-000000000006"
+	seedSubscriber(foreignSubID, "foreign-subscriber@openwifi.local", "Foreign Subscriber User", "subscriber-foreign-token")
+
+	// Disposable subscriber for account deletion testing
+	disposableSubID := "00000000-0000-0000-0000-000000000007"
+	seedSubscriber(disposableSubID, "disposable-subscriber@openwifi.local", "Disposable Subscriber User", "subscriber-disposable-token")
+
 	return s
 }
 
