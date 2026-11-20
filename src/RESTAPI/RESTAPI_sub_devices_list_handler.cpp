@@ -10,7 +10,7 @@ namespace OpenWifi {
 	void RESTAPI_sub_devices_list_handler::DoGet() {
 		// --- Subscriber self-care path (subscriber_rbac.md sec 6.1) ---
 		// Collection scoped to CallerId; operatorId param is accepted but ignored.
-		if (UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER) {
+		if (IsSubscriber()) {
 			const std::string callerId = UserInfo_.userinfo.id;
 			SubscriberDeviceDB::RecordVec entries;
 			std::string whereClause = fmt::format(" subscriberId='{}' ", ORM::Escape(callerId));

@@ -282,3 +282,59 @@ func TestSubscriberAccountDeletion(t *testing.T) {
 	}
 	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusOK)
 }
+
+// TestInternalServiceDeviceListConsecutiveCalls verifies that consecutive internal
+// service calls (such as owsub calling owprov during GET /topology) without a Bearer
+// token reliably return subscriber devices on every request, verifying that no cyclic
+// failure occurs due to uninitialized userRole memory or accidental entry into subscriber self-care.
+func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("OWPROV_INTERNAL_URL"), "/")
+	key, name := os.Getenv("OWPROV_INTERNAL_KEY"), os.Getenv("OWPROV_INTERNAL_NAME")
+	subID, opID := os.Getenv("SUBSCRIBER_ID"), os.Getenv("OPERATOR_ID")
+	if base == "" || key == "" || name == "" || subID == "" || opID == "" {
+		t.Skip("set OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID and OPERATOR_ID")
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: os.Getenv("OWPROV_TEST_INSECURE_TLS") == "1"}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	defer transport.CloseIdleConnections()
+
+	targetURL := base + "/subscriberDevice?subscriberId=" + url.QueryEscape(subID) + "&operatorId=" + url.QueryEscape(opID)
+
+	// Execute consecutive calls to verify that the 3-request cyclic failure never recurs.
+	for i := 1; i <= 6; i++ {
+		req, err := http.NewRequest("GET", targetURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-API-KEY", key)
+		req.Header.Set("X-INTERNAL-NAME", name)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("call %d failed: %v", i, err)
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("call %d: failed to read body: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("call %d: expected status 200, got %d: %s", i, resp.StatusCode, data)
+		}
+
+		var list struct {
+			Devices []struct {
+				SerialNumber string `json:"serialNumber"`
+				SubscriberID string `json:"subscriberId"`
+			} `json:"subscriberDevices"`
+		}
+		if err := json.Unmarshal(data, &list); err != nil {
+			t.Fatalf("call %d: invalid JSON: %v", i, err)
+		}
+		if len(list.Devices) == 0 {
+			t.Fatalf("call %d: expected non-empty subscriberDevices, got empty list (cyclic regression detected!)", i)
+		}
+	}
+}

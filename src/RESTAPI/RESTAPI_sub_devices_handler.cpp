@@ -144,8 +144,7 @@ namespace OpenWifi {
 	bool RESTAPI_sub_devices_handler::ValidateRequestFields(
 		const SubscriberDeviceDB::RecordName &deviceObject) {
 		// operatorId has no subscriber authorization semantics (requirements 4.6).
-		const bool isSubscriber =
-			(UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER);
+		const bool isSubscriber = IsSubscriber();
 
 		if (!ValidDbId(deviceObject.managementPolicy, StorageService()->PolicyDB(), true,
 					   RESTAPI::Errors::UnknownManagementPolicyUUID, *this) ||
@@ -353,7 +352,7 @@ namespace OpenWifi {
 			BadRequest(RESTAPI::Errors::InvalidJSONDocument);
 			return false;
 		}
-		if (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER) {
+		if (IsSubscriber()) {
 			newObject.subscriberId = UserInfo_.userinfo.id;
 			ProvObjects::SignupEntry signupRecord;
 			if (StorageService()->SignupDB().GetRecord("userid", newObject.subscriberId, signupRecord)) {
@@ -371,7 +370,7 @@ namespace OpenWifi {
 		if (!ValidateRequestFields(newObject)) {
 			return false;
 		}
-		if (UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER) {
+		if (IsSubscriber()) {
 			ProvObjects::InventoryTag inventory;
 			if (!StorageService()->InventoryDB().GetRecord("serialNumber", newObject.serialNumber, inventory)) {
 				NotFound();

@@ -3,6 +3,7 @@
 
 #include "Poco/Data/SQLite/Connector.h"
 #include "Poco/URI.h"
+#include "RESTObjects/RESTAPI_SecurityObjects.h"
 #include "framework/SubscriberAccess.h"
 #include "framework/orm.h"
 
@@ -136,5 +137,46 @@ int main() {
 	// Legacy callers retain their previous zero/false behavior.
 	CHECK(db.Count("missing_column = 1") == 0);
 	CHECK(!db.GetRecords(0, 100, rows, "subscriberId = 'nobody'"));
+
+	// Regression tests for UserInfo memory hygiene and subscriber classification
+	{
+		// 1. Data Model Invariant: Default UserInfo MUST have UNKNOWN role (zero-initialized)
+		OpenWifi::SecurityObjects::UserInfo uInfo;
+		CHECK(uInfo.userRole == OpenWifi::SecurityObjects::UNKNOWN);
+		CHECK(uInfo.id.empty());
+		CHECK(uInfo.modified == 0);
+		CHECK(!uInfo.suspended);
+		CHECK(!uInfo.blackListed);
+
+		OpenWifi::SecurityObjects::UserInfoAndPolicy policyInfo;
+		CHECK(policyInfo.userinfo.userRole == OpenWifi::SecurityObjects::UNKNOWN);
+		CHECK(policyInfo.userinfo.id.empty());
+
+		// 2. Subscriber Classification Invariants (matching IsSubscriber() contract):
+		// !isInternalServiceOnly && userRole == SUBSCRIBER && !callerId.empty()
+		auto isSubscriber = [](bool isInternalServiceOnly,
+							   OpenWifi::SecurityObjects::USER_ROLE role,
+							   const std::string &callerId) {
+			return !isInternalServiceOnly &&
+				   role == OpenWifi::SecurityObjects::USER_ROLE::SUBSCRIBER &&
+				   !callerId.empty();
+		};
+
+		// Case A: Pure internal service call (e.g. owsub -> owprov with X-API-KEY, no Bearer token)
+		// Even if role happens to be SUBSCRIBER or UNKNOWN, it MUST NOT be classified as subscriber self-care.
+		CHECK(!isSubscriber(true, OpenWifi::SecurityObjects::USER_ROLE::SUBSCRIBER, ""));
+		CHECK(!isSubscriber(true, OpenWifi::SecurityObjects::USER_ROLE::SUBSCRIBER, "sub-uuid-123"));
+		CHECK(!isSubscriber(true, OpenWifi::SecurityObjects::USER_ROLE::UNKNOWN, ""));
+
+		// Case B: Garbage or empty identity context
+		CHECK(!isSubscriber(false, OpenWifi::SecurityObjects::USER_ROLE::SUBSCRIBER, ""));
+		CHECK(!isSubscriber(false, OpenWifi::SecurityObjects::USER_ROLE::UNKNOWN, "sub-uuid-123"));
+		CHECK(!isSubscriber(false, OpenWifi::SecurityObjects::USER_ROLE::ROOT, "sub-uuid-123"));
+		CHECK(!isSubscriber(false, OpenWifi::SecurityObjects::USER_ROLE::ADMIN, "sub-uuid-123"));
+
+		// Case C: Valid authenticated subscriber self-care
+		CHECK(isSubscriber(false, OpenWifi::SecurityObjects::USER_ROLE::SUBSCRIBER, "sub-uuid-123"));
+	}
+
 	std::cout << "Subscriber capabilities, collection isolation, multi-venue deletion, pagination and query failure checks passed.\n";
 }

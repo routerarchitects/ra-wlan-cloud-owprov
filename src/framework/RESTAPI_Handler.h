@@ -614,6 +614,12 @@ namespace OpenWifi {
 			return Internal_ && InternalServiceAuthenticated_ && UserInfo_.userinfo.id.empty() && Request != nullptr &&
 				   !Request->has("Authorization");
 		}
+
+		[[nodiscard]] inline bool IsSubscriber() const {
+			return !IsInternalServiceOnly() &&
+				   UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER &&
+				   !UserInfo_.userinfo.id.empty();
+		}
 		inline bool ValidateBearerToken(bool &Expired, bool &Contacted, bool Sub);
 		inline bool IsAuthorized(bool &Expired, bool &Contacted, bool SubOnly = false);
 
@@ -778,7 +784,7 @@ namespace OpenWifi {
 
 		Poco::Net::HTTPServerRequest *Request = nullptr;
 		Poco::Net::HTTPServerResponse *Response = nullptr;
-		SecurityObjects::UserInfoAndPolicy UserInfo_;
+		SecurityObjects::UserInfoAndPolicy UserInfo_{};
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method,

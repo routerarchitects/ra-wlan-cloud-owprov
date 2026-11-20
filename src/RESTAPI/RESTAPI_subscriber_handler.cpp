@@ -220,7 +220,7 @@ namespace OpenWifi {
 	//  this will be called by the SEC backend once the password has been verified,
 	//  or by a subscriber updating their MAC address (subscriber_rbac.md 5.1.3).
 	void RESTAPI_subscriber_handler::DoPut() {
-		const bool isSubscriber = (UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER);
+		const bool isSubscriber = IsSubscriber();
 		auto SignupUUID = GetParameter("signupUUID");
 		auto Operation = GetParameter("operation");
 		auto UserId = isSubscriber ? UserInfo_.userinfo.id : GetParameter("userId");
@@ -316,7 +316,7 @@ namespace OpenWifi {
 
 	void RESTAPI_subscriber_handler::DoGet() {
 		// --- Subscriber self-view path (subscriber_rbac.md sec 5.1.2) ---
-		if (UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER) {
+		if (IsSubscriber()) {
 			const std::string callerId = UserInfo_.userinfo.id;
 			if (HasParameter("email") || HasParameter("macAddress") || HasParameter("listOnly"))
 				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
@@ -399,7 +399,7 @@ namespace OpenWifi {
 	}
 
 	void RESTAPI_subscriber_handler::DoDelete() {
-		const bool isSubscriber = UserInfo_.userinfo.userRole == SecurityObjects::SUBSCRIBER;
+		const bool isSubscriber = IsSubscriber();
 		auto subscriberId = isSubscriber ? UserInfo_.userinfo.id : GetBinding("id", "");
 		if (subscriberId.empty() && !isSubscriber)
 			subscriberId = GetParameter("subscriberId", "");
