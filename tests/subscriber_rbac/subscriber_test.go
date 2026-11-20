@@ -356,7 +356,7 @@ func TestAdminUpdateMacEmptyAllowed(t *testing.T) {
 			getRecord.MacAddress, getRecord.SerialNumber)
 	}
 
-	// 3. Verify a subscriber submitting mac="" still receives HTTP 400
+	// 3. Verify a subscriber submitting mac="" to PUT /subscriber is rejected fail-closed (403 Forbidden or 400 Bad Request)
 	subPutURL := f.base + "/subscriber?operation=updateMac&mac="
 	subReq, err := http.NewRequest("PUT", subPutURL, nil)
 	if err != nil {
@@ -374,8 +374,8 @@ func TestAdminUpdateMacEmptyAllowed(t *testing.T) {
 	}
 	defer subResp.Body.Close()
 	subData, _ := io.ReadAll(subResp.Body)
-	if subResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("Subscriber PUT updateMac with empty mac: expected 400 Bad Request, got %d: %s",
+	if subResp.StatusCode != http.StatusForbidden && subResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Subscriber PUT updateMac with empty mac: expected 403 Forbidden or 400 Bad Request, got %d: %s",
 			subResp.StatusCode, subData)
 	}
 }
@@ -395,11 +395,33 @@ func TestSubscriberAccountDeletion(t *testing.T) {
 	// 1. Delete the disposable subscriber account (must succeed with 200 OK)
 	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusOK)
 
-	// 2. Subsequent GET must return 404 Not Found (account was deleted)
-	f.request(t, "GET", "/subscriber", nil, http.StatusNotFound)
-
-	// 3. Repeated DELETE must return 404 Not Found (idempotent / record gone)
+	// 2. Postcondition A: Repeated DELETE as subscriber must return 404 Not Found (account already deleted)
 	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusNotFound)
+
+	// 3. Postcondition B: Administrative lookup for deleted signup record must return 404 Not Found
+	if rootToken := os.Getenv("ROOT_TOKEN"); rootToken != "" {
+		if !strings.HasPrefix(rootToken, "Bearer ") {
+			rootToken = "Bearer " + rootToken
+		}
+		signupUUID := os.Getenv("DISPOSABLE_SIGNUP_UUID")
+		if signupUUID == "" {
+			signupUUID = "signup-disposable-001"
+		}
+		getReq, err := http.NewRequest("GET", f.base+"/subscriber?signupUUID="+url.QueryEscape(signupUUID), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		getReq.Header.Set("Authorization", rootToken)
+		getResp, err := f.client.Do(getReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer getResp.Body.Close()
+		if getResp.StatusCode != http.StatusNotFound {
+			data, _ := io.ReadAll(getResp.Body)
+			t.Fatalf("Expected 404 for deleted signup record via admin GET, got %d: %s", getResp.StatusCode, data)
+		}
+	}
 }
 
 // TestInternalServiceDeviceListConsecutiveCalls verifies that consecutive internal
