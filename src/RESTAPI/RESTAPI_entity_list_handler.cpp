@@ -42,21 +42,6 @@ namespace OpenWifi {
 
 		std::function<void(const std::string &)> addVenueAndDescendants;
 		std::function<void(const std::string &)> addEntityAndDescendants;
-		std::function<void(const std::string &)> addVenueAncestors;
-
-		addVenueAncestors = [&](const std::string &venueId) {
-			ProvObjects::Venue ven;
-			if (StorageService()->VenueDB().GetRecord("id", venueId, ven)) {
-				if (!ven.entity.empty()) {
-					VisibleEntities.insert(ven.entity);
-				}
-				if (!ven.parent.empty() && ven.parent != venueId) {
-					VisibleVenues.insert(ven.parent);
-					addVenueAncestors(ven.parent);
-				}
-			}
-		};
-
 		addVenueAndDescendants = [&](const std::string &venueId) {
 			if (VisibleVenues.count(venueId)) return;
 			VisibleVenues.insert(venueId);
@@ -84,8 +69,10 @@ namespace OpenWifi {
 			for (const auto &role : Roles) {
 				if (!role.venue.empty()) {
 					if (policyAllowsGet(role, "venue")) {
+						// An exact Venue role authorizes only that Venue. Unauthorized
+						// ancestors are not structural authorization and must not be
+						// exposed merely to preserve the original hierarchy path.
 						VisibleVenues.insert(role.venue);
-						addVenueAncestors(role.venue);
 					} else {
 						ProvObjects::Venue ven;
 						if (StorageService()->VenueDB().GetRecord("id", role.venue, ven)) {

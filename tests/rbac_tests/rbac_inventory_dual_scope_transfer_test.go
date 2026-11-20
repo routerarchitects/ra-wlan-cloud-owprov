@@ -40,6 +40,39 @@ type inventoryTagResponse struct {
 	Entity       string `json:"entity"`
 	Venue        string `json:"venue"`
 	DeviceType   string `json:"deviceType"`
+	Platform     string `json:"platform"`
+}
+
+func TestInventoryPlatformPersistence(t *testing.T) {
+	rootToken, _, _, entityId, _, _ := getLiveTestTokensAndFixtures(t)
+	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
+	deviceSerial, cleanup := getOrCreateTestDevice(t, client, rootToken, entityId, "")
+	defer cleanup()
+
+	assertPlatformUpdate := func(field, value, want string) {
+		t.Helper()
+		status, body, err := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s", deviceSerial), rootToken, map[string]interface{}{
+			field: value,
+		})
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("platform update via %s failed: status=%d err=%v body=%s", field, status, err, string(body))
+		}
+
+		getStatus, getBody, getErr := client.DoRequest("GET", fmt.Sprintf("/inventory/%s", deviceSerial), rootToken, nil)
+		if getErr != nil || getStatus != http.StatusOK {
+			t.Fatalf("inventory reload failed: status=%d err=%v body=%s", getStatus, getErr, string(getBody))
+		}
+		var got inventoryTagResponse
+		if err := json.Unmarshal(getBody, &got); err != nil {
+			t.Fatalf("decode inventory response: %v", err)
+		}
+		if got.Platform != want {
+			t.Fatalf("expected persisted platform %q after %s update, got %q", want, field, got.Platform)
+		}
+	}
+
+	assertPlatformUpdate("deviceGroup", "switch", "SWITCH")
+	assertPlatformUpdate("platform", "olg", "OLG")
 }
 
 // Helper to ensure an inventory device exists for testing
@@ -533,4 +566,3 @@ func TestInventoryDualScopeTransfer(t *testing.T) {
 		}
 	})
 }
-
