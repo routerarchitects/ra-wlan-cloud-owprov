@@ -2,7 +2,7 @@
 
 **Repository:** `ra-wlan-cloud-owprov`  
 **Issue:** #90  
-**Status:** Proposed  
+**Status:** Approved  
 
 ---
 

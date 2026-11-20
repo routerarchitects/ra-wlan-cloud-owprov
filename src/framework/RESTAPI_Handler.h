@@ -99,6 +99,10 @@ namespace OpenWifi {
 		bool RoleIsAuthorized(const std::string &Path, const std::string &Method,
 							  std::string &Reason);
 
+		// Subscriber self-care RBAC gate (subscriber_rbac.md sec 4.2)
+		bool AuthorizeSubscriberRequest(const std::string &Path, const std::string &Method,
+										std::string &Reason);
+
 		inline void handleRequest(Poco::Net::HTTPServerRequest &RequestIn,
 								  Poco::Net::HTTPServerResponse &ResponseIn) final {
 			try {
@@ -137,7 +141,12 @@ namespace OpenWifi {
 
 				std::string Reason;
 				if (!RoleIsAuthorized(RequestIn.getURI(), Request->getMethod(), Reason)) {
-					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED, Reason);
+					// AuthorizeSubscriberRequest may have already sent a 404 (uniform masking).
+					// Only send 403 if no response has been committed yet.
+					if (!Response->sent()) {
+						return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED, Reason);
+					}
+					return;
 				}
 
 				if (Request->getMethod() == Poco::Net::HTTPRequest::HTTP_GET)
@@ -237,6 +246,13 @@ namespace OpenWifi {
 			if (Hint == end(Parameters_))
 				return Default;
 			return Hint->second;
+		}
+
+		[[nodiscard]] inline bool HasParameter(const std::string &Name) {
+			auto Hint = std::find_if(
+				begin(Parameters_), end(Parameters_),
+				[&](const std::pair<std::string, std::string> &S) { return S.first == Name; });
+			return Hint != end(Parameters_);
 		}
 
 		[[nodiscard]] inline bool HasParameter(const std::string &Name, std::string &Value) {
@@ -590,9 +606,19 @@ namespace OpenWifi {
 			return true;
 		}
 
+		inline bool IsInternalServiceAuthenticated() const {
+			return Internal_ && InternalServiceAuthenticated_;
+		}
+
 		inline bool IsInternalServiceOnly() const {
-			return Internal_ && UserInfo_.userinfo.id.empty() && Request != nullptr &&
+			return Internal_ && InternalServiceAuthenticated_ && UserInfo_.userinfo.id.empty() && Request != nullptr &&
 				   !Request->has("Authorization");
+		}
+
+		[[nodiscard]] inline bool IsSubscriber() const {
+			return !IsInternalServiceOnly() &&
+				   UserInfo_.userinfo.userRole == SecurityObjects::USER_ROLE::SUBSCRIBER &&
+				   !UserInfo_.userinfo.id.empty();
 		}
 		inline bool ValidateBearerToken(bool &Expired, bool &Contacted, bool Sub);
 		inline bool IsAuthorized(bool &Expired, bool &Contacted, bool SubOnly = false);
@@ -758,7 +784,7 @@ namespace OpenWifi {
 
 		Poco::Net::HTTPServerRequest *Request = nullptr;
 		Poco::Net::HTTPServerResponse *Response = nullptr;
-		SecurityObjects::UserInfoAndPolicy UserInfo_;
+		SecurityObjects::UserInfoAndPolicy UserInfo_{};
 		QueryBlock QB_;
 		const std::string &Requester() const { return REST_Requester_; }
 		bool ResolveTargetContext(const std::string &Path, const std::string &Method,
@@ -785,6 +811,11 @@ namespace OpenWifi {
 		std::string GetResourceName(const std::string &Path);
 
 	  protected:
+		// Reuse the ownership-checked device in GET/DELETE (subscriber_rbac.md 4.3.2).
+		ProvObjects::SubscriberDevice MemoizedSubscriberDevice_;
+		bool MemoizedDeviceLoaded_ = false;
+		bool InternalServiceAuthenticated_ = false;
+
 		BindingMap Bindings_;
 		Poco::URI::QueryParameters Parameters_;
 		Poco::Logger &Logger_;
@@ -856,6 +887,7 @@ namespace OpenWifi {
 				}
 				return false;
 			}
+			InternalServiceAuthenticated_ = true;
 
 			if (Request->has("Authorization")) {
 				// Validate forwarded Bearer token so UserInfo_ and RBAC match the caller.

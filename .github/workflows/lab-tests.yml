@@ -717,6 +717,92 @@ jobs:
           TOKEN_ADMIN_OPERATOR_A: "Bearer user-admin-operator-a-token"
           TOKEN_VENUE_SHADOWED: "Bearer user-venue-shadowed-token"
 
+      # ── Run Subscriber RBAC Integration Tests (Auto-Seeded) ─────────────────
+      - name: Execute Subscriber RBAC Integration Tests
+        run: |
+          set -euo pipefail
+          # MicroService::LoadMyConfig uses SHA-256 of SYSTEM_URI_PUBLIC as its access key
+          export OWPROV_INTERNAL_KEY="$(printf '%s' 'https://localhost:16005' | sha256sum | cut -d ' ' -f1)"
+
+          # 0. Seed OperatorDB and SignupDB records for primary, foreign, and disposable subscribers
+          docker exec postgres psql -U owprov -d owprov -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO operators2 (id, name, description, notes, created, modified, registrationid) \
+             VALUES \
+             ('operator-uuid-001', 'Default Operator', '', '[]', 1600000000, 1600000000, 'operator1') \
+             ON CONFLICT (id) DO NOTHING; \
+             INSERT INTO signups5 (id, name, description, notes, created, modified, email, userid, serialnumber, submitted, completed, status, error, statuscode, macaddress, deviceid, registrationid, operatorid) \
+             VALUES \
+             ('signup-primary-001', 'primary-subscriber', '', '[]', 1600000000, 1600000000, 'subscriber@openwifi.local', '00000000-0000-0000-0000-000000000005', '24f5a2000002', 1600000000, 0, 'completed', 0, 0, '24f5a2000002', '', 'operator1', 'operator-uuid-001'), \
+             ('signup-foreign-001', 'foreign-subscriber', '', '[]', 1600000000, 1600000000, 'foreign-subscriber@openwifi.local', '00000000-0000-0000-0000-000000000006', '24f5a2000003', 1600000000, 0, 'completed', 0, 0, '24f5a2000003', '', 'operator1', 'operator-uuid-001'), \
+             ('signup-disposable-001', 'disposable-subscriber', '', '[]', 1600000000, 1600000000, 'disposable-subscriber@openwifi.local', '00000000-0000-0000-0000-000000000007', '', 1600000000, 0, 'completed', 0, 0, '', '', 'operator1', 'operator-uuid-001') \
+             ON CONFLICT (id) DO NOTHING;"
+
+          OPERATOR_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM operators2 WHERE id = 'operator-uuid-001';")
+          PRIMARY_SIGNUP=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM signups5 WHERE id = 'signup-primary-001' AND userid = '00000000-0000-0000-0000-000000000005';")
+          DISPOSABLE_SIGNUP=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM signups5 WHERE id = 'signup-disposable-001' AND userid = '00000000-0000-0000-0000-000000000007';")
+          if [ "$OPERATOR_COUNT" -ne 1 ] || [ "$PRIMARY_SIGNUP" -ne 1 ] || [ "$DISPOSABLE_SIGNUP" -ne 1 ]; then
+            echo "ERROR: Failed to verify seeded records (operator: $OPERATOR_COUNT, primary: $PRIMARY_SIGNUP, disposable: $DISPOSABLE_SIGNUP)"
+            exit 1
+          fi
+
+          # 1. Seed disposable inventory item for Claim/Unclaim test (12-hex MAC)
+          curl -k -s --fail-with-body -X POST "https://localhost:16005/api/v1/inventory/24f5a2000001" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"claim-test-device","serialNumber":"24f5a2000001","deviceType":"edgecore_eap101","devClass":"any","realMacAddress":"24:f5:a2:00:00:01"}'
+
+          # 2. Seed an owned device for primary subscriber (12-hex MAC)
+          curl -k -s --fail-with-body -X POST "https://localhost:16005/api/v1/inventory/24f5a2000002" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"owned-device","serialNumber":"24f5a2000002","deviceType":"edgecore_eap101","devClass":"any","realMacAddress":"24:f5:a2:00:00:02"}'
+
+          curl -k -s --fail-with-body -X POST "https://localhost:16005/api/v1/subscriberDevice/0" \
+            -H "Authorization: Bearer subscriber-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"my-owned-router","serialNumber":"24f5a2000002","deviceGroup":"olg"}'
+
+          # 3. Seed and claim a foreign device for foreign subscriber (12-hex MAC)
+          curl -k -s --fail-with-body -X POST "https://localhost:16005/api/v1/inventory/24f5a2000003" \
+            -H "Authorization: Bearer root-test-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"foreign-device","serialNumber":"24f5a2000003","deviceType":"edgecore_eap101","devClass":"any","realMacAddress":"24:f5:a2:00:00:03"}'
+
+          curl -k -s --fail-with-body -X POST "https://localhost:16005/api/v1/subscriberDevice/0" \
+            -H "Authorization: Bearer subscriber-foreign-token" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"foreign-owned-router","serialNumber":"24f5a2000003","deviceGroup":"olg"}'
+
+          # Verify device ownership in sub_devices4
+          OWNED_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM sub_devices4 WHERE serialnumber = '24f5a2000002' AND subscriberid = '00000000-0000-0000-0000-000000000005';")
+          FOREIGN_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM sub_devices4 WHERE serialnumber = '24f5a2000003' AND subscriberid = '00000000-0000-0000-0000-000000000006';")
+          if [ "$OWNED_COUNT" -ne 1 ] || [ "$FOREIGN_COUNT" -ne 1 ]; then
+            echo "ERROR: Failed to verify device ownership in sub_devices4 (owned: $OWNED_COUNT, foreign: $FOREIGN_COUNT)"
+            exit 1
+          fi
+
+          # 4. Execute all tests in the subscriber suite
+          go test -v ./...
+        working-directory: ${{ github.workspace }}/tests/subscriber_rbac
+        env:
+          OWPROV_SUBSCRIBER_URL: "https://localhost:16005/api/v1"
+          ROOT_TOKEN: "root-test-token"
+          SUBSCRIBER_TOKEN: "subscriber-test-token"
+          SUBSCRIBER_ID: "00000000-0000-0000-0000-000000000005"
+          OPERATOR_ID: "operator-uuid-001"
+          OWPROV_INTERNAL_URL: "https://localhost:17005/api/v1"
+          OWPROV_INTERNAL_NAME: "https://owprov-integration-test.local"
+          OWPROV_TEST_INSECURE_TLS: "1"
+          SUBSCRIBER_CLAIM_SERIAL: "24f5a2000001"
+          SUBSCRIBER_CLAIM_GROUP: "ap"
+          SUBSCRIBER_CLAIM_REAL_MAC: "24:f5:a2:00:00:01"
+          SUBSCRIBER_DEVICE_ID: "24f5a2000002"
+          FOREIGN_SUBSCRIBER_DEVICE_ID: "24f5a2000003"
+          SUBSCRIBER_DELETE_TOKEN: "subscriber-disposable-token"
+          SUBSCRIBER_DELETE_ID: "00000000-0000-0000-0000-000000000007"
+          SUBSCRIBER_DELETE_ACCOUNT: "1"
+          DISPOSABLE_SIGNUP_UUID: "signup-disposable-001"
+
       # ── Upload results ────────────────────────────────────────────────────────
       - name: Upload Test Result Artifacts
         if: always()

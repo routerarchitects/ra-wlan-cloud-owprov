@@ -1,0 +1,533 @@
+package subscriber_rbac
+
+import (
+	"bytes"
+	"crypto/tls"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+type fixture struct {
+	base, token, id string
+	client          *http.Client
+}
+
+func setup(t *testing.T) fixture {
+	t.Helper()
+	f := fixture{base: strings.TrimRight(os.Getenv("OWPROV_SUBSCRIBER_URL"), "/"),
+		token: os.Getenv("SUBSCRIBER_TOKEN"), id: os.Getenv("SUBSCRIBER_ID")}
+	if f.base == "" || f.token == "" || f.id == "" {
+		t.Skip("set OWPROV_SUBSCRIBER_URL (including /api/v1), SUBSCRIBER_TOKEN and SUBSCRIBER_ID")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: os.Getenv("OWPROV_TEST_INSECURE_TLS") == "1"}
+	f.client = &http.Client{Transport: transport, Timeout: 120 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	t.Cleanup(transport.CloseIdleConnections)
+	return f
+}
+
+func (f fixture) request(t *testing.T, method, path string, payload any, expected int) []byte {
+	t.Helper()
+	var body io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, f.base+path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := f.token
+	if !strings.HasPrefix(token, "Bearer ") {
+		token = "Bearer " + token
+	}
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != expected {
+		t.Fatalf("%s %s: expected %d, got %d: %s", method, path, expected, resp.StatusCode, data)
+	}
+	return data
+}
+
+func TestSubscriberCollection(t *testing.T) {
+	f := setup(t)
+	for _, query := range []string{"", "?operatorId=nonexistent", "?subscriberId=" + url.QueryEscape(f.id), "?limit=1&offset=1"} {
+		data := f.request(t, "GET", "/subscriberDevice"+query, nil, http.StatusOK)
+		var list struct {
+			Devices []struct {
+				SubscriberID string `json:"subscriberId"`
+			} `json:"subscriberDevices"`
+		}
+		if err := json.Unmarshal(data, &list); err != nil {
+			t.Fatal(err)
+		}
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(data, &object); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := object["subscriberDevices"]; !ok {
+			t.Fatal("missing subscriberDevices collection")
+		}
+		for _, device := range list.Devices {
+			if device.SubscriberID != f.id {
+				t.Fatalf("foreign device in subscriber collection: %s", data)
+			}
+		}
+	}
+	for _, id := range []string{"", "another-subscriber"} {
+		f.request(t, "GET", "/subscriberDevice?subscriberId="+id, nil, http.StatusForbidden)
+	}
+}
+
+func TestSubscriberDeviceOwnership(t *testing.T) {
+	f := setup(t)
+	owned, foreign := os.Getenv("SUBSCRIBER_DEVICE_ID"), os.Getenv("FOREIGN_SUBSCRIBER_DEVICE_ID")
+	if owned == "" || foreign == "" {
+		t.Skip("set owned SUBSCRIBER_DEVICE_ID and FOREIGN_SUBSCRIBER_DEVICE_ID")
+	}
+	f.request(t, "GET", "/subscriberDevice/"+url.PathEscape(owned), nil, http.StatusOK)
+	missing := "/subscriberDevice/00000000-0000-4000-8000-000000000099"
+	for _, method := range []string{"GET", "DELETE"} {
+		foreignBody := f.request(t, method, "/subscriberDevice/"+url.PathEscape(foreign), nil, http.StatusNotFound)
+		missingBody := f.request(t, method, missing, nil, http.StatusNotFound)
+		if !bytes.Equal(foreignBody, missingBody) {
+			t.Fatalf("%s foreign/missing response bodies differ", method)
+		}
+	}
+}
+
+func TestSubscriberDeniedOperations(t *testing.T) {
+	f := setup(t)
+	for _, tc := range []struct{ method, path string }{
+		{"PUT", "/subscriberDevice/aabbccddeeff"},
+		{"POST", "/subscriberDevice/new"},
+		{"POST", "/subscriberDevice/aabbccddeeff"},
+		{"POST", "/subscriber"},
+		{"DELETE", "/subscriber/another-subscriber"},
+		{"GET", "/configuration/00000000-0000-4000-8000-000000000099"},
+		{"GET", "/configuration/00000000-0000-4000-8000-000000000099?next=/api/v1/subscriberDevice"},
+	} {
+		f.request(t, tc.method, tc.path, map[string]any{}, http.StatusForbidden)
+	}
+	for _, payload := range []map[string]any{
+		{"subscriberId": "another-subscriber"},
+		{"subscriberId": ""},
+		{"managementPolicy": "some-policy"},
+		{"deviceConfiguration": "00000000-0000-4000-8000-000000000099"},
+		{"realMacAddress": "24:f5:a2:00:00:99"},
+	} {
+		f.request(t, "POST", "/subscriberDevice/0", payload, http.StatusForbidden)
+	}
+	f.request(t, "POST", "/subscriberDevice/0", map[string]any{"subscriberId": 123}, http.StatusBadRequest)
+}
+
+func TestInternalRegistrationRouting(t *testing.T) {
+	f := setup(t)
+	base := strings.TrimRight(os.Getenv("OWPROV_INTERNAL_URL"), "/")
+	key, name := os.Getenv("OWPROV_INTERNAL_KEY"), os.Getenv("OWPROV_INTERNAL_NAME")
+	if base == "" || key == "" || name == "" {
+		t.Skip("set OWPROV_INTERNAL_URL (including /api/v1), OWPROV_INTERNAL_KEY and OWPROV_INTERNAL_NAME")
+	}
+	for _, tc := range []struct {
+		label, key, name string
+		status           int
+	}{
+		{"invalid key", "invalid-test-key", name, http.StatusForbidden},
+		{"missing key", "", name, http.StatusForbidden},
+		{"missing name", key, "", http.StatusForbidden},
+		// Valid service credentials must reach the existing signup handler. Missing
+		// signup parameters deliberately produce 400 without registering an account.
+		{"existing signup handler", key, name, http.StatusBadRequest},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			req, err := http.NewRequest("POST", base+"/subscriber", strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			token := f.token
+			if !strings.HasPrefix(token, "Bearer ") {
+				token = "Bearer " + token
+			}
+			req.Header.Set("Authorization", token)
+			req.Header.Set("Content-Type", "application/json")
+			if tc.key != "" {
+				req.Header.Set("X-API-KEY", tc.key)
+			}
+			if tc.name != "" {
+				req.Header.Set("X-INTERNAL-NAME", tc.name)
+			}
+			resp, err := f.client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("expected %d, got %d", tc.status, resp.StatusCode)
+			}
+		})
+	}
+
+	// Internal signup carrying query parameters (e.g. ?email=...&registrationId=...)
+	// must normalize the URI path and reach the handler rather than being denied with 403.
+	t.Run("signup with query parameters", func(t *testing.T) {
+		req, err := http.NewRequest("POST", base+"/subscriber?email=test%40example.com&registrationId=operator1", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		token := f.token
+		if !strings.HasPrefix(token, "Bearer ") {
+			token = "Bearer " + token
+		}
+		req.Header.Set("Authorization", token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-KEY", key)
+		req.Header.Set("X-INTERNAL-NAME", name)
+		resp, err := f.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected %d, got %d", http.StatusBadRequest, resp.StatusCode)
+		}
+	})
+
+	// Internal credentials combined with a subscriber Bearer token must still be denied
+	// on unrelated restricted endpoints by standard subscriber RBAC.
+	t.Run("unrelated restricted endpoint denied", func(t *testing.T) {
+		req, err := http.NewRequest("PUT", base+"/subscriberDevice/0", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		token := f.token
+		if !strings.HasPrefix(token, "Bearer ") {
+			token = "Bearer " + token
+		}
+		req.Header.Set("Authorization", token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-KEY", key)
+		req.Header.Set("X-INTERNAL-NAME", name)
+		resp, err := f.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected %d, got %d", http.StatusForbidden, resp.StatusCode)
+		}
+	})
+}
+
+// Explicit opt-in: the serial must be an available inventory device dedicated to
+// this test. Unclaim runs even if an assertion after successful creation fails.
+func TestSubscriberClaimUnclaim(t *testing.T) {
+	f := setup(t)
+	serial := os.Getenv("SUBSCRIBER_CLAIM_SERIAL")
+	if serial == "" {
+		t.Skip("set SUBSCRIBER_CLAIM_SERIAL for a disposable inventory device")
+	}
+	group := os.Getenv("SUBSCRIBER_CLAIM_GROUP")
+	if group == "" {
+		group = "olg"
+	}
+	var configuration any
+	if raw := os.Getenv("SUBSCRIBER_CLAIM_CONFIGURATION"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &configuration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := map[string]any{"name": "subscriber-rbac-test", "serialNumber": serial,
+		"operatorId": "nonexistent", "deviceGroup": group}
+	if configuration != nil {
+		payload["configuration"] = configuration
+	}
+	data := f.request(t, "POST", "/subscriberDevice/0", payload, http.StatusOK)
+	t.Cleanup(func() { f.request(t, "DELETE", "/subscriberDevice/"+url.PathEscape(serial), nil, http.StatusOK) })
+	var device struct {
+		SubscriberID   string `json:"subscriberId"`
+		RealMacAddress string `json:"realMacAddress"`
+	}
+	if err := json.Unmarshal(data, &device); err != nil {
+		t.Fatal(err)
+	}
+	if device.SubscriberID != f.id {
+		t.Fatalf("claim owner is %q; expected %q", device.SubscriberID, f.id)
+	}
+	if expectedMac := os.Getenv("SUBSCRIBER_CLAIM_REAL_MAC"); expectedMac != "" {
+		if device.RealMacAddress != expectedMac {
+			t.Fatalf("expected realMacAddress %q in subscriberDevice, got %q", expectedMac, device.RealMacAddress)
+		}
+		if rootToken := os.Getenv("ROOT_TOKEN"); rootToken != "" {
+			if !strings.HasPrefix(rootToken, "Bearer ") {
+				rootToken = "Bearer " + rootToken
+			}
+			invReq, err := http.NewRequest("GET", f.base+"/inventory/"+url.PathEscape(serial), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invReq.Header.Set("Authorization", rootToken)
+			invResp, err := f.client.Do(invReq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invData, err := io.ReadAll(invResp.Body)
+			invResp.Body.Close()
+			if invResp.StatusCode != http.StatusOK {
+				t.Fatalf("failed to GET inventory %s: %d: %s", serial, invResp.StatusCode, invData)
+			}
+			var inv struct {
+				RealMacAddress string `json:"realMacAddress"`
+			}
+			if err := json.Unmarshal(invData, &inv); err != nil {
+				t.Fatal(err)
+			}
+			if inv.RealMacAddress != expectedMac {
+				t.Fatalf("inventory realMacAddress was erased or altered: expected %q, got %q", expectedMac, inv.RealMacAddress)
+			}
+		}
+	}
+	f.request(t, "GET", "/subscriberDevice/"+url.PathEscape(serial), nil, http.StatusOK)
+	// An account with a claimed device must remain intact.
+	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusBadRequest)
+}
+
+func TestAdminUpdateMacEmptyAllowed(t *testing.T) {
+	f := setup(t)
+	rootToken := os.Getenv("ROOT_TOKEN")
+	if rootToken == "" {
+		t.Skip("set ROOT_TOKEN for admin updateMac regression test")
+	}
+	if !strings.HasPrefix(rootToken, "Bearer ") {
+		rootToken = "Bearer " + rootToken
+	}
+
+	signupUUID := os.Getenv("DISPOSABLE_SIGNUP_UUID")
+	if signupUUID == "" {
+		signupUUID = "signup-disposable-001"
+	}
+
+	// 1. Administrative PUT with mac="" succeeds
+	putURL := f.base + "/subscriber?operation=updateMac&signupUUID=" + url.QueryEscape(signupUUID) + "&mac="
+	req, err := http.NewRequest("PUT", putURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", rootToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Admin PUT updateMac with empty mac failed: expected 200, got %d: %s", resp.StatusCode, data)
+	}
+
+	// Verify both macAddress and serialNumber are empty in the response
+	var updateResp struct {
+		MacAddress   string `json:"macAddress"`
+		SerialNumber string `json:"serialNumber"`
+	}
+	if err := json.Unmarshal(data, &updateResp); err != nil {
+		t.Fatalf("Failed to parse updateMac response JSON: %v", err)
+	}
+	if updateResp.MacAddress != "" || updateResp.SerialNumber != "" {
+		t.Fatalf("Expected empty macAddress and serialNumber in update response, got macAddress=%q serialNumber=%q",
+			updateResp.MacAddress, updateResp.SerialNumber)
+	}
+
+	// 2. Retrieve the record again and verify both fields persisted as empty
+	getURL := f.base + "/subscriber?signupUUID=" + url.QueryEscape(signupUUID)
+	getReq, err := http.NewRequest("GET", getURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getReq.Header.Set("Authorization", rootToken)
+	getResp, err := f.client.Do(getReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer getResp.Body.Close()
+	getData, err := io.ReadAll(getResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("Admin GET subscriber by signupUUID failed: expected 200, got %d: %s", getResp.StatusCode, getData)
+	}
+
+	var getRecord struct {
+		MacAddress   string `json:"macAddress"`
+		SerialNumber string `json:"serialNumber"`
+	}
+	if err := json.Unmarshal(getData, &getRecord); err != nil {
+		t.Fatalf("Failed to parse GET subscriber response JSON: %v", err)
+	}
+	if getRecord.MacAddress != "" || getRecord.SerialNumber != "" {
+		t.Fatalf("Expected persisted empty macAddress and serialNumber, got macAddress=%q serialNumber=%q",
+			getRecord.MacAddress, getRecord.SerialNumber)
+	}
+
+	// 3. Verify a subscriber submitting mac="" to PUT /subscriber is rejected fail-closed (403 Forbidden or 400 Bad Request)
+	subPutURL := f.base + "/subscriber?operation=updateMac&mac="
+	subReq, err := http.NewRequest("PUT", subPutURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := f.token
+	if !strings.HasPrefix(token, "Bearer ") {
+		token = "Bearer " + token
+	}
+	subReq.Header.Set("Authorization", token)
+	subReq.Header.Set("Content-Type", "application/json")
+	subResp, err := f.client.Do(subReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subResp.Body.Close()
+	subData, _ := io.ReadAll(subResp.Body)
+	if subResp.StatusCode != http.StatusForbidden && subResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Subscriber PUT updateMac with empty mac: expected 403 Forbidden or 400 Bad Request, got %d: %s",
+			subResp.StatusCode, subData)
+	}
+}
+
+func TestSubscriberAccountDeletion(t *testing.T) {
+	if os.Getenv("SUBSCRIBER_DELETE_ACCOUNT") != "1" {
+		t.Skip("set SUBSCRIBER_DELETE_ACCOUNT=1 only for a disposable empty account")
+	}
+	f := setup(t)
+	targetToken := os.Getenv("SUBSCRIBER_DELETE_TOKEN")
+	targetID := os.Getenv("SUBSCRIBER_DELETE_ID")
+	if targetToken != "" && targetID != "" {
+		f.token = targetToken
+		f.id = targetID
+	}
+
+	// 1. Delete the disposable subscriber account (must succeed with 200 OK)
+	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusOK)
+
+	// 2. Postcondition A: Repeated DELETE as subscriber must return 404 Not Found (account already deleted)
+	f.request(t, "DELETE", "/subscriber/"+url.PathEscape(f.id), nil, http.StatusNotFound)
+
+	// 3. Postcondition B: Administrative lookup for deleted signup record must return 404 Not Found
+	if rootToken := os.Getenv("ROOT_TOKEN"); rootToken != "" {
+		if !strings.HasPrefix(rootToken, "Bearer ") {
+			rootToken = "Bearer " + rootToken
+		}
+		signupUUID := os.Getenv("DISPOSABLE_SIGNUP_UUID")
+		if signupUUID == "" {
+			signupUUID = "signup-disposable-001"
+		}
+		getReq, err := http.NewRequest("GET", f.base+"/subscriber?signupUUID="+url.QueryEscape(signupUUID), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		getReq.Header.Set("Authorization", rootToken)
+		getResp, err := f.client.Do(getReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer getResp.Body.Close()
+		if getResp.StatusCode != http.StatusNotFound {
+			data, _ := io.ReadAll(getResp.Body)
+			t.Fatalf("Expected 404 for deleted signup record via admin GET, got %d: %s", getResp.StatusCode, data)
+		}
+	}
+}
+
+// TestInternalServiceDeviceListConsecutiveCalls verifies that consecutive internal
+// service calls (such as owsub calling owprov during GET /topology) without a Bearer
+// token reliably return subscriber devices on every request, verifying that no cyclic
+// failure occurs due to uninitialized userRole memory or accidental entry into subscriber self-care.
+func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
+	base := strings.TrimRight(os.Getenv("OWPROV_INTERNAL_URL"), "/")
+	key, name := os.Getenv("OWPROV_INTERNAL_KEY"), os.Getenv("OWPROV_INTERNAL_NAME")
+	subID, opID := os.Getenv("SUBSCRIBER_ID"), os.Getenv("OPERATOR_ID")
+	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
+		if base == "" || key == "" || name == "" || subID == "" || opID == "" {
+			t.Fatal("missing required environment variables under CI: OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID, OPERATOR_ID")
+		}
+	} else if base == "" || key == "" || name == "" || subID == "" || opID == "" {
+		t.Skip("set OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID and OPERATOR_ID")
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: os.Getenv("OWPROV_TEST_INSECURE_TLS") == "1"}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	defer transport.CloseIdleConnections()
+
+	targetURL := base + "/subscriberDevice?subscriberId=" + url.QueryEscape(subID) + "&operatorId=" + url.QueryEscape(opID)
+	expectedSerial := os.Getenv("SUBSCRIBER_DEVICE_ID")
+
+	// Execute consecutive calls to verify that the 3-request cyclic failure never recurs.
+	for i := 1; i <= 6; i++ {
+		req, err := http.NewRequest("GET", targetURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-API-KEY", key)
+		req.Header.Set("X-INTERNAL-NAME", name)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("call %d failed: %v", i, err)
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("call %d: failed to read body: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("call %d: expected status 200, got %d: %s", i, resp.StatusCode, data)
+		}
+
+		var list struct {
+			Devices []struct {
+				SerialNumber string `json:"serialNumber"`
+				SubscriberID string `json:"subscriberId"`
+			} `json:"subscriberDevices"`
+		}
+		if err := json.Unmarshal(data, &list); err != nil {
+			t.Fatalf("call %d: invalid JSON: %v", i, err)
+		}
+		if len(list.Devices) == 0 {
+			t.Fatalf("call %d: expected non-empty subscriberDevices, got empty list (cyclic regression detected!)", i)
+		}
+		if expectedSerial != "" {
+			found := false
+			for _, d := range list.Devices {
+				if d.SerialNumber == expectedSerial && d.SubscriberID == subID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("call %d: expected device %s for subscriber %s not found in list: %s", i, expectedSerial, subID, data)
+			}
+		}
+	}
+}

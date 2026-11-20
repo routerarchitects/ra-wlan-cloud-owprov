@@ -149,7 +149,7 @@ namespace OpenWifi {
 			std::string createdBy;
 			bool suspended = false;
 			bool blackListed = false;
-			USER_ROLE userRole;
+			USER_ROLE userRole = UNKNOWN;
 			UserLoginLoginExtensions userTypeProprietaryInfo;
 			std::string securityPolicy;
 			uint64_t securityPolicyChange = 0;
@@ -157,7 +157,7 @@ namespace OpenWifi {
 			OpenWifi::Types::StringVec lastPasswords;
 			std::string oauthType;
 			std::string oauthUserInfo;
-			uint64_t modified;
+			uint64_t modified = 0;
 			std::string signingUp;
 
 			void to_json(Poco::JSON::Object &Obj) const;
