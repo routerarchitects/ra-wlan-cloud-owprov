@@ -700,7 +700,12 @@ namespace ORM {
 		typedef RecordType RecordName;
 
 		bool GetRecords(uint64_t Offset, uint64_t HowMany, RecordVec &Records,
-						const std::string &Where = "", const std::string &OrderBy = "") {
+							const std::string &Where = "", const std::string &OrderBy = "",
+							bool *QuerySucceeded = nullptr) {
+			// Optional status distinguishes an empty page from a database failure
+			// without changing the legacy return value for existing callers.
+			if (QuerySucceeded)
+				*QuerySucceeded = false;
 			try {
 				Poco::Data::Session Session = Pool_.get();
 				Poco::Data::Statement Select(Session);
@@ -718,8 +723,12 @@ namespace ORM {
 						Convert(i, R);
 						Records.template emplace_back(R);
 					}
+					if (QuerySucceeded)
+						*QuerySucceeded = true;
 					return true;
 				}
+				if (QuerySucceeded)
+					*QuerySucceeded = true;
 				return false;
 			} catch (const Poco::Exception &E) {
 				Logger_.log(E);
@@ -923,7 +932,9 @@ namespace ORM {
 			return true;
 		}
 
-		uint64_t Count(const std::string &Where = "") {
+		uint64_t Count(const std::string &Where = "", bool *QuerySucceeded = nullptr) {
+			if (QuerySucceeded)
+				*QuerySucceeded = false;
 			try {
 				uint64_t Cnt = 0;
 
@@ -936,6 +947,8 @@ namespace ORM {
 				Select << st, Poco::Data::Keywords::into(Cnt);
 				Select.execute();
 
+				if (QuerySucceeded)
+					*QuerySucceeded = true;
 				return Cnt;
 
 			} catch (const Poco::Exception &E) {
