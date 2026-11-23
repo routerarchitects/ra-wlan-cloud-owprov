@@ -719,11 +719,11 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"name":"foreign-owned-router","serialNumber":"24f5a2000003","deviceGroup":"olg"}'
 
-          # Verify device ownership in sub_devices4
-          OWNED_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM sub_devices4 WHERE serialnumber = '24f5a2000002' AND subscriberid = '00000000-0000-0000-0000-000000000005';")
-          FOREIGN_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM sub_devices4 WHERE serialnumber = '24f5a2000003' AND subscriberid = '00000000-0000-0000-0000-000000000006';")
+          # Verify device ownership and operator association in sub_devices4
+          OWNED_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM sub_devices4 WHERE serialnumber = '24f5a2000002' AND subscriberid = '00000000-0000-0000-0000-000000000005' AND operatorid = 'operator-uuid-001';")
+          FOREIGN_COUNT=$(docker exec postgres psql -U owprov -d owprov -t -A -c "SELECT COUNT(*) FROM sub_devices4 WHERE serialnumber = '24f5a2000003' AND subscriberid = '00000000-0000-0000-0000-000000000006' AND operatorid = 'operator-uuid-001';")
           if [ "$OWNED_COUNT" -ne 1 ] || [ "$FOREIGN_COUNT" -ne 1 ]; then
-            echo "ERROR: Failed to verify device ownership in sub_devices4 (owned: $OWNED_COUNT, foreign: $FOREIGN_COUNT)"
+            echo "ERROR: Failed to verify device ownership and operator association in sub_devices4 (owned: $OWNED_COUNT, foreign: $FOREIGN_COUNT)"
             exit 1
           fi
 

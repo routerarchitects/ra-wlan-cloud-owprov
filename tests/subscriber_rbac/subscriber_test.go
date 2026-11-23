@@ -467,9 +467,10 @@ func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
 	base := strings.TrimRight(os.Getenv("OWPROV_INTERNAL_URL"), "/")
 	key, name := os.Getenv("OWPROV_INTERNAL_KEY"), os.Getenv("OWPROV_INTERNAL_NAME")
 	subID, opID := os.Getenv("SUBSCRIBER_ID"), os.Getenv("OPERATOR_ID")
+	expectedSerial := os.Getenv("SUBSCRIBER_DEVICE_ID")
 	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
-		if base == "" || key == "" || name == "" || subID == "" || opID == "" {
-			t.Fatal("missing required environment variables under CI: OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID, OPERATOR_ID")
+		if base == "" || key == "" || name == "" || subID == "" || opID == "" || expectedSerial == "" {
+			t.Fatal("missing required environment variables under CI: OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID, OPERATOR_ID, SUBSCRIBER_DEVICE_ID")
 		}
 	} else if base == "" || key == "" || name == "" || subID == "" || opID == "" {
 		t.Skip("set OWPROV_INTERNAL_URL, OWPROV_INTERNAL_KEY, OWPROV_INTERNAL_NAME, SUBSCRIBER_ID and OPERATOR_ID")
@@ -481,7 +482,6 @@ func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
 	defer transport.CloseIdleConnections()
 
 	targetURL := base + "/subscriberDevice?subscriberId=" + url.QueryEscape(subID) + "&operatorId=" + url.QueryEscape(opID)
-	expectedSerial := os.Getenv("SUBSCRIBER_DEVICE_ID")
 
 	// Execute consecutive calls to verify that the 3-request cyclic failure never recurs.
 	for i := 1; i <= 6; i++ {
@@ -517,17 +517,18 @@ func TestInternalServiceDeviceListConsecutiveCalls(t *testing.T) {
 		if len(list.Devices) == 0 {
 			t.Fatalf("call %d: expected non-empty subscriberDevices, got empty list (cyclic regression detected!)", i)
 		}
-		if expectedSerial != "" {
-			found := false
-			for _, d := range list.Devices {
-				if d.SerialNumber == expectedSerial && d.SubscriberID == subID {
-					found = true
-					break
-				}
+
+		foundExpected := false
+		for _, d := range list.Devices {
+			if d.SubscriberID != subID {
+				t.Fatalf("call %d: foreign device %s (subscriber %s) found in list scoped to subscriber %s: %s", i, d.SerialNumber, d.SubscriberID, subID, data)
 			}
-			if !found {
-				t.Fatalf("call %d: expected device %s for subscriber %s not found in list: %s", i, expectedSerial, subID, data)
+			if expectedSerial != "" && d.SerialNumber == expectedSerial {
+				foundExpected = true
 			}
+		}
+		if expectedSerial != "" && !foundExpected {
+			t.Fatalf("call %d: expected device %s for subscriber %s not found in list: %s", i, expectedSerial, subID, data)
 		}
 	}
 }
