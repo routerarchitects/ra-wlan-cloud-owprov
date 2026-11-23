@@ -261,9 +261,9 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 		contactB := createRecord("contact", fmt.Sprintf("property-contact-b-%d", ts), entityB,
 			map[string]interface{}{"email": fmt.Sprintf("contact-b-%d@example.com", ts)})
 		locationA := createRecord("location", fmt.Sprintf("property-location-a-%d", ts), entityA,
-			map[string]interface{}{"city": "Scope A", "country": "US"})
+			map[string]interface{}{"city": "Scope A", "country": "US", "timezone": "UTC"})
 		locationB := createRecord("location", fmt.Sprintf("property-location-b-%d", ts), entityB,
-			map[string]interface{}{"city": "Scope B", "country": "US"})
+			map[string]interface{}{"city": "Scope B", "country": "US", "timezone": "UTC"})
 
 		attach := func(venueID, contactID, locationID string) {
 			t.Helper()
@@ -347,7 +347,7 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 		serialSuffix := uint64(ts) & 0xffffffffff
 		serialA := fmt.Sprintf("aa%010x", serialSuffix)
 		serialB := fmt.Sprintf("ab%010x", serialSuffix)
-		createInventory := func(serial, name, entityID, venueID string) {
+		createInventory := func(serial, name, venueID string) {
 			t.Helper()
 			status, body, err := client.DoRequest("POST", "/inventory/"+serial, rootToken,
 				map[string]interface{}{
@@ -355,7 +355,6 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 					"serialNumber":   serial,
 					"deviceType":     "edgecore_eap101",
 					"devClass":       "any",
-					"entity":         entityID,
 					"venue":          venueID,
 					"realMacAddress": serial,
 				})
@@ -363,11 +362,11 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 				t.Fatalf("create Inventory %s failed: status=%d err=%v body=%s", serial, status, err, string(body))
 			}
 		}
-		createInventory(serialA, fmt.Sprintf("property-device-a-%d", ts), entityA, venueA)
+		createInventory(serialA, fmt.Sprintf("property-device-a-%d", ts), venueA)
 		defer func() {
 			_, _, _ = client.DoRequest("DELETE", "/inventory/"+serialA, rootToken, nil)
 		}()
-		createInventory(serialB, fmt.Sprintf("property-device-b-%d", ts), entityB, venueB)
+		createInventory(serialB, fmt.Sprintf("property-device-b-%d", ts), venueB)
 		defer func() {
 			_, _, _ = client.DoRequest("DELETE", "/inventory/"+serialB, rootToken, nil)
 		}()
