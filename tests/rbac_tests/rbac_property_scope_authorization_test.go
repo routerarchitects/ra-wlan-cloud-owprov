@@ -313,6 +313,10 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 	})
 
 	t.Run("Venue-only access returns shared Contacts and inherited Locations", func(t *testing.T) {
+		venueASibling, cleanupVenueASibling := createVenue(
+			fmt.Sprintf("property-rbac-venue-a-sibling-%d", ts), entityA)
+		defer cleanupVenueASibling()
+
 		policyID, cleanupPolicy := createPolicy(
 			fmt.Sprintf("property-rbac-venue-associated-read-%d", ts),
 			[]map[string]interface{}{readEntry("venue"), readEntry("contact"), readEntry("location")},
@@ -343,7 +347,7 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 
 		localContact := createRecord("contact", fmt.Sprintf("venue-local-contact-%d", ts), entityA,
 			map[string]interface{}{"email": fmt.Sprintf("venue-local-%d@example.com", ts)})
-		sharedContact := createRecord("contact", fmt.Sprintf("venue-shared-contact-%d", ts), entityB,
+		sharedContact := createRecord("contact", fmt.Sprintf("venue-shared-contact-%d", ts), entityA,
 			map[string]interface{}{"email": fmt.Sprintf("venue-shared-%d@example.com", ts)})
 		foreignContact := createRecord("contact", fmt.Sprintf("venue-foreign-contact-%d", ts), entityB,
 			map[string]interface{}{"email": fmt.Sprintf("venue-foreign-%d@example.com", ts)})
@@ -362,8 +366,11 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 		update(fmt.Sprintf("/venue/%s", venueA), map[string]interface{}{
 			"contacts": []string{localContact, sharedContact},
 		})
+		update(fmt.Sprintf("/venue/%s", venueASibling), map[string]interface{}{
+			"contacts": []string{sharedContact},
+		})
 		update(fmt.Sprintf("/venue/%s", venueB), map[string]interface{}{
-			"contacts": []string{sharedContact, foreignContact},
+			"contacts": []string{foreignContact},
 		})
 		update(fmt.Sprintf("/entity/%s", entityA), map[string]interface{}{
 			"locations": []string{inheritedLocation},
@@ -375,6 +382,8 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueA), rootToken,
 				map[string]interface{}{"contacts": []string{}})
 			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueB), rootToken,
+				map[string]interface{}{"contacts": []string{}})
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueASibling), rootToken,
 				map[string]interface{}{"contacts": []string{}})
 			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/entity/%s", entityA), rootToken,
 				map[string]interface{}{"locations": []string{}})

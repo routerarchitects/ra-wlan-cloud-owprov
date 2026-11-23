@@ -44,15 +44,34 @@ type inventoryTagResponse struct {
 }
 
 func TestInventoryPlatformPersistence(t *testing.T) {
-	rootToken, _, _, entityId, _, _ := getLiveTestTokensAndFixtures(t)
+	rootToken, _, _, _, _, _ := getLiveTestTokensAndFixtures(t)
 	client := NewTestClient(getEnvOrDefault("OWPROV_URL", "https://openwifi.wlan.local:16005/api/v1"))
-	deviceSerial, cleanup := getOrCreateTestDevice(t, client, rootToken, entityId, "")
+
+	status, body, err := client.DoRequest("POST", "/entity/0", rootToken, map[string]interface{}{
+		"name":   fmt.Sprintf("inventory-platform-test-%d", time.Now().UnixNano()),
+		"parent": "0000-0000-0000",
+	})
+	if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+		t.Fatalf("create inventory platform test Entity failed: status=%d err=%v body=%s", status, err, string(body))
+	}
+	var entity struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &entity); err != nil || entity.ID == "" {
+		t.Fatalf("decode inventory platform test Entity failed: err=%v body=%s", err, string(body))
+	}
+	defer func() {
+		_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/entity/%s", entity.ID), rootToken, nil)
+	}()
+
+	deviceSerial, cleanup := getOrCreateTestDevice(t, client, rootToken, entity.ID, "")
 	defer cleanup()
 
 	assertPlatformUpdate := func(field, value, want string) {
 		t.Helper()
 		status, body, err := client.DoRequest("PUT", fmt.Sprintf("/inventory/%s", deviceSerial), rootToken, map[string]interface{}{
-			field: value,
+			field:      value,
+			"devClass": "any",
 		})
 		if err != nil || status != http.StatusOK {
 			t.Fatalf("platform update via %s failed: status=%d err=%v body=%s", field, status, err, string(body))
