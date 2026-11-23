@@ -559,12 +559,21 @@ namespace OpenWifi {
 		// over query parameters so query params cannot shadow body scope.
 		// ----------------------------------------------------------------
 		std::string QueryEntity, QueryVenue, QueryOperator;
+		std::string QueryVenueError;
+		bool QueryVenueSeen = false;
 		for (const auto &[name, value] : Parameters_) {
 			if (name == "entity")
 				QueryEntity = value;
-			else if (name == "venue" || name == "locationsForVenue")
-				QueryVenue = value;
-			else if (name == "operatorId" || name == "operator" || name == "registrationId")
+			else if (name == "venue" || name == "locationsForVenue") {
+				if (QueryVenueSeen && QueryVenue != value) {
+					QueryVenueError = fmt::format(
+						"Conflicting Venue query parameters: '{}' and '{}'.", QueryVenue,
+						value);
+				} else if (!QueryVenueSeen) {
+					QueryVenue = value;
+					QueryVenueSeen = true;
+				}
+			} else if (name == "operatorId" || name == "operator" || name == "registrationId")
 				QueryOperator = value;
 			else if (name == "subscriberId" || name == "signupUUID") {
 				ProvObjects::SignupEntry SE;
@@ -625,6 +634,10 @@ namespace OpenWifi {
 				*ErrorReason = Msg;
 			}
 		};
+		if (!QueryVenueError.empty()) {
+			SetScopeError(QueryVenueError);
+			return false;
+		}
 
 		struct ScopeFieldCheck {
 			const char *Name;

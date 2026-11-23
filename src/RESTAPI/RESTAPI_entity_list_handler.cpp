@@ -41,7 +41,6 @@ namespace OpenWifi {
 		};
 
 		std::function<void(const std::string &)> addVenueAndDescendants;
-		std::function<void(const std::string &)> addEntityAndDescendants;
 		addVenueAndDescendants = [&](const std::string &venueId) {
 			if (VisibleVenues.count(venueId)) return;
 			VisibleVenues.insert(venueId);
@@ -49,17 +48,6 @@ namespace OpenWifi {
 			if (StorageService()->VenueDB().GetRecord("id", venueId, ven)) {
 				for (const auto &childId : ven.children) {
 					addVenueAndDescendants(childId);
-				}
-			}
-		};
-
-		addEntityAndDescendants = [&](const std::string &entityId) {
-			if (VisibleEntities.count(entityId)) return;
-			VisibleEntities.insert(entityId);
-			ProvObjects::Entity ent;
-			if (StorageService()->EntityDB().GetRecord("id", entityId, ent)) {
-				for (const auto &venueId : ent.venues) {
-					addVenueAndDescendants(venueId);
 				}
 			}
 		};
@@ -79,8 +67,18 @@ namespace OpenWifi {
 							DeniedVenues.insert(role.venue);
 						}
 					}
-				} else if (!role.entity.empty() && policyAllowsGet(role, "entity")) {
-					addEntityAndDescendants(role.entity);
+				} else if (!role.entity.empty()) {
+					if (policyAllowsGet(role, "entity")) {
+						VisibleEntities.insert(role.entity);
+					}
+					if (policyAllowsGet(role, "venue")) {
+						ProvObjects::Entity Entity;
+						if (StorageService()->EntityDB().GetRecord("id", role.entity, Entity)) {
+							for (const auto &VenueId : Entity.venues) {
+								addVenueAndDescendants(VenueId);
+							}
+						}
+					}
 				}
 			}
 			for (const auto &vId : DeniedVenues) {
@@ -132,6 +130,9 @@ namespace OpenWifi {
 		std::string ScopeWhere = makeInClause("id", VisibleEntities);
 
 		if (QB_.CountOnly) {
+			if (VisibleEntities.empty()) {
+				return ReturnCountOnly(0);
+			}
 			auto C = DB_.Count(ScopeWhere);
 			return ReturnCountOnly(C);
 		}
@@ -304,6 +305,9 @@ namespace OpenWifi {
 		}
 
 		EntityDB::RecordVec FilteredEntities;
+		if (VisibleEntities.empty()) {
+			return MakeJSONObjectArray("entities", FilteredEntities, *this);
+		}
 		DB_.GetRecords(QB_.Offset, QB_.Limit, FilteredEntities, ScopeWhere);
 		return MakeJSONObjectArray("entities", FilteredEntities, *this);
 	}

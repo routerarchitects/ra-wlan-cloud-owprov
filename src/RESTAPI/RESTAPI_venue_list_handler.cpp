@@ -31,7 +31,22 @@ namespace OpenWifi {
 		}
 
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
-		auto LocationsForVenue = GetParameter("locationsForVenue", "");
+		std::string CanonicalVenue;
+		bool VenueParameterSeen = false;
+		bool HasLocationsForVenue = false;
+		for (const auto &[Name, Value] : Parameters_) {
+			if (Name != "venue" && Name != "locationsForVenue") {
+				continue;
+			}
+			HasLocationsForVenue = HasLocationsForVenue || Name == "locationsForVenue";
+			if (VenueParameterSeen && CanonicalVenue != Value) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+			CanonicalVenue = Value;
+			VenueParameterSeen = true;
+		}
+
+		auto LocationsForVenue = HasLocationsForVenue ? CanonicalVenue : "";
 		if (!LocationsForVenue.empty()) {
 			ProvObjects::Venue Venue;
 			if (!StorageService()->VenueDB().GetRecord("id", LocationsForVenue, Venue)) {
@@ -41,7 +56,9 @@ namespace OpenWifi {
 			const auto EntityId = Venue.entity.empty() ? FindParentEntity(Venue) : Venue.entity;
 			if (!isRoot && !IsInternalServiceOnly()) {
 				std::string Reason;
-				if (!IsScopeAuthorized(EntityId, LocationsForVenue, "location",
+				if (!IsScopeAuthorized(EntityId, LocationsForVenue, "venue",
+									   Poco::Net::HTTPRequest::HTTP_GET, &Reason) ||
+					!IsScopeAuthorized(EntityId, LocationsForVenue, "location",
 									   Poco::Net::HTTPRequest::HTTP_GET, &Reason)) {
 					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
 				}
