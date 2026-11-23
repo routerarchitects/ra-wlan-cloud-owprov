@@ -378,7 +378,8 @@ namespace OpenWifi {
 
 		auto EntityParam = R.GetParameter("entity", "");
 		auto VenueParam = R.GetParameter("venue", "");
-		if ((!EntityParam.empty() && !Access.entities.count(EntityParam)) ||
+		if ((!EntityParam.empty() && VenueParam.empty() &&
+			 !Access.entities.count(EntityParam)) ||
 			(!VenueParam.empty() && !Access.venues.count(VenueParam))) {
 			if (R.QB_.CountOnly) {
 				return R.ReturnCountOnly(0);

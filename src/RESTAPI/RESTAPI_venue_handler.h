@@ -31,6 +31,11 @@ namespace OpenWifi {
 		void DoPost() final;
 		void DoPut() final;
 		void DoDelete() final;
+		bool CanAssociateContact(const std::string &ContactId,
+							 const ProvObjects::Venue &TargetVenue);
+		bool CanAssociateLocation(const std::string &LocationId,
+							  const ProvObjects::Venue &TargetVenue,
+							  const std::string &AuthorizationVenue);
 
 		template <typename T>
 		bool IdExists(T &DB, const std::string &Field, const RESTAPI::Errors::msg &Error) {
