@@ -331,6 +331,16 @@ namespace OpenWifi {
 			if (Role.venue.empty() && !Role.entity.empty() &&
 				RoleAllowsResourceRead(R, Role, Resource)) {
 				Access.entities.insert(Role.entity);
+
+				// Match IsScopeAuthorized(): an Entity-scoped role also authorizes every
+				// Venue in that Entity's Venue hierarchy. Exact Venue roles are applied
+				// afterward so a Venue-specific denial still shadows Entity permission.
+				ProvObjects::Entity Entity;
+				if (StorageService()->EntityDB().GetRecord("id", Role.entity, Entity)) {
+					for (const auto &VenueId : Entity.venues) {
+						R.GetDescendantVenues(VenueId, Access.venues);
+					}
+				}
 			}
 		}
 
@@ -414,11 +424,11 @@ namespace OpenWifi {
 			ScopeWhere = AssociatedClause;
 		}
 
-		if (!EntityParam.empty()) {
-			ScopeWhere = "(" + ScopeWhere + ") AND entity='" + ORM::Escape(EntityParam) + "'";
-		}
 		if (!VenueParam.empty()) {
 			ScopeWhere = AssociatedClause.empty() ? "" : AssociatedClause;
+		}
+		if (!EntityParam.empty() && !ScopeWhere.empty()) {
+			ScopeWhere = "(" + ScopeWhere + ") AND entity='" + ORM::Escape(EntityParam) + "'";
 		}
 
 		if (ScopeWhere.empty()) {
