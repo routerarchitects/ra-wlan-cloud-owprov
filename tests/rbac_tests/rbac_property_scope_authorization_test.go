@@ -224,4 +224,201 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 			t.Errorf("expected Venue-only Entity list to be empty, got %d records body=%s", len(listResponse.Entities), string(body))
 		}
 	})
+
+	t.Run("mixed Contact and Location select excludes foreign records", func(t *testing.T) {
+		policyID, cleanupPolicy := createPolicy(
+			fmt.Sprintf("property-rbac-associated-read-%d", ts),
+			[]map[string]interface{}{readEntry("contact"), readEntry("location")},
+		)
+		defer cleanupPolicy()
+		cleanupRole := assignRole(fmt.Sprintf("property-rbac-associated-role-%d", ts), entityA, "", policyID)
+		defer cleanupRole()
+
+		createRecord := func(resource, name, entityID string, extra map[string]interface{}) string {
+			t.Helper()
+			payload := map[string]interface{}{
+				"name":   name,
+				"entity": entityID,
+			}
+			for key, value := range extra {
+				payload[key] = value
+			}
+			status, body, err := client.DoRequest("POST", "/"+resource+"/0", rootToken, payload)
+			if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+				t.Fatalf("create %s %q failed: status=%d err=%v body=%s", resource, name, status, err, string(body))
+			}
+			var response struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil || response.ID == "" {
+				t.Fatalf("decode created %s %q failed: err=%v body=%s", resource, name, err, string(body))
+			}
+			return response.ID
+		}
+
+		contactA := createRecord("contact", fmt.Sprintf("property-contact-a-%d", ts), entityA,
+			map[string]interface{}{"email": fmt.Sprintf("contact-a-%d@example.com", ts)})
+		contactB := createRecord("contact", fmt.Sprintf("property-contact-b-%d", ts), entityB,
+			map[string]interface{}{"email": fmt.Sprintf("contact-b-%d@example.com", ts)})
+		locationA := createRecord("location", fmt.Sprintf("property-location-a-%d", ts), entityA,
+			map[string]interface{}{"city": "Scope A", "country": "US"})
+		locationB := createRecord("location", fmt.Sprintf("property-location-b-%d", ts), entityB,
+			map[string]interface{}{"city": "Scope B", "country": "US"})
+
+		attach := func(venueID, contactID, locationID string) {
+			t.Helper()
+			status, body, err := client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueID), rootToken,
+				map[string]interface{}{"contacts": []string{contactID}, "location": locationID})
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("attach records to Venue %s failed: status=%d err=%v body=%s", venueID, status, err, string(body))
+			}
+		}
+		attach(venueA, contactA, locationA)
+		attach(venueB, contactB, locationB)
+		defer func() {
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueA), rootToken,
+				map[string]interface{}{"contacts": []string{}, "location": ""})
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueB), rootToken,
+				map[string]interface{}{"contacts": []string{}, "location": ""})
+			for _, record := range []struct{ resource, id string }{
+				{"contact", contactA}, {"contact", contactB},
+				{"location", locationA}, {"location", locationB},
+			} {
+				_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/%s/%s", record.resource, record.id), rootToken, nil)
+			}
+		}()
+
+		assertSelected := func(resource, block, authorizedID, foreignID string) {
+			t.Helper()
+			path := fmt.Sprintf("/%s?entity=%s&venue=%s&select=%s,%s",
+				resource, entityA, venueA, authorizedID, foreignID)
+			status, body, err := client.DoRequest("GET", path, testToken, nil)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("mixed %s select failed: status=%d err=%v body=%s", resource, status, err, string(body))
+			}
+			var response map[string][]struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil {
+				t.Fatalf("decode mixed %s select failed: err=%v body=%s", resource, err, string(body))
+			}
+			records := response[block]
+			if len(records) != 1 || records[0].ID != authorizedID {
+				t.Fatalf("mixed %s select returned records outside the requested authorized scope: %s", resource, string(body))
+			}
+		}
+
+		assertSelected("contact", "contacts", contactA, contactB)
+		assertSelected("location", "locations", locationA, locationB)
+	})
+
+	t.Run("Subscriber Device select applies per-record scope authorization", func(t *testing.T) {
+		status, body, err := client.DoRequest("POST", "/operator/0000-0000-0000", rootToken,
+			map[string]interface{}{
+				"name":           fmt.Sprintf("property-scope-operator-%d", ts),
+				"registrationId": fmt.Sprintf("property-scope-%d", ts),
+			})
+		if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+			t.Fatalf("create test Operator failed: status=%d err=%v body=%s", status, err, string(body))
+		}
+		var operator struct {
+			ID       string `json:"id"`
+			EntityID string `json:"entityId"`
+		}
+		if err := json.Unmarshal(body, &operator); err != nil || operator.ID == "" || operator.EntityID == "" {
+			t.Fatalf("decode test Operator failed: err=%v body=%s", err, string(body))
+		}
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/operator/%s", operator.ID), rootToken, nil)
+		}()
+
+		policyID, cleanupPolicy := createPolicy(
+			fmt.Sprintf("property-rbac-subscriber-device-read-%d", ts),
+			[]map[string]interface{}{readEntry("inventory")},
+		)
+		defer cleanupPolicy()
+		cleanupOperatorScopeRole := assignRole(
+			fmt.Sprintf("property-rbac-operator-scope-role-%d", ts), operator.EntityID, "", policyID)
+		defer cleanupOperatorScopeRole()
+		cleanupDeviceScopeRole := assignRole(
+			fmt.Sprintf("property-rbac-device-scope-role-%d", ts), entityA, venueA, policyID)
+		defer cleanupDeviceScopeRole()
+
+		serialSuffix := uint64(ts) & 0xffffffffff
+		serialA := fmt.Sprintf("aa%010x", serialSuffix)
+		serialB := fmt.Sprintf("ab%010x", serialSuffix)
+		createInventory := func(serial, name, entityID, venueID string) {
+			t.Helper()
+			status, body, err := client.DoRequest("POST", "/inventory/"+serial, rootToken,
+				map[string]interface{}{
+					"name":           name,
+					"serialNumber":   serial,
+					"deviceType":     "edgecore_eap101",
+					"devClass":       "any",
+					"entity":         entityID,
+					"venue":          venueID,
+					"realMacAddress": serial,
+				})
+			if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+				t.Fatalf("create Inventory %s failed: status=%d err=%v body=%s", serial, status, err, string(body))
+			}
+		}
+		createInventory(serialA, fmt.Sprintf("property-device-a-%d", ts), entityA, venueA)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", "/inventory/"+serialA, rootToken, nil)
+		}()
+		createInventory(serialB, fmt.Sprintf("property-device-b-%d", ts), entityB, venueB)
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", "/inventory/"+serialB, rootToken, nil)
+		}()
+
+		createSubscriberDevice := func(serial, name, group string) string {
+			t.Helper()
+			status, body, err := client.DoRequest("POST", "/subscriberDevice/0", rootToken,
+				map[string]interface{}{
+					"name":           name,
+					"serialNumber":   serial,
+					"operatorId":     operator.ID,
+					"subscriberId":   "00000000-0000-0000-0000-000000000005",
+					"deviceGroup":    group,
+					"deviceType":     "edgecore_eap101",
+					"realMacAddress": serial,
+				})
+			if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+				t.Fatalf("create Subscriber Device %s failed: status=%d err=%v body=%s", serial, status, err, string(body))
+			}
+			var response struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil || response.ID == "" {
+				t.Fatalf("decode Subscriber Device %s failed: err=%v body=%s", serial, err, string(body))
+			}
+			return response.ID
+		}
+		deviceA := createSubscriberDevice(serialA, fmt.Sprintf("property-subscriber-device-a-%d", ts), "olg")
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", "/subscriberDevice/"+serialA, rootToken, nil)
+		}()
+		deviceB := createSubscriberDevice(serialB, fmt.Sprintf("property-subscriber-device-b-%d", ts), "ap")
+		defer func() {
+			_, _, _ = client.DoRequest("DELETE", "/subscriberDevice/"+serialB, rootToken, nil)
+		}()
+
+		path := fmt.Sprintf("/subscriberDevice?operatorId=%s&select=%s,%s", operator.ID, deviceA, deviceB)
+		status, body, err = client.DoRequest("GET", path, testToken, nil)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("cross-scope Subscriber Device select failed: status=%d err=%v body=%s", status, err, string(body))
+		}
+		var response struct {
+			Devices []struct {
+				ID string `json:"id"`
+			} `json:"subscriberDevices"`
+		}
+		if err := json.Unmarshal(body, &response); err != nil {
+			t.Fatalf("decode Subscriber Device select failed: err=%v body=%s", err, string(body))
+		}
+		if len(response.Devices) != 1 || response.Devices[0].ID != deviceA {
+			t.Fatalf("Subscriber Device select returned records outside the authorized Device scope: %s", string(body))
+		}
+	})
 }

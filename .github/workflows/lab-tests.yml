@@ -704,7 +704,7 @@ jobs:
         run: |
           # MicroService::LoadMyConfig uses SHA-256 of SYSTEM_URI_PUBLIC as its access key.
           export OWPROV_INTERNAL_API_KEY="$(printf '%s' 'https://localhost:16005' | sha256sum | cut -d ' ' -f1)"
-          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection|TestManagementRole_V1|TestManagementRole_V2|TestManagementRolePolicyQueryFilter|TestInventoryCreateScopeAuthorization|TestDeviceCommandAuthorization"
+          go test -v . -run "TestManagementRoleImmutability|TestManagementRoleCreationPolicyValidation|TestManagementPolicyDeletionProtection|TestManagementRole_V1|TestManagementRole_V2|TestManagementRolePolicyQueryFilter|TestInventoryCreateScopeAuthorization|TestDeviceCommandAuthorization|TestPropertyScopeAuthorizationRegressions"
         working-directory: ${{ github.workspace }}/tests/rbac_tests
         env:
           OWPROV_URL: "https://localhost:16005/api/v1"
@@ -716,6 +716,8 @@ jobs:
           TOKEN_NO_ACCESS: "Bearer user-read-only-token"
           TOKEN_ADMIN_OPERATOR_A: "Bearer user-admin-operator-a-token"
           TOKEN_VENUE_SHADOWED: "Bearer user-venue-shadowed-token"
+          PROPERTY_SCOPE_TEST_TOKEN: "Bearer user-admin-operator-a-token"
+          PROPERTY_SCOPE_TEST_USER_ID: "00000000-0000-0000-0000-000000000003"
 
       # ── Run Subscriber RBAC Integration Tests (Auto-Seeded) ─────────────────
       - name: Execute Subscriber RBAC Integration Tests
