@@ -312,6 +312,180 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 		assertSelected("location", "locations", locationA, locationB)
 	})
 
+	t.Run("Venue-only access returns shared Contacts and inherited Locations", func(t *testing.T) {
+		policyID, cleanupPolicy := createPolicy(
+			fmt.Sprintf("property-rbac-venue-associated-read-%d", ts),
+			[]map[string]interface{}{readEntry("venue"), readEntry("contact"), readEntry("location")},
+		)
+		defer cleanupPolicy()
+		cleanupRole := assignRole(
+			fmt.Sprintf("property-rbac-venue-associated-role-%d", ts), entityA, venueA, policyID)
+		defer cleanupRole()
+
+		createRecord := func(resource, name, entityID string, extra map[string]interface{}) string {
+			t.Helper()
+			payload := map[string]interface{}{"name": name, "entity": entityID}
+			for key, value := range extra {
+				payload[key] = value
+			}
+			status, body, err := client.DoRequest("POST", "/"+resource+"/0", rootToken, payload)
+			if err != nil || (status != http.StatusOK && status != http.StatusCreated) {
+				t.Fatalf("create %s %q failed: status=%d err=%v body=%s", resource, name, status, err, string(body))
+			}
+			var response struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil || response.ID == "" {
+				t.Fatalf("decode created %s %q failed: err=%v body=%s", resource, name, err, string(body))
+			}
+			return response.ID
+		}
+
+		localContact := createRecord("contact", fmt.Sprintf("venue-local-contact-%d", ts), entityA,
+			map[string]interface{}{"email": fmt.Sprintf("venue-local-%d@example.com", ts)})
+		sharedContact := createRecord("contact", fmt.Sprintf("venue-shared-contact-%d", ts), entityB,
+			map[string]interface{}{"email": fmt.Sprintf("venue-shared-%d@example.com", ts)})
+		foreignContact := createRecord("contact", fmt.Sprintf("venue-foreign-contact-%d", ts), entityB,
+			map[string]interface{}{"email": fmt.Sprintf("venue-foreign-%d@example.com", ts)})
+		inheritedLocation := createRecord("location", fmt.Sprintf("venue-inherited-location-%d", ts), entityA,
+			map[string]interface{}{"city": "Inherited Scope", "country": "US", "timezone": "UTC"})
+		foreignLocation := createRecord("location", fmt.Sprintf("venue-foreign-location-%d", ts), entityB,
+			map[string]interface{}{"city": "Foreign Scope", "country": "US", "timezone": "UTC"})
+
+		update := func(path string, payload map[string]interface{}) {
+			t.Helper()
+			status, body, err := client.DoRequest("PUT", path, rootToken, payload)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("update %s failed: status=%d err=%v body=%s", path, status, err, string(body))
+			}
+		}
+		update(fmt.Sprintf("/venue/%s", venueA), map[string]interface{}{
+			"contacts": []string{localContact, sharedContact},
+		})
+		update(fmt.Sprintf("/venue/%s", venueB), map[string]interface{}{
+			"contacts": []string{sharedContact, foreignContact},
+		})
+		update(fmt.Sprintf("/entity/%s", entityA), map[string]interface{}{
+			"locations": []string{inheritedLocation},
+		})
+		update(fmt.Sprintf("/entity/%s", entityB), map[string]interface{}{
+			"locations": []string{foreignLocation},
+		})
+		defer func() {
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueA), rootToken,
+				map[string]interface{}{"contacts": []string{}})
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/venue/%s", venueB), rootToken,
+				map[string]interface{}{"contacts": []string{}})
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/entity/%s", entityA), rootToken,
+				map[string]interface{}{"locations": []string{}})
+			_, _, _ = client.DoRequest("PUT", fmt.Sprintf("/entity/%s", entityB), rootToken,
+				map[string]interface{}{"locations": []string{}})
+			for _, record := range []struct{ resource, id string }{
+				{"contact", localContact}, {"contact", sharedContact}, {"contact", foreignContact},
+				{"location", inheritedLocation}, {"location", foreignLocation},
+			} {
+				_, _, _ = client.DoRequest("DELETE", fmt.Sprintf("/%s/%s", record.resource, record.id), rootToken, nil)
+			}
+		}()
+
+		status, body, err := client.DoRequest("GET",
+			fmt.Sprintf("/venue?locationsForVenue=%s", venueA), testToken, nil)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("positive inherited Location request failed: status=%d err=%v body=%s", status, err, string(body))
+		}
+		var eligible struct {
+			Locations []struct {
+				UUID string `json:"uuid"`
+			} `json:"locations"`
+		}
+		if err := json.Unmarshal(body, &eligible); err != nil {
+			t.Fatalf("decode inherited Locations failed: err=%v body=%s", err, string(body))
+		}
+		foundInherited := false
+		for _, location := range eligible.Locations {
+			foundInherited = foundInherited || location.UUID == inheritedLocation
+			if location.UUID == foreignLocation {
+				t.Fatalf("positive Location request exposed a foreign Location: %s", string(body))
+			}
+		}
+		if !foundInherited {
+			t.Fatalf("positive Location request omitted inherited Location %s: %s", inheritedLocation, string(body))
+		}
+
+		assertVenueSelect := func(resource, block string, authorizedIDs []string, foreignID string) {
+			t.Helper()
+			selected := append(append([]string{}, authorizedIDs...), foreignID)
+			path := fmt.Sprintf("/%s?venue=%s&select=%s", resource, venueA, strings.Join(selected, ","))
+			status, body, err := client.DoRequest("GET", path, testToken, nil)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("Venue-only %s select failed: status=%d err=%v body=%s", resource, status, err, string(body))
+			}
+			var response map[string][]struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil {
+				t.Fatalf("decode Venue-only %s select failed: err=%v body=%s", resource, err, string(body))
+			}
+			seen := map[string]bool{}
+			for _, record := range response[block] {
+				seen[record.ID] = true
+			}
+			for _, authorizedID := range authorizedIDs {
+				if !seen[authorizedID] {
+					t.Fatalf("Venue-only %s select omitted authorized record %s: %s", resource, authorizedID, string(body))
+				}
+			}
+			if seen[foreignID] || len(response[block]) != len(authorizedIDs) {
+				t.Fatalf("Venue-only %s select exposed records outside its scope: %s", resource, string(body))
+			}
+		}
+		assertVenueSelect("contact", "contacts", []string{localContact, sharedContact}, foreignContact)
+		assertVenueSelect("location", "locations", []string{inheritedLocation}, foreignLocation)
+
+		assertScopedCount := func(resource string, want int) {
+			t.Helper()
+			status, body, err := client.DoRequest("GET",
+				fmt.Sprintf("/%s?venue=%s&countOnly=true", resource, venueA), testToken, nil)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("Venue-only %s count failed: status=%d err=%v body=%s", resource, status, err, string(body))
+			}
+			var count struct {
+				Count int `json:"count"`
+			}
+			if err := json.Unmarshal(body, &count); err != nil || count.Count != want {
+				t.Fatalf("expected %d scoped %s records, got count=%d err=%v body=%s",
+					want, resource, count.Count, err, string(body))
+			}
+		}
+		assertScopedPage := func(resource, block string, allowedIDs []string) {
+			t.Helper()
+			status, body, err := client.DoRequest("GET",
+				fmt.Sprintf("/%s?venue=%s&limit=1&offset=0", resource, venueA), testToken, nil)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("Venue-only %s pagination failed: status=%d err=%v body=%s", resource, status, err, string(body))
+			}
+			var response map[string][]struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil || len(response[block]) != 1 {
+				t.Fatalf("expected one scoped paginated %s record, got %d err=%v body=%s",
+					resource, len(response[block]), err, string(body))
+			}
+			allowed := false
+			for _, id := range allowedIDs {
+				allowed = allowed || response[block][0].ID == id
+			}
+			if !allowed {
+				t.Fatalf("paginated %s response escaped the authorized Venue: %s", resource, string(body))
+			}
+		}
+
+		assertScopedCount("contact", 2)
+		assertScopedCount("location", 1)
+		assertScopedPage("contact", "contacts", []string{localContact, sharedContact})
+		assertScopedPage("location", "locations", []string{inheritedLocation})
+	})
+
 	t.Run("Subscriber Device select applies per-record scope authorization", func(t *testing.T) {
 		status, body, err := client.DoRequest("POST", "/operator/0000-0000-0000", rootToken,
 			map[string]interface{}{
@@ -378,7 +552,6 @@ func TestPropertyScopeAuthorizationRegressions(t *testing.T) {
 					"name":           name,
 					"serialNumber":   serial,
 					"operatorId":     operator.ID,
-					"subscriberId":   "00000000-0000-0000-0000-000000000005",
 					"deviceGroup":    group,
 					"deviceType":     "edgecore_eap101",
 					"realMacAddress": serial,

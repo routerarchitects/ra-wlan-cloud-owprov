@@ -81,7 +81,8 @@ func getOrCreateTestDevice(t *testing.T, client *TestClient, rootToken string, e
 	payload := map[string]interface{}{
 		"serialNumber": serialNumber,
 		"name":         "test-ap-" + serialNumber,
-		"deviceType":   "AP",
+		"deviceType":   "edgecore_eap101",
+		"devClass":     "any",
 		"entity":       entityId,
 		"venue":        venueId,
 	}
