@@ -527,6 +527,16 @@ namespace OpenWifi {
 
 		AssignIfPresent(RawObject, "doNotAllowOverrides", Existing.doNotAllowOverrides);
 
+		const bool HasPlatformUpdate =
+			(RawObject->has("platform") &&
+			 !RawObject->getValue<std::string>("platform").empty()) ||
+			(RawObject->has("deviceGroup") &&
+			 !RawObject->getValue<std::string>("deviceGroup").empty());
+		if (HasPlatformUpdate) {
+			Poco::toUpperInPlace(NewObject.platform);
+			Existing.platform = NewObject.platform;
+		}
+
 		if (RawObject->has("devClass") && NewObject.devClass != Existing.devClass) {
 			Existing.devClass = NewObject.devClass;
 		}

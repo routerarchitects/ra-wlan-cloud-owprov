@@ -51,6 +51,62 @@ namespace OpenWifi {
 		return SerialNumbers;
 	}
 
+	bool RESTAPI_venue_handler::CanAssociateContact(
+		const std::string &ContactId, const ProvObjects::Venue &TargetVenue) {
+		ProvObjects::Contact Contact;
+		ProvObjects::Entity Entity;
+		if (!StorageService()->ContactDB().GetRecord("id", ContactId, Contact) ||
+			Contact.entity != TargetVenue.entity ||
+			!StorageService()->EntityDB().GetRecord("id", TargetVenue.entity, Entity) ||
+			std::find(Entity.contacts.begin(), Entity.contacts.end(), ContactId) ==
+				Entity.contacts.end()) {
+			return false;
+		}
+
+		return UserInfo_.userinfo.userRole == SecurityObjects::ROOT || IsInternalServiceOnly() ||
+			   IsScopeAuthorized(Contact.entity, "", "contact",
+							 Poco::Net::HTTPRequest::HTTP_GET);
+	}
+
+	bool RESTAPI_venue_handler::CanAssociateLocation(
+		const std::string &LocationId, const ProvObjects::Venue &TargetVenue,
+		const std::string &AuthorizationVenue) {
+		ProvObjects::Location Location;
+		if (!StorageService()->LocationDB().GetRecord("id", LocationId, Location)) {
+			return false;
+		}
+
+		std::set<std::string> EligibleLocations;
+		std::set<std::string> EligibleEntities;
+		std::set<std::string> VisitedVenues;
+		auto AddEntityLocations = [&](const std::string &EntityId) {
+			ProvObjects::Entity Entity;
+			if (StorageService()->EntityDB().GetRecord("id", EntityId, Entity)) {
+				EligibleEntities.insert(EntityId);
+				EligibleLocations.insert(Entity.locations.begin(), Entity.locations.end());
+			}
+		};
+
+		AddEntityLocations(TargetVenue.entity);
+		std::string ParentId = TargetVenue.parent;
+		while (!ParentId.empty() && VisitedVenues.insert(ParentId).second) {
+			ProvObjects::Venue Parent;
+			if (!StorageService()->VenueDB().GetRecord("id", ParentId, Parent)) {
+				return false;
+			}
+			AddEntityLocations(Parent.entity);
+			ParentId = Parent.parent;
+		}
+
+		if (!EligibleLocations.count(LocationId) || !EligibleEntities.count(Location.entity)) {
+			return false;
+		}
+
+		return UserInfo_.userinfo.userRole == SecurityObjects::ROOT || IsInternalServiceOnly() ||
+			   IsScopeAuthorized(TargetVenue.entity, AuthorizationVenue, "location",
+							 Poco::Net::HTTPRequest::HTTP_GET);
+	}
+
 	void RESTAPI_venue_handler::DoGet() {
 		std::string UUID = GetBinding("uuid", "");
 		ProvObjects::Venue Existing;
@@ -194,12 +250,19 @@ namespace OpenWifi {
 				if (!StorageService()->ContactDB().Exists("id", i)) {
 					return BadRequest(RESTAPI::Errors::ContactMustExist);
 				}
+				if (!CanAssociateContact(i, NewObject)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
 			}
 		}
 
-		if (!NewObject.location.empty() &&
-			!StorageService()->LocationDB().Exists("id", NewObject.location)) {
-			return BadRequest(RESTAPI::Errors::LocationMustExist);
+		if (!NewObject.location.empty()) {
+			if (!StorageService()->LocationDB().Exists("id", NewObject.location)) {
+				return BadRequest(RESTAPI::Errors::LocationMustExist);
+			}
+			if (!CanAssociateLocation(NewObject.location, NewObject, NewObject.parent)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
 		}
 
 		if (!NewObject.managementPolicy.empty() &&
@@ -466,12 +529,14 @@ namespace OpenWifi {
 			Existing.sourceIP = NewObject.sourceIP;
 		}
 
+		bool TargetScopeChanged = false;
 		std::string MoveFromEntity, MoveToEntity;
 		if (AssignIfPresent(RawObject, "entity", MoveToEntity)) {
 			if (MoveToEntity.empty() || !StorageService()->EntityDB().Exists("id", MoveToEntity)) {
 				return BadRequest(RESTAPI::Errors::EntityMustExist);
 			}
 			MoveFromEntity = Existing.entity;
+			TargetScopeChanged = MoveFromEntity != MoveToEntity;
 			Existing.entity = MoveToEntity;
 		}
 
@@ -481,9 +546,11 @@ namespace OpenWifi {
 				return BadRequest(RESTAPI::Errors::VenueMustExist);
 			}
 			MoveFromVenue = Existing.parent;
+			TargetScopeChanged = TargetScopeChanged || MoveFromVenue != MoveToVenue;
 			Existing.parent = MoveToVenue;
 		}
 
+		bool LocationChanged = false;
 		std::string MoveFromLocation, MoveToLocation;
 		if (AssignIfPresent(RawObject, "location", MoveToLocation)) {
 			if (!MoveToLocation.empty() &&
@@ -491,18 +558,38 @@ namespace OpenWifi {
 				return BadRequest(RESTAPI::Errors::LocationMustExist);
 			}
 			MoveFromLocation = Existing.location;
+			LocationChanged = MoveFromLocation != MoveToLocation;
 			Existing.location = MoveToLocation;
 		}
 
+		bool ContactsChanged = false;
 		Types::UUIDvec_t MoveFromContacts, MoveToContacts;
 		if (AssignIfPresent(RawObject, "contacts", MoveToContacts)) {
-			for (const auto &contact : NewObject.contacts) {
+			for (const auto &contact : MoveToContacts) {
 				if (!StorageService()->ContactDB().Exists("id", contact)) {
 					return BadRequest(RESTAPI::Errors::ContactMustExist);
 				}
 			}
 			MoveFromContacts = Existing.contacts;
+			ContactsChanged = MoveFromContacts != MoveToContacts;
 			Existing.contacts = MoveToContacts;
+		}
+
+		if ((LocationChanged || TargetScopeChanged) && !Existing.location.empty() &&
+			!CanAssociateLocation(Existing.location, Existing, Existing.info.id)) {
+			return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+		}
+
+		if (ContactsChanged || TargetScopeChanged) {
+			for (const auto &ContactId : Existing.contacts) {
+				const bool NewlyAssociated =
+					TargetScopeChanged ||
+					std::find(MoveFromContacts.begin(), MoveFromContacts.end(), ContactId) ==
+						MoveFromContacts.end();
+				if (NewlyAssociated && !CanAssociateContact(ContactId, Existing)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+			}
 		}
 
 		std::string MoveFromPolicy, MoveToPolicy;

@@ -31,6 +31,65 @@ namespace OpenWifi {
 		}
 
 		bool isRoot = (UserInfo_.userinfo.userRole == SecurityObjects::ROOT);
+		std::string CanonicalVenue;
+		bool VenueParameterSeen = false;
+		bool HasLocationsForVenue = false;
+		for (const auto &[Name, Value] : Parameters_) {
+			if (Name != "venue" && Name != "locationsForVenue") {
+				continue;
+			}
+			HasLocationsForVenue = HasLocationsForVenue || Name == "locationsForVenue";
+			if (VenueParameterSeen && CanonicalVenue != Value) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+			CanonicalVenue = Value;
+			VenueParameterSeen = true;
+		}
+
+		auto LocationsForVenue = HasLocationsForVenue ? CanonicalVenue : "";
+		if (!LocationsForVenue.empty()) {
+			ProvObjects::Venue Venue;
+			if (!StorageService()->VenueDB().GetRecord("id", LocationsForVenue, Venue)) {
+				return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+			}
+
+			const auto EntityId = Venue.entity.empty() ? FindParentEntity(Venue) : Venue.entity;
+			if (!isRoot && !IsInternalServiceOnly()) {
+				std::string Reason;
+				if (!IsScopeAuthorized(EntityId, LocationsForVenue, "venue",
+									   Poco::Net::HTTPRequest::HTTP_GET, &Reason) ||
+					!IsScopeAuthorized(EntityId, LocationsForVenue, "location",
+									   Poco::Net::HTTPRequest::HTTP_GET, &Reason)) {
+					return UnAuthorized(RESTAPI::Errors::ACCESS_DENIED);
+				}
+			}
+
+			std::vector<triplet_t> Eligible;
+			GetLocationsForVenue(LocationsForVenue, Eligible);
+			if (!Venue.location.empty()) {
+				ProvObjects::Location Assigned;
+				if (StorageService()->LocationDB().GetRecord("id", Venue.location, Assigned)) {
+					Eligible.emplace_back(Assigned.info.name, Assigned.info.description,
+										  Assigned.info.id);
+				}
+			}
+
+			std::set<std::string> Seen;
+			Poco::JSON::Array Locations;
+			for (const auto &[name, description, uuid] : Eligible) {
+				if (!Seen.insert(uuid).second) {
+					continue;
+				}
+				Poco::JSON::Object Location;
+				Location.set("name", name);
+				Location.set("description", description);
+				Location.set("uuid", uuid);
+				Locations.add(Location);
+			}
+			Poco::JSON::Object Answer;
+			Answer.set("locations", Locations);
+			return ReturnObject(Answer);
+		}
 
 		if (isRoot) {
 			auto RRMvendor = GetParameter("RRMvendor","");
