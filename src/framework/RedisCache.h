@@ -117,9 +117,6 @@ class RedisCache {
     /// Returns true on successful population.
     bool Set(const std::string &Key, const Entry &entry, int TtlSec = 0);
 
-    /// Cache delete primitive. Deletes a key from Redis. Returns true on success or if key absent.
-    bool Delete(const std::string &Key);
-
     /// Atomically invalidates a cache entry and records the committed version marker.
     /// Deletes the cached entry for Key if its version <= committedVersion, then stores the
     /// version marker permanently. The marker prevents future delayed readers/writers from

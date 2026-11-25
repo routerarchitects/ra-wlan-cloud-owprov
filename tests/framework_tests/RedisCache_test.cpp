@@ -302,7 +302,6 @@ static void test_fallback_and_validation() {
     // 5b. Key validation: raw mixed-case keys rejected at boundary
     TEST_ASSERT(!offlineCache.Set("api-cache:Inventory:offline_item", {"data", "100"}), "Mixed-case Set() rejected");
     TEST_ASSERT(!offlineCache.Invalidate("api-cache:Inventory:offline_item", "100"), "Mixed-case Invalidate() rejected");
-    TEST_ASSERT(!offlineCache.Delete("api-cache:Inventory:offline_item"), "Mixed-case Delete() rejected");
     TEST_ASSERT(!offlineCache.Get("api-cache:Inventory:offline_item").has_value(), "Mixed-case Get() returns nullopt");
     TEST_ASSERT(!ValidateCacheInvalidationTarget({"api-cache:Inventory:offline_item", "100"}), "Mixed-case target rejected");
 
@@ -463,13 +462,7 @@ static void test_live_redis_integration(int redisPort) {
     TEST_ASSERT(setTtl >= 28 && setTtl <= 30,
                 "api-cache:* entry TTL after Set() must match configured cacheTtlSec (30s)");
 
-    // 4. Invalidation / Delete
-    bool delOk = cache.Delete(key);
-    TEST_ASSERT(delOk, "Delete must succeed");
-    auto afterDel = cache.Get(key);
-    TEST_ASSERT(!afterDel.has_value(), "Key must not be cached after Delete");
-
-    // 5. Bounded Staleness TTL Policy & ClampTtl Verification
+    // 4. Bounded Staleness TTL Policy & ClampTtl Verification
     // Normal cache data TTL must always be clamped to [10s, 60s] to bound staleness if invalidation fails.
     const std::string keyMin = MakeCacheKey("inventory", "ttl_clamp_min_test");
     const std::string keyMax = MakeCacheKey("inventory", "ttl_clamp_max_test");
@@ -484,7 +477,7 @@ static void test_live_redis_integration(int redisPort) {
         rClient.execute<Poco::Int64>(delClampPreCmd);
     } catch (...) {}
 
-    // 5a. Lower-bound clamping: requested 1s (< 10s minimum policy) must be clamped up to 10s
+    // 4a. Lower-bound clamping: requested 1s (< 10s minimum policy) must be clamped up to 10s
     bool setMin = cache.Set(keyMin, {"{\"name\":\"min_clamped\"}", "100"}, 1);
     TEST_ASSERT(setMin, "Set() with requested TTL 1s must succeed");
     Poco::Redis::Array ttlMinCmd; ttlMinCmd << "TTL" << keyMin;
@@ -492,7 +485,7 @@ static void test_live_redis_integration(int redisPort) {
     TEST_ASSERT(ttlMin >= 8 && ttlMin <= 10,
                 "Lower-bound TTL (requested 1s) must be clamped to policy minimum (10s)");
 
-    // 5b. Upper-bound clamping: requested 500s (> 60s maximum policy) must be clamped down to 60s
+    // 4b. Upper-bound clamping: requested 500s (> 60s maximum policy) must be clamped down to 60s
     bool setMax = cache.Set(keyMax, {"{\"name\":\"max_clamped\"}", "100"}, 500);
     TEST_ASSERT(setMax, "Set() with requested TTL 500s must succeed");
     Poco::Redis::Array ttlMaxCmd; ttlMaxCmd << "TTL" << keyMax;
@@ -500,7 +493,7 @@ static void test_live_redis_integration(int redisPort) {
     TEST_ASSERT(ttlMax >= 58 && ttlMax <= 60,
                 "Upper-bound TTL (requested 500s) must be clamped to policy maximum (60s)");
 
-    // 5c. Default TTL: requested 0s must use configured cacheTtlSec (30s)
+    // 4c. Default TTL: requested 0s must use configured cacheTtlSec (30s)
     bool setDef = cache.Set(keyDef, {"{\"name\":\"default_clamped\"}", "100"}, 0);
     TEST_ASSERT(setDef, "Set() with default TTL (0) must succeed");
     Poco::Redis::Array ttlDefCmd; ttlDefCmd << "TTL" << keyDef;

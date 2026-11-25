@@ -858,23 +858,6 @@ bool RedisCache::Invalidate(const std::string &Key, const std::string &Committed
 #endif
 }
 
-// Invalidation primitive. Deletes a key from Redis. Both 0 and 1 keys deleted count as success.
-bool RedisCache::Delete(const std::string &Key) {
-    if (!IsCacheableKey(Key)) return false;
-#ifdef USE_POCO_REDIS
-    bool ok = false;
-    Impl_->Execute("DEL", Key, NextReconnectTimeMs_, RedisHealthy_, *this,
-        [&](Poco::Redis::Client &client) {
-            Poco::Redis::Array DelCmd;
-            DelCmd << "DEL" << Key;
-            ok = (client.execute<Poco::Int64>(DelCmd) >= 0);
-        });
-    return ok;
-#else
-    return false;
-#endif
-}
-
 // Returns true if Redis connection is healthy and not in reconnect backoff.
 bool RedisCache::IsRedisHealthy() const noexcept {
     return RedisHealthy_.load(std::memory_order_relaxed);
