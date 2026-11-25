@@ -99,12 +99,23 @@ bool IsValidVersion(std::string_view str) {
 }
 
 namespace {
-// Validates the resource type portion of a key (e.g. "inventory", "venue").
+// Validates the resource type portion of a key before canonicalization (e.g. "Inventory", "venue").
 // Allows alphanumeric characters, underscores, hyphens, and dots up to 64 characters.
 bool IsValidResourceType(std::string_view str) {
     if (str.empty() || str.size() > 64) return false;
     for (char c : str) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' && c != '.') return false;
+    }
+    return true;
+}
+
+// Validates that the resource type is already canonical (strictly lowercase alphanumeric,
+// underscores, hyphens, and dots). Rejects uppercase characters to enforce one canonical
+// key representation in Redis across all callers.
+bool IsValidCanonicalResourceType(std::string_view str) {
+    if (str.empty() || str.size() > 64) return false;
+    for (char c : str) {
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) return false;
     }
     return true;
 }
@@ -121,13 +132,14 @@ bool IsValidResourceId(std::string_view str) {
 } // anonymous namespace
 
 // Checks whether Key conforms to the valid application cache namespace "api-cache:<type>:<id>".
+// The resource type segment must be in canonical lowercase representation.
 bool IsCacheableKey(std::string_view key) {
     constexpr std::string_view prefix = CACHE_KEY_PREFIX;
     if (key.size() <= prefix.size() || key.rfind(prefix, 0) != 0) return false;
     std::string_view rest = key.substr(prefix.size());
     auto sep = rest.find(':');
     if (sep == std::string_view::npos || sep == 0 || sep + 1 >= rest.size()) return false;
-    return IsValidResourceType(rest.substr(0, sep)) && IsValidResourceId(rest.substr(sep + 1));
+    return IsValidCanonicalResourceType(rest.substr(0, sep)) && IsValidResourceId(rest.substr(sep + 1));
 }
 
 namespace {
@@ -416,9 +428,10 @@ std::string MakeVersionKey(const std::string &ResourceType, const std::string &R
 }
 
 // Converts a cache key "api-cache:<type>:<id>" to its version-marker key "api-ver:<type>:<id>".
+// Validates that CacheKey is a valid, canonical cache key before converting; returns empty string otherwise.
 std::string MakeVersionKey(const std::string &CacheKey) {
+    if (!IsCacheableKey(CacheKey)) return {};
     constexpr std::string_view prefix = CACHE_KEY_PREFIX;
-    if (CacheKey.size() <= prefix.size() || CacheKey.rfind(prefix, 0) != 0) return {};
     return fmt::format("{}{}", VER_KEY_PREFIX, CacheKey.substr(prefix.size()));
 }
 

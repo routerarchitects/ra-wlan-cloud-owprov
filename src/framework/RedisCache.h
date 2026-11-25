@@ -39,6 +39,7 @@ struct RedisCacheConfig {
 [[nodiscard]] bool IsValidVersion(std::string_view str);
 
 /// Checks whether Key conforms to the valid application cache namespace "api-cache:<type>:<id>".
+/// The resource type segment must be in canonical lowercase format.
 [[nodiscard]] bool IsCacheableKey(std::string_view key);
 
 /// Prometheus / telemetry metric for Redis cache invalidation failures (Spec §6.3.1).
@@ -63,6 +64,7 @@ extern std::atomic<uint64_t> owprov_redis_invalidation_failures_total;
 
 /// Build a deterministic version-marker key from an existing cache key:
 /// Converts "api-cache:<type>:<id>" -> "api-ver:<type>:<id>".
+/// Validates that CacheKey is a valid, canonical cache key before converting; returns empty string otherwise.
 [[nodiscard]] std::string MakeVersionKey(const std::string &CacheKey);
 
 /// Thread-safe, shared Redis cache-aside component for API data.

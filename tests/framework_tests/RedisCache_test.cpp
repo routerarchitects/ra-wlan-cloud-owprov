@@ -201,13 +201,37 @@ static void test_config_and_namespaces() {
     TEST_ASSERT(cfg4.cacheTtlSec == 45, "Custom TTL matches");
     TEST_ASSERT(cfg4.maxTotalConnections == 64 && cfg4.maxIdleConnections == 24, "Custom pool limits match");
 
-    // 5. Deterministic collision-free key generation
+    // 5. Deterministic collision-free key generation & canonicalization
     std::string cacheKey = MakeCacheKey("inventory", "dev:1");
     std::string verKey   = MakeVersionKey("inventory", "dev:1");
     TEST_ASSERT(cacheKey == "api-cache:inventory:dev:1", "Cache key format matches namespace");
     TEST_ASSERT(verKey   == "api-ver:inventory:dev:1", "Version key format matches namespace");
     TEST_ASSERT(cacheKey != verKey, "Cache key and version key namespaces must never collide");
     TEST_ASSERT(MakeVersionKey(cacheKey) == verKey, "MakeVersionKey from cache key matches");
+
+    // Canonicalization of mixed-case resource types via helpers
+    TEST_ASSERT(MakeCacheKey("Inventory", "dev:1") == cacheKey, "MakeCacheKey canonicalizes mixed-case resource type");
+    TEST_ASSERT(MakeVersionKey("Inventory", "dev:1") == verKey, "MakeVersionKey canonicalizes mixed-case resource type");
+
+    // IsCacheableKey accepts canonical lowercase and rejects mixed/upper case
+    TEST_ASSERT(IsCacheableKey("api-cache:inventory:dev:1"), "Canonical lowercase key is cacheable");
+    TEST_ASSERT(!IsCacheableKey("api-cache:Inventory:dev:1"), "Mixed-case resource type rejected by IsCacheableKey");
+    TEST_ASSERT(!IsCacheableKey("api-cache:INVENTORY:dev:1"), "All-caps resource type rejected by IsCacheableKey");
+    TEST_ASSERT(IsCacheableKey("api-cache:dev_type-1.0:id"), "Alphanumeric, underscore, hyphen, dot permitted in resource type");
+    TEST_ASSERT(!IsCacheableKey("api-cache:inv entory:123"), "Space rejected in resource type");
+    TEST_ASSERT(!IsCacheableKey("api-cache::123"), "Empty resource type rejected");
+    TEST_ASSERT(!IsCacheableKey("api-cache:inventory:"), "Empty resource id rejected");
+    TEST_ASSERT(!IsCacheableKey("api-ver:inventory:dev:1"), "Non-cacheable prefix rejected");
+    TEST_ASSERT(!IsCacheableKey("random_string"), "Malformed string rejected");
+
+    // Full-key MakeVersionKey() input validation
+    TEST_ASSERT(MakeVersionKey("api-cache:inventory:dev:1") == "api-ver:inventory:dev:1", "Valid full key converted");
+    TEST_ASSERT(MakeVersionKey("api-cache:Inventory:dev:1").empty(), "Mixed-case full key rejected by MakeVersionKey");
+    TEST_ASSERT(MakeVersionKey("api-cache:INVENTORY:dev:1").empty(), "All-caps full key rejected by MakeVersionKey");
+    TEST_ASSERT(MakeVersionKey("api-cache:inventory:").empty(), "Empty resource id rejected by MakeVersionKey");
+    TEST_ASSERT(MakeVersionKey("api-cache:").empty(), "Incomplete key rejected by MakeVersionKey");
+    TEST_ASSERT(MakeVersionKey("api-ver:inventory:dev:1").empty(), "Version key rejected by MakeVersionKey");
+    TEST_ASSERT(MakeVersionKey("not_a_cache_key").empty(), "Malformed key rejected by MakeVersionKey");
 
     // Invalid keys return empty string
     TEST_ASSERT(MakeCacheKey("", "123").empty(), "Empty resource type returns empty");
@@ -270,6 +294,13 @@ static void test_fallback_and_validation() {
     TEST_ASSERT(!offlineCache.Invalidate(key, ""), "Empty version invalidation rejected");
     TEST_ASSERT(!offlineCache.Invalidate(key, "0"), "Zero version invalidation rejected");
 
+    // 5b. Key validation: raw mixed-case keys rejected at boundary
+    TEST_ASSERT(!offlineCache.Set("api-cache:Inventory:offline_item", {"data", "100"}), "Mixed-case Set() rejected");
+    TEST_ASSERT(!offlineCache.Invalidate("api-cache:Inventory:offline_item", "100"), "Mixed-case Invalidate() rejected");
+    TEST_ASSERT(!offlineCache.Delete("api-cache:Inventory:offline_item"), "Mixed-case Delete() rejected");
+    TEST_ASSERT(!offlineCache.Get("api-cache:Inventory:offline_item").has_value(), "Mixed-case Get() returns nullopt");
+    TEST_ASSERT(!ValidateCacheInvalidationTarget({"api-cache:Inventory:offline_item", "100"}), "Mixed-case target rejected");
+
     // 6. Pre-commit target validation helpers
     TEST_ASSERT(ValidateCacheInvalidationTarget({key, "100"}), "Valid target must pass");
     TEST_ASSERT(!ValidateCacheInvalidationTarget({"bad_key", "100"}), "Invalid key prefix rejected");
@@ -316,6 +347,15 @@ static void test_fallback_and_validation() {
         TEST_ASSERT(regOk, "Registration with valid targets must return true");
         TEST_ASSERT(!tx.HasFailed(), "Transaction must not be marked failed on valid registration");
         TEST_ASSERT(tx.Commit(), "Transaction commits successfully");
+    }
+
+    // 7e. Mixed-case cache key rejected before commit, tx marked failed
+    {
+        DbTransaction tx(dbSession, log);
+        bool regOk = RegisterCacheInvalidationAfterCommit(tx, offlineCache, {{"api-cache:Inventory:offline_item", "100"}});
+        TEST_ASSERT(!regOk, "Registration with mixed-case cache key must return false");
+        TEST_ASSERT(tx.HasFailed(), "Transaction must be marked failed on mixed-case key");
+        TEST_ASSERT(!tx.Commit(), "Transaction cannot commit after mixed-case key registration");
     }
 
     std::cout << "  PASS: test_fallback_and_validation" << std::endl;
@@ -703,6 +743,216 @@ static void test_atomic_invalidation(int redisPort) {
         TEST_ASSERT(getMarker() == "200", "I: Invalidate must advance marker to V200");
     }
 
+    // ---- Test J: Mixed-Case Key Canonicalization and Invalidation Consistency ----
+    // Callers using MakeCacheKey with different casing ("Inventory" vs "inventory")
+    // produce the exact same canonical Redis key, ensuring shared cache hits and no missed invalidations.
+    {
+        const std::string keyA = MakeCacheKey("Inventory", "mixed_case_device");
+        const std::string keyB = MakeCacheKey("inventory", "mixed_case_device");
+        const std::string verKeyJ = MakeVersionKey(keyA);
+
+        auto cleanupJ = [&]() {
+            try {
+                Poco::Redis::Array cmd; cmd << "DEL" << keyA << verKeyJ;
+                rc.execute<Poco::Int64>(cmd);
+            } catch (...) {}
+        };
+        cleanupJ();
+
+        TEST_ASSERT(keyA == keyB, "J: MakeCacheKey canonicalizes casing to identical key");
+        TEST_ASSERT(keyA == "api-cache:inventory:mixed_case_device", "J: Canonical key is lowercase");
+
+        // Caller A populates V10
+        bool setOk = cache.Set(keyA, {"{\"name\":\"dev_mixed\"}", "10"});
+        TEST_ASSERT(setOk, "J: Set via keyA must succeed");
+
+        // Caller B reads V10 from Redis
+        auto getB = cache.Get(keyB);
+        TEST_ASSERT(getB.has_value() && getB->version == "10", "J: Caller B reads V10 populated by Caller A");
+
+        // Caller A invalidates V20
+        bool invOk = cache.Invalidate(keyA, "20");
+        TEST_ASSERT(invOk, "J: Invalidate via keyA must succeed");
+
+        // Caller B observes cache miss (invalidated)
+        auto afterInvB = cache.Get(keyB);
+        TEST_ASSERT(!afterInvB.has_value(), "J: Caller B observes cache miss after Caller A invalidation");
+
+        // Attempting to bypass MakeCacheKey with a raw mixed-case key is strictly rejected at the boundary
+        const std::string rawMixedKey = "api-cache:Inventory:mixed_case_device";
+        TEST_ASSERT(!cache.Set(rawMixedKey, {"{\"name\":\"dev_raw\"}", "30"}),
+                    "J: Raw mixed-case Set() must be rejected at boundary");
+        TEST_ASSERT(!cache.Invalidate(rawMixedKey, "30"),
+                    "J: Raw mixed-case Invalidate() must be rejected at boundary");
+        TEST_ASSERT(!cache.Get(rawMixedKey).has_value(),
+                    "J: Raw mixed-case Get() must return nullopt");
+        TEST_ASSERT(MakeVersionKey(rawMixedKey).empty(),
+                    "J: MakeVersionKey must reject raw mixed-case key");
+
+        cleanupJ();
+    }
+
+    // ---- Test K: Exact 64-bit Version Ordering (> 2^53 and near uint64 max) ----
+    // Verifies that Redis Lua scripts execute exact string-based uint64 comparison without
+    // double-precision loss (which occurs above 2^53 in Lua 5.1).
+    {
+        const std::string keyK = MakeCacheKey("inventory", "uint64_precision_dev");
+        const std::string verKeyK = MakeVersionKey(keyK);
+
+        auto cleanupK = [&]() {
+            try {
+                Poco::Redis::Array cmd; cmd << "DEL" << keyK << verKeyK;
+                rc.execute<Poco::Int64>(cmd);
+            } catch (...) {}
+        };
+        auto getMarkerK = [&]() -> std::string {
+            try {
+                Poco::Redis::Array cmd; cmd << "GET" << verKeyK;
+                auto r = rc.execute<Poco::Redis::BulkString>(cmd);
+                return r.isNull() ? "" : r.value();
+            } catch (...) { return ""; }
+        };
+
+        // --------------------------------------------------------------------
+        // Part 1: Boundary around 2^53 (9007199254740992 vs 9007199254740993)
+        // In Lua 5.1, tonumber("9007199254740992") == tonumber("9007199254740993")
+        // would lose precision. cmp_uint64 must correctly distinguish them.
+        // --------------------------------------------------------------------
+        cleanupK();
+        const std::string v2pow53        = "9007199254740992"; // 2^53
+        const std::string v2pow53_plus1  = "9007199254740993"; // 2^53 + 1
+        const std::string v2pow53_plus2  = "9007199254740994"; // 2^53 + 2
+
+        // 1a. Marker monotonicity across 2^53: establish marker 2^53+1
+        bool invOk = cache.Invalidate(keyK, v2pow53_plus1);
+        TEST_ASSERT(invOk, "K: Invalidate(2^53+1) must succeed");
+        TEST_ASSERT(getMarkerK() == v2pow53_plus1, "K: Marker set to 9007199254740993");
+
+        // Delayed invalidation for 2^53 must NOT roll back marker 2^53+1
+        bool delInv = cache.Invalidate(keyK, v2pow53);
+        TEST_ASSERT(delInv, "K: Delayed Invalidate(2^53) must succeed as safe no-op");
+        TEST_ASSERT(getMarkerK() == v2pow53_plus1, "K: Marker must remain at 9007199254740993");
+
+        // 1b. Stale repopulation rejection across 2^53:
+        // Attempting to populate 2^53 against marker 2^53+1 must be rejected by Lua
+        bool staleSet = cache.Set(keyK, {"{\"name\":\"dev_stale\"}", v2pow53});
+        TEST_ASSERT(!staleSet, "K: Population with 2^53 must be rejected against marker 2^53+1");
+        TEST_ASSERT(!cache.Get(keyK).has_value(), "K: Cache must not contain stale 2^53 entry");
+
+        // Populating 2^53+1 (equal to marker) must succeed
+        bool validSet = cache.Set(keyK, {"{\"name\":\"dev_exact\"}", v2pow53_plus1});
+        TEST_ASSERT(validSet, "K: Population with version equal to marker (2^53+1) must succeed");
+        auto curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == v2pow53_plus1,
+                    "K: Cached record matches 2^53+1");
+
+        // Attempting to overwrite 2^53+1 with 2^53 must be rejected
+        bool staleOverwrite = cache.Set(keyK, {"{\"name\":\"dev_stale\"}", v2pow53});
+        TEST_ASSERT(!staleOverwrite, "K: Overwrite with 2^53 must be rejected against cached 2^53+1");
+
+        // Populating 2^53+2 (> cached and marker) must succeed
+        bool newerSet = cache.Set(keyK, {"{\"name\":\"dev_newer\"}", v2pow53_plus2});
+        TEST_ASSERT(newerSet, "K: Population with 2^53+2 must succeed");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == v2pow53_plus2,
+                    "K: Cached record is now 2^53+2");
+
+        // 1c. Preservation of newer value across 2^53 on delayed invalidation:
+        // Delayed invalidations with 2^53 and 2^53+1 must preserve cached 2^53+2
+        TEST_ASSERT(cache.Invalidate(keyK, v2pow53), "K: Delayed invalidation 2^53 safe no-op");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == v2pow53_plus2,
+                    "K: Cached 2^53+2 must be PRESERVED on delayed invalidation of 2^53");
+
+        TEST_ASSERT(cache.Invalidate(keyK, v2pow53_plus1), "K: Delayed invalidation 2^53+1 safe no-op");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == v2pow53_plus2,
+                    "K: Cached 2^53+2 must be PRESERVED on delayed invalidation of 2^53+1");
+
+        // Invalidation of 2^53+2 deletes the cached record
+        TEST_ASSERT(cache.Invalidate(keyK, v2pow53_plus2), "K: Invalidation of 2^53+2 must succeed");
+        TEST_ASSERT(!cache.Get(keyK).has_value(), "K: Cached 2^53+2 must be deleted");
+        TEST_ASSERT(getMarkerK() == v2pow53_plus2, "K: Marker advanced to 2^53+2");
+
+        // --------------------------------------------------------------------
+        // Part 2: Boundary near UINT64_MAX (18446744073709551614 vs 18446744073709551615)
+        // --------------------------------------------------------------------
+        cleanupK();
+        const std::string vMaxMinus1 = "18446744073709551614"; // 2^64 - 2
+        const std::string vMax       = "18446744073709551615"; // 2^64 - 1 (UINT64_MAX)
+        const std::string vOverflow  = "18446744073709551616"; // 2^64 (overflow)
+
+        // 2a. Marker monotonicity near UINT64_MAX: establish marker UINT64_MAX
+        TEST_ASSERT(cache.Invalidate(keyK, vMax), "K: Invalidate(UINT64_MAX) must succeed");
+        TEST_ASSERT(getMarkerK() == vMax, "K: Marker set to UINT64_MAX");
+
+        // Delayed invalidation for UINT64_MAX-1 must NOT roll back UINT64_MAX marker
+        TEST_ASSERT(cache.Invalidate(keyK, vMaxMinus1), "K: Delayed Invalidate(MAX-1) must succeed as safe no-op");
+        TEST_ASSERT(getMarkerK() == vMax, "K: Marker must remain at UINT64_MAX");
+
+        // 2b. Stale repopulation rejection near UINT64_MAX:
+        // Attempting to populate MAX-1 against marker MAX must be rejected
+        bool staleMaxMinus1 = cache.Set(keyK, {"{\"name\":\"dev_stale_max\"}", vMaxMinus1});
+        TEST_ASSERT(!staleMaxMinus1, "K: Population with MAX-1 must be rejected against marker MAX");
+        TEST_ASSERT(!cache.Get(keyK).has_value(), "K: Cache must not contain stale MAX-1");
+
+        // Populating MAX (equal to marker) must succeed
+        bool validMax = cache.Set(keyK, {"{\"name\":\"dev_max\"}", vMax});
+        TEST_ASSERT(validMax, "K: Population with UINT64_MAX must succeed");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == vMax, "K: Cached record matches UINT64_MAX");
+
+        // 2c. Preservation of newer value near UINT64_MAX:
+        // Delayed invalidation with MAX-1 must preserve cached MAX entry
+        TEST_ASSERT(cache.Invalidate(keyK, vMaxMinus1), "K: Delayed invalidation MAX-1 safe no-op");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == vMax,
+                    "K: Cached UINT64_MAX must be PRESERVED on delayed invalidation MAX-1");
+
+        // Invalidation of MAX deletes cached entry
+        TEST_ASSERT(cache.Invalidate(keyK, vMax), "K: Invalidation of UINT64_MAX must succeed");
+        TEST_ASSERT(!cache.Get(keyK).has_value(), "K: Cached UINT64_MAX must be deleted");
+        TEST_ASSERT(getMarkerK() == vMax, "K: Marker remains at UINT64_MAX");
+
+        // 2d. Overflow rejection: version 18446744073709551616 rejected by C++ and Lua
+        TEST_ASSERT(!cache.Set(keyK, {"{\"name\":\"overflow\"}", vOverflow}), "K: Overflow version Set rejected");
+        TEST_ASSERT(!cache.Invalidate(keyK, vOverflow), "K: Overflow version Invalidate rejected");
+
+        // --------------------------------------------------------------------
+        // Part 3: Digit Length Boundary (19 digits vs 20 digits)
+        // Lexicographically "9..." > "1...", but numerically 19 digits < 20 digits
+        // --------------------------------------------------------------------
+        cleanupK();
+        const std::string v19digits = "9999999999999999999";  // 19 digits
+        const std::string v20digits = "10000000000000000000"; // 20 digits
+
+        // Establish marker v20digits
+        TEST_ASSERT(cache.Invalidate(keyK, v20digits), "K: Invalidate(20 digits) must succeed");
+        TEST_ASSERT(getMarkerK() == v20digits, "K: Marker set to 20 digits");
+
+        // Delayed invalidation for 19 digits must not roll back 20-digit marker
+        TEST_ASSERT(cache.Invalidate(keyK, v19digits), "K: Delayed Invalidate(19 digits) must succeed as safe no-op");
+        TEST_ASSERT(getMarkerK() == v20digits, "K: Marker must remain at 20 digits");
+
+        // Stale write with 19 digits rejected against 20-digit marker
+        TEST_ASSERT(!cache.Set(keyK, {"{\"name\":\"dev_19\"}", v19digits}),
+                    "K: Population with 19 digits rejected against 20-digit marker");
+
+        // Populate 20 digits succeeds
+        TEST_ASSERT(cache.Set(keyK, {"{\"name\":\"dev_20\"}", v20digits}),
+                    "K: Population with 20 digits must succeed");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == v20digits, "K: Cached record matches 20 digits");
+
+        // Delayed 19-digit invalidation preserves cached 20-digit entry
+        TEST_ASSERT(cache.Invalidate(keyK, v19digits), "K: Delayed 19-digit invalidation must succeed as safe no-op");
+        curEntry = cache.Get(keyK);
+        TEST_ASSERT(curEntry.has_value() && curEntry->version == v20digits,
+                    "K: Cached 20-digit entry must be PRESERVED on delayed 19-digit invalidation");
+
+        cleanupK();
+    }
+
     cleanup();
     std::cout << "  PASS: test_atomic_invalidation" << std::endl;
 #else
@@ -928,6 +1178,88 @@ static void test_deterministic_stale_repopulation_race(int redisPort) {
     TEST_ASSERT(hitB.result == RedisCache::Result::Hit && hitB.entry.has_value() && hitB.entry->version == "2",
                 "Instance B reads cached V2");
     TEST_ASSERT(dummyLoads == 0, "No database loader called on cache hits");
+
+    // 12. Multi-instance race across Lua 2^53 boundary: 9007199254740992 vs 9007199254740993
+    cleanup();
+    const std::string vLow  = "9007199254740992"; // 2^53
+    const std::string vHigh = "9007199254740993"; // 2^53 + 1
+    loader_entered = false;
+    resume_loader = false;
+    outcomeA = RedisCache::Outcome{};
+
+    std::thread threadA_High([&]() {
+        auto loaderA_High = [&]() -> std::optional<RedisCache::Entry> {
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                loader_entered = true;
+            }
+            cv_entered.notify_one();
+
+            {
+                std::unique_lock<std::mutex> lock(mtx);
+                bool resumed = cv_resume.wait_for(lock, std::chrono::seconds(5), [&]() {
+                    return resume_loader;
+                });
+                TEST_ASSERT(resumed, "Timed out waiting to resume Instance A high-version loader");
+            }
+            return RedisCache::Entry{R"({"serialNumber":"RACE-HIGH","version":"9007199254740992"})", vLow};
+        };
+
+        outcomeA = cacheA.Get(key, loaderA_High);
+    });
+
+    // Wait until Instance A enters loader
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        bool entered = cv_entered.wait_for(lock, std::chrono::seconds(5), [&]() {
+            return loader_entered;
+        });
+        TEST_ASSERT(entered, "Timed out waiting for Instance A to enter high-version loader");
+    }
+
+    // Instance B invalidates with 2^53 + 1
+    bool invB_High = cacheB.Invalidate(key, vHigh);
+    TEST_ASSERT(invB_High, "Instance B invalidation 2^53+1 must succeed");
+
+    // Resume Instance A
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        resume_loader = true;
+    }
+    cv_resume.notify_one();
+    threadA_High.join();
+
+    // Instance A's population of 2^53 must be rejected by Lua (since 2^53 < 2^53 + 1)
+    TEST_ASSERT(outcomeA.result == RedisCache::Result::Fallback,
+                "Instance A must return Fallback when 2^53 stale population is rejected against 2^53+1");
+    TEST_ASSERT(outcomeA.entry.has_value() && outcomeA.entry->version == vLow,
+                "Instance A returns loaded 2^53 database snapshot");
+    TEST_ASSERT(cacheA.IsRedisHealthy(), "Instance A reports Redis healthy");
+
+    // Redis cache does not contain stale 2^53
+    {
+        Poco::Redis::Array getCacheCmd; getCacheCmd << "GET" << key;
+        auto cVal = rc.execute<Poco::Redis::BulkString>(getCacheCmd);
+        TEST_ASSERT(cVal.isNull(), "Redis cache must NOT contain 2^53 after 2^53+1 invalidation");
+    }
+
+    // Instance B loads 2^53 + 1 and populates Redis
+    auto loaderB_High = [&]() -> std::optional<RedisCache::Entry> {
+        return RedisCache::Entry{R"({"serialNumber":"RACE-HIGH","version":"9007199254740993"})", vHigh};
+    };
+    auto outB_High = cacheB.Get(key, loaderB_High);
+    TEST_ASSERT(outB_High.result == RedisCache::Result::Miss, "Instance B loader populates 2^53+1");
+    TEST_ASSERT(outB_High.entry.has_value() && outB_High.entry->version == vHigh, "Instance B returns 2^53+1");
+
+    // Both instances hit cached 2^53 + 1
+    dummyLoads = 0;
+    auto hitA_High = cacheA.Get(key, dummyLoader);
+    TEST_ASSERT(hitA_High.result == RedisCache::Result::Hit && hitA_High.entry->version == vHigh,
+                "Instance A reads cached 2^53+1");
+    auto hitB_High = cacheB.Get(key, dummyLoader);
+    TEST_ASSERT(hitB_High.result == RedisCache::Result::Hit && hitB_High.entry->version == vHigh,
+                "Instance B reads cached 2^53+1");
+    TEST_ASSERT(dummyLoads == 0, "No database loader called on cache hits for 2^53+1");
 
     cleanup();
     std::cout << "  PASS: test_deterministic_stale_repopulation_race" << std::endl;
