@@ -166,11 +166,16 @@ static void test_config_and_namespaces() {
     auto cfg1 = MakeRedisCacheConfig();
     TEST_ASSERT(!cfg1.enabled, "Config must be disabled when openwifi.redis.enable is false");
 
-    // 2. Host empty
+    // 2. Host empty or "none"
     g_TestConfig["openwifi.redis.enable"] = "true";
     g_TestConfig["openwifi.redis.host"] = "";
     auto cfg2 = MakeRedisCacheConfig();
     TEST_ASSERT(!cfg2.enabled, "Config must be disabled when host is empty");
+
+    g_TestConfig["openwifi.redis.enable"] = "true";
+    g_TestConfig["openwifi.redis.host"] = "none";
+    auto cfgNone = MakeRedisCacheConfig();
+    TEST_ASSERT(!cfgNone.enabled, "Config must be disabled when Redis host is 'none'");
 
     // 3. Out-of-bounds values defaulted safely
     g_TestConfig["openwifi.redis.enable"] = "true";

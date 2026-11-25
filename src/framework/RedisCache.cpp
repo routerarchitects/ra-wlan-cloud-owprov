@@ -378,8 +378,8 @@ RedisCacheConfig MakeRedisCacheConfig() {
             return cfg;
         }
         std::string host = MicroServiceConfigGetString("openwifi.redis.host", "");
-        if (host.empty()) {
-            poco_information(log, "Redis caching disabled: 'openwifi.redis.host' is empty.");
+        if (host.empty() || host == "none") {
+            poco_information(log, "Redis caching disabled: 'openwifi.redis.host' is empty or 'none'.");
             return cfg;
         }
         cfg.enabled = true;

@@ -18,7 +18,7 @@ namespace OpenWifi {
 
 /// Redis connection settings consumed by RedisCache.
 struct RedisCacheConfig {
-    bool        enabled             = false; ///< openwifi.redis.enable (false when host is empty)
+    bool        enabled             = false; ///< false when openwifi.redis.enable is false or host is empty/"none"
     std::string host;                        ///< openwifi.redis.host
     int         port                = 6379;  ///< openwifi.redis.port
     std::string password;                    ///< openwifi.redis.password (never logged)
