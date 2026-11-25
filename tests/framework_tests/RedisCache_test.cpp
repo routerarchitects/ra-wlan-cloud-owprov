@@ -267,8 +267,8 @@ static void test_fallback_and_validation() {
     TEST_ASSERT(!offlineCache.Set(key, {"data", "abc"}), "Non-numeric version rejected");
     TEST_ASSERT(!offlineCache.Set(key, {"data", "-1"}), "Negative version rejected");
     TEST_ASSERT(!offlineCache.Set(key, {"data", "18446744073709551616"}), "uint64 overflow rejected");
-    TEST_ASSERT(!offlineCache.SetVersionMarker(key, ""), "Empty version marker rejected");
-    TEST_ASSERT(!offlineCache.SetVersionMarker(key, "0"), "Zero version marker rejected");
+    TEST_ASSERT(!offlineCache.Invalidate(key, ""), "Empty version invalidation rejected");
+    TEST_ASSERT(!offlineCache.Invalidate(key, "0"), "Zero version invalidation rejected");
 
     // 6. Pre-commit target validation helpers
     TEST_ASSERT(ValidateCacheInvalidationTarget({key, "100"}), "Valid target must pass");
@@ -365,38 +365,112 @@ static void test_live_redis_integration(int redisPort) {
     TEST_ASSERT(outHit.entry.has_value() && outHit.entry->version == "200", "Cached entry matches");
     TEST_ASSERT(loaderCount == 1, "Loader NOT invoked on Hit");
 
-    // 2. Non-Expiring Monotonic Version Marker
-    // Set version marker V300 (e.g. on DB update/invalidation)
-    bool mSet = cache.SetVersionMarker(key, "300");
-    TEST_ASSERT(mSet, "SetVersionMarker must succeed");
-
     Poco::Redis::Client rClient(host, redisPort);
+
+    // Inspect TTL of the populated api-cache:* entry: must match configured cacheTtlSec (30s) within 1-2s tolerance
+    Poco::Redis::Array cacheTtlCmd;
+    cacheTtlCmd << "TTL" << key;
+    auto cacheTtl = rClient.execute<Poco::Int64>(cacheTtlCmd);
+    TEST_ASSERT(cacheTtl >= 28 && cacheTtl <= 30,
+                "api-cache:* entry TTL after Get() population must match configured cacheTtlSec (30s)");
+
+    // 2. Atomic Invalidation and Non-Expiring Monotonic Version Marker
+    // Cache currently contains V200 from the preceding cache hit.
+    // Invalidate(key, "300") atomically removes cached V200 and advances marker to V300.
+    bool invOk = cache.Invalidate(key, "300");
+    TEST_ASSERT(invOk, "Invalidate(key, 300) must succeed");
+
+    // The cached V200 entry is removed and Get(key) does not return V200
+    auto afterInv = cache.Get(key);
+    TEST_ASSERT(!afterInv.has_value(), "Cached V200 entry must be removed after Invalidate(300)");
+
     Poco::Redis::Array ttlCmd;
     ttlCmd << "TTL" << verKey;
     auto vmTtl = rClient.execute<Poco::Int64>(ttlCmd);
     TEST_ASSERT(vmTtl == -1, "Committed version marker must be non-expiring (TTL == -1)");
 
-    // Monotonicity: setting older marker V250 must NOT roll back V300
-    cache.SetVersionMarker(key, "250");
     Poco::Redis::Array getVerCmd;
     getVerCmd << "GET" << verKey;
     auto curMarker = rClient.execute<Poco::Redis::BulkString>(getVerCmd);
-    TEST_ASSERT(!curMarker.isNull() && curMarker.value() == "300", "Marker must remain at highest version (300)");
+    TEST_ASSERT(!curMarker.isNull() && curMarker.value() == "300", "Version marker must equal V300");
+
+    // Monotonicity: delayed invalidation for older version V250 must NOT roll back V300 marker
+    bool delInv = cache.Invalidate(key, "250");
+    TEST_ASSERT(delInv, "Delayed Invalidate(250) must succeed as safe no-op");
+    auto markerAfterOld = rClient.execute<Poco::Redis::BulkString>(getVerCmd);
+    TEST_ASSERT(!markerAfterOld.isNull() && markerAfterOld.value() == "300", "Marker must remain at highest version (300)");
 
     // 3. Stale Repopulation Protection:
-    // Stale write V100 or V200 against marker V300 must be rejected
+    // Attempting to populate V200 again against marker V300 is rejected
     bool staleSet = cache.Set(key, {"{\"name\":\"stale\"}", "200"});
     TEST_ASSERT(!staleSet, "Stale write (< 300) must be rejected");
 
-    // Valid write V300 (== marker) or V400 (> marker) must succeed
+    // Populating V300 (== marker) or V400 (> marker) succeeds
     bool validSet = cache.Set(key, {"{\"name\":\"updated\"}", "300"});
     TEST_ASSERT(validSet, "Write equal to marker (300) must succeed");
+    auto curCached = cache.Get(key);
+    TEST_ASSERT(curCached.has_value() && curCached->version == "300", "Cached record is now V300");
+
+    // Inspect TTL of entry populated by Set(): must match configured cacheTtlSec (30s) within 1-2s tolerance
+    Poco::Redis::Array setTtlCmd;
+    setTtlCmd << "TTL" << key;
+    auto setTtl = rClient.execute<Poco::Int64>(setTtlCmd);
+    TEST_ASSERT(setTtl >= 28 && setTtl <= 30,
+                "api-cache:* entry TTL after Set() must match configured cacheTtlSec (30s)");
 
     // 4. Invalidation / Delete
     bool delOk = cache.Delete(key);
     TEST_ASSERT(delOk, "Delete must succeed");
     auto afterDel = cache.Get(key);
     TEST_ASSERT(!afterDel.has_value(), "Key must not be cached after Delete");
+
+    // 5. Bounded Staleness TTL Policy & ClampTtl Verification
+    // Normal cache data TTL must always be clamped to [10s, 60s] to bound staleness if invalidation fails.
+    const std::string keyMin = MakeCacheKey("inventory", "ttl_clamp_min_test");
+    const std::string keyMax = MakeCacheKey("inventory", "ttl_clamp_max_test");
+    const std::string keyDef = MakeCacheKey("inventory", "ttl_clamp_def_test");
+
+    // Clean up clamping test keys beforehand
+    try {
+        Poco::Redis::Array delClampPreCmd;
+        delClampPreCmd << "DEL" << keyMin << MakeVersionKey(keyMin)
+                                << keyMax << MakeVersionKey(keyMax)
+                                << keyDef << MakeVersionKey(keyDef);
+        rClient.execute<Poco::Int64>(delClampPreCmd);
+    } catch (...) {}
+
+    // 5a. Lower-bound clamping: requested 1s (< 10s minimum policy) must be clamped up to 10s
+    bool setMin = cache.Set(keyMin, {"{\"name\":\"min_clamped\"}", "100"}, 1);
+    TEST_ASSERT(setMin, "Set() with requested TTL 1s must succeed");
+    Poco::Redis::Array ttlMinCmd; ttlMinCmd << "TTL" << keyMin;
+    auto ttlMin = rClient.execute<Poco::Int64>(ttlMinCmd);
+    TEST_ASSERT(ttlMin >= 8 && ttlMin <= 10,
+                "Lower-bound TTL (requested 1s) must be clamped to policy minimum (10s)");
+
+    // 5b. Upper-bound clamping: requested 500s (> 60s maximum policy) must be clamped down to 60s
+    bool setMax = cache.Set(keyMax, {"{\"name\":\"max_clamped\"}", "100"}, 500);
+    TEST_ASSERT(setMax, "Set() with requested TTL 500s must succeed");
+    Poco::Redis::Array ttlMaxCmd; ttlMaxCmd << "TTL" << keyMax;
+    auto ttlMax = rClient.execute<Poco::Int64>(ttlMaxCmd);
+    TEST_ASSERT(ttlMax >= 58 && ttlMax <= 60,
+                "Upper-bound TTL (requested 500s) must be clamped to policy maximum (60s)");
+
+    // 5c. Default TTL: requested 0s must use configured cacheTtlSec (30s)
+    bool setDef = cache.Set(keyDef, {"{\"name\":\"default_clamped\"}", "100"}, 0);
+    TEST_ASSERT(setDef, "Set() with default TTL (0) must succeed");
+    Poco::Redis::Array ttlDefCmd; ttlDefCmd << "TTL" << keyDef;
+    auto ttlDef = rClient.execute<Poco::Int64>(ttlDefCmd);
+    TEST_ASSERT(ttlDef >= 28 && ttlDef <= 30,
+                "Default TTL (0) must use configured cacheTtlSec (30s)");
+
+    // Cleanup clamping test keys
+    try {
+        Poco::Redis::Array delClampPostCmd;
+        delClampPostCmd << "DEL" << keyMin << MakeVersionKey(keyMin)
+                                 << keyMax << MakeVersionKey(keyMax)
+                                 << keyDef << MakeVersionKey(keyDef);
+        rClient.execute<Poco::Int64>(delClampPostCmd);
+    } catch (...) {}
 
     // Cleanup
     try {
@@ -480,7 +554,7 @@ static void test_atomic_invalidation(int redisPort) {
     // ---- Test C: Marker monotonicity — older invalidation never regresses marker ----
     cleanup();
     // Establish marker V50 first
-    cache.SetVersionMarker(key, "50");
+    cache.Invalidate(key, "50");
     TEST_ASSERT(getMarker() == "50", "C: Pre-condition: marker set to V50");
     // Delayed invalidation V30 (older than marker V50)
     ok = cache.Invalidate(key, "30");
@@ -491,7 +565,7 @@ static void test_atomic_invalidation(int redisPort) {
     // Existing marker: V30, Existing cached record: V20, Delayed invalidation: V10
     // Cached record V20 must be DELETED because V20 <= highest known committed (V30).
     cleanup();
-    cache.SetVersionMarker(key, "30");
+    cache.Invalidate(key, "30");
     {
         Poco::Redis::Array setRaw;
         setRaw << "SET" << key << "{\"fmt\":\"v1\",\"data\":\"{\\\"name\\\":\\\"v20\\\"}\",\"version\":\"20\"}";
@@ -525,7 +599,7 @@ static void test_atomic_invalidation(int redisPort) {
     // 3. Reader loads V3 and caches it
     // 4. Delayed invalidation V2 executes: must PRESERVE cached V3!
     cleanup();
-    cache.SetVersionMarker(key, "3");
+    cache.Invalidate(key, "3");
     {
         Poco::Redis::Array setRaw3;
         setRaw3 << "SET" << key << "{\"fmt\":\"v1\",\"data\":\"{\\\"name\\\":\\\"v3\\\"}\",\"version\":\"3\"}";
@@ -621,12 +695,12 @@ static void test_atomic_invalidation(int redisPort) {
         TEST_ASSERT(ttl1 == -1, "I: Invalidation marker must be non-expiring (TTL == -1)");
         TEST_ASSERT(getMarker() == "100", "I: Invalidation marker must record V100");
 
-        // 2. Direct SetVersionMarker records non-expiring marker
-        cache.SetVersionMarker(key, "200");
+        // 2. Subsequent Invalidate advances marker and preserves non-expiring retention
+        cache.Invalidate(key, "200");
         Poco::Redis::Array ttlCmd2; ttlCmd2 << "TTL" << verKey;
         auto ttl2 = rc.execute<Poco::Int64>(ttlCmd2);
-        TEST_ASSERT(ttl2 == -1, "I: SetVersionMarker must be non-expiring (TTL == -1)");
-        TEST_ASSERT(getMarker() == "200", "I: SetVersionMarker must record V200");
+        TEST_ASSERT(ttl2 == -1, "I: Advanced version marker must be non-expiring (TTL == -1)");
+        TEST_ASSERT(getMarker() == "200", "I: Invalidate must advance marker to V200");
     }
 
     cleanup();
@@ -1031,8 +1105,8 @@ static void test_post_commit_and_rollback(int redisPort) {
 
     // 3. Explicit rollback does not invalidate Redis
     {
+        cache.Invalidate(key2, "1");
         cache.Set(key2, {R"({"val":"orig","version":"1"})", "1"}, 30);
-        cache.SetVersionMarker(key2, "1");
         TEST_ASSERT(cache.Get(key2).has_value(), "Pre-condition: key2 is cached at V1");
 
         DbTransaction tx(dbSession, log);
@@ -1053,8 +1127,8 @@ static void test_post_commit_and_rollback(int redisPort) {
 
     // 4. Failed transaction does not invalidate Redis
     {
+        cache.Invalidate(key3, "1");
         cache.Set(key3, {R"({"val":"orig","version":"1"})", "1"}, 30);
-        cache.SetVersionMarker(key3, "1");
         TEST_ASSERT(cache.Get(key3).has_value(), "Pre-condition: key3 is cached at V1");
 
         DbTransaction tx(dbSession, log);

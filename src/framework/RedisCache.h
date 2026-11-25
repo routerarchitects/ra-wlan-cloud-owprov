@@ -118,12 +118,6 @@ class RedisCache {
     /// Cache delete primitive. Deletes a key from Redis. Returns true on success or if key absent.
     bool Delete(const std::string &Key);
 
-    /// Sets a committed version marker for a cache key (e.g. during post-commit invalidation).
-    /// Stored in the "api-ver:" namespace as a non-expiring monotonic marker (TTL == -1).
-    /// Because database reads have no global statement timeout upper bound, non-expiring markers
-    /// permanently guarantee stale-repopulation protection for arbitrarily delayed readers.
-    bool SetVersionMarker(const std::string &Key, const std::string &Version);
-
     /// Atomically invalidates a cache entry and records the committed version marker.
     /// Deletes the cached entry for Key if its version <= committedVersion, then stores the
     /// version marker permanently. The marker prevents future delayed readers/writers from

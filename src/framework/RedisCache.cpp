@@ -168,25 +168,6 @@ int ClampTtl(int requestedTtl, int configuredTtl) {
 "    return 0\n" \
 "end\n"
 
-// Atomic Lua script for setting committed version markers monotonically.
-// Rules:
-//   - ARGV[1] (incoming version) must be a strictly positive uint64 decimal string.
-//   - If an existing marker exists: update ONLY if incoming > existing marker.
-//     Older markers cannot roll back newer markers (protects against out-of-order writes).
-//   - Persistent: stored WITHOUT expiration TTL (TTL == -1). Ensures the marker
-//     permanently outlasts all in-flight or arbitrarily delayed reads (as OWPROV
-//     defaults to no statement timeout).
-static const char *SET_VERSION_MARKER_LUA = LUA_UINT64_HELPERS R"(
-if not is_valid_uint64(ARGV[1]) then return 0 end
-local new_ver = tostring(ARGV[1])
-local cur = redis.call('GET', KEYS[1])
-if cur and is_valid_uint64(cur) then
-    if cmp_uint64(new_ver, cur) <= 0 then return 1 end
-end
-redis.call('SET', KEYS[1], new_ver)
-return 1
-)";
-
 // Atomic Lua script for version-aware cache invalidation (Specification §6.2, §6.3).
 // Atomically deletes a stale cached entry and records the committed version marker.
 // All reads, comparisons, deletion, and marker update happen in a single EVAL call,
@@ -877,41 +858,6 @@ bool RedisCache::Delete(const std::string &Key) {
         });
     return ok;
 #else
-    return false;
-#endif
-}
-
-// Sets a committed version marker in the "api-ver:" namespace (e.g. during post-commit invalidation).
-// Markers are stored without expiration (TTL == -1) and monotonically updated. Because database
-// queries have no global statement timeout upper bound, non-expiring markers guarantee
-// stale-repopulation protection for arbitrarily delayed readers.
-bool RedisCache::SetVersionMarker(const std::string &Key, const std::string &Version) {
-    if (!IsValidVersion(Version)) {
-        poco_warning(Log_, fmt::format("RedisCache: Rejected SetVersionMarker() for key '{}': version '{}' must be a positive uint64 decimal.", Key, Version));
-        return false;
-    }
-
-    std::string verKey;
-    if (Key.rfind(VER_KEY_PREFIX, 0) == 0) {
-        verKey = Key;
-    } else if (IsCacheableKey(Key)) {
-        verKey = MakeVersionKey(Key);
-    } else {
-        poco_warning(Log_, fmt::format("RedisCache: Rejected SetVersionMarker() on invalid key format: '{}'.", Key));
-        return false;
-    }
-
-#ifdef USE_POCO_REDIS
-    bool ok = false;
-    Impl_->Execute("SET_VER", verKey, NextReconnectTimeMs_, RedisHealthy_, *this,
-        [&](Poco::Redis::Client &client) {
-            Poco::Redis::Array EvalCmd;
-            EvalCmd << "EVAL" << SET_VERSION_MARKER_LUA << "1" << verKey << Version;
-            ok = (client.execute<Poco::Int64>(EvalCmd) == 1);
-        });
-    return ok;
-#else
-    (void)verKey;
     return false;
 #endif
 }
