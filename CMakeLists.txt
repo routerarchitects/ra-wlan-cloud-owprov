@@ -85,6 +85,8 @@ add_executable(owprov
         src/framework/AppServiceRegistry.h
         src/framework/ServiceRegistry.h
         src/framework/ServiceRegistry.cpp
+        src/framework/RedisCache.h
+        src/framework/RedisCache.cpp
         src/framework/SubSystemServer.cpp
         src/framework/SubSystemServer.h
         src/framework/RESTAPI_utils.h
@@ -369,4 +371,16 @@ target_link_libraries(service_discovery_test PRIVATE
         fmt::fmt)
 
 add_test(NAME service_discovery_test COMMAND service_discovery_test)
+
+add_executable(redis_cache_test
+        tests/framework_tests/RedisCache_test.cpp
+        src/framework/RedisCache.cpp
+)
+target_link_libraries(redis_cache_test PRIVATE
+        ${Poco_LIBRARIES}
+        OpenSSL::Crypto
+        OpenSSL::SSL
+        fmt::fmt)
+
+add_test(NAME redis_cache_test COMMAND redis_cache_test)
 

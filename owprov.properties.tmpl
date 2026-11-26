@@ -83,6 +83,8 @@ openwifi.redis.db = ${REDIS_DB}
 openwifi.redis.timeout = ${REDIS_TIMEOUT}
 openwifi.redis.service_registry.ttl = ${REDIS_SERVICE_REGISTRY_TTL}
 openwifi.service.bootstrap.kafka_wait_ms = ${SERVICE_BOOTSTRAP_KAFKA_WAIT_MS}
+# Shared API-data cache TTL in seconds (10-60). Independent of service_registry.ttl.
+openwifi.redis.cache.ttl = ${REDIS_CACHE_TTL}
 
 #
 # This section select which form of persistence you need
