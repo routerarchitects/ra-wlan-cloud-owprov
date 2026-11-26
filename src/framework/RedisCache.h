@@ -151,7 +151,7 @@ class RedisCache {
     struct Impl;
     std::unique_ptr<Impl> Impl_;
 
-    void OnRedisFailure(const std::string &Operation, const std::string &Key, const std::string &Reason);
+    void LogRedisFailure(const std::string &Operation, const std::string &Key, const std::string &Reason);
 };
 
 } // namespace OpenWifi

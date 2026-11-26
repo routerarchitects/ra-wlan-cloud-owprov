@@ -1893,13 +1893,45 @@ class TestLogCaptureChannel : public Poco::Channel {
         : Passthrough_(passthrough, true) {}
 
     void log(const Poco::Message &msg) override {
+        bool shouldPause = false;
         {
             std::lock_guard<std::mutex> lock(Mutex_);
             Messages_.push_back(msg);
+            if (!PauseSub_.empty() && msg.getText().find(PauseSub_) != std::string::npos) {
+                PauseSub_.clear();
+                Paused_ = true;
+                ResumePaused_ = false;
+                shouldPause = true;
+            }
         }
         if (Passthrough_) {
             try { Passthrough_->log(msg); } catch (...) {}
         }
+        if (shouldPause) {
+            Cv_.notify_all();
+            std::unique_lock<std::mutex> lock(Mutex_);
+            Cv_.wait_for(lock, std::chrono::seconds(15), [&]() { return ResumePaused_; });
+        }
+    }
+
+    void PauseNextMatch(std::string substr) {
+        std::lock_guard<std::mutex> lock(Mutex_);
+        PauseSub_ = std::move(substr);
+        Paused_ = false;
+        ResumePaused_ = false;
+    }
+
+    bool WaitForPaused(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(Mutex_);
+        return Cv_.wait_for(lock, timeout, [&]() { return Paused_; });
+    }
+
+    void ResumePaused() {
+        {
+            std::lock_guard<std::mutex> lock(Mutex_);
+            ResumePaused_ = true;
+        }
+        Cv_.notify_all();
     }
 
     [[nodiscard]] bool HasErrorContaining(const std::string &sub) const {
@@ -1924,7 +1956,11 @@ class TestLogCaptureChannel : public Poco::Channel {
 
   private:
     mutable std::mutex Mutex_;
+    std::condition_variable Cv_;
     std::vector<Poco::Message> Messages_;
+    std::string PauseSub_;
+    bool Paused_ = false;
+    bool ResumePaused_ = false;
     Poco::AutoPtr<Poco::Channel> Passthrough_;
 };
 
@@ -2238,7 +2274,9 @@ static void test_stale_pool_purge_on_transport_failure(int redisPort) {
             for (const char *name : {"5b_wrongtype_key", "5b_healthcheck", "5b_held_release",
                                      "5b_held_fail", "5b_trigger_fail", "5b_post_late",
                                      "5b_conn_warm", "5b_conn_active", "5b_connecting", "5b_conn_rec",
-                                     "5b_waiter_block", "5b_waiter"}) {
+                                     "5b_waiter_block", "5b_waiter",
+                                     "5b_delayed_warm", "5b_delayed_handler", "5b_rec_after_pause", "5b_post_resume",
+                                     "5b_adm_hold", "5b_adm_err", "5b_adm_rec"}) {
                 const auto k = MakeCacheKey("inventory", name);
                 delCmd << k << MakeVersionKey(k);
             }
@@ -2561,6 +2599,127 @@ static void test_stale_pool_purge_on_transport_failure(int redisPort) {
         TEST_ASSERT(!cache.IsRedisHealthy(), "Part 4: Waiter must NOT mark Redis healthy during backoff");
         TEST_ASSERT(proxy.AcceptedConnections() == 1,
             "Part 4: Waiter must NOT open a new TCP connection during active backoff");
+
+        proxy.Stop();
+    }
+
+    // =========================================================================
+    // Part 5 (Finding 9): Delayed failure handler finishing AFTER recovery must
+    //         NOT clear recovered health, extend backoff, or purge the new pool.
+    // =========================================================================
+    {
+        ControlledTcpProxy proxy(host, redisPort);
+        TEST_ASSERT(proxy.Port() > 0, "Part 5: Proxy must bind");
+
+        Poco::Logger &pauseLog = Poco::Logger::get("Test5BDelayed");
+        Poco::AutoPtr<Poco::Channel> origChan = pauseLog.getChannel();
+        Poco::AutoPtr<TestLogCaptureChannel> cap = new TestLogCaptureChannel(origChan.get());
+        pauseLog.setChannel(cap);
+        pauseLog.setLevel(Poco::Message::PRIO_WARNING);
+
+        RedisCacheConfig cfg;
+        cfg.enabled = true;
+        cfg.host = "127.0.0.1";
+        cfg.port = proxy.Port();
+        cfg.timeoutMs = 2000;
+        cfg.maxTotalConnections = 4;
+        cfg.maxIdleConnections = 2;
+        cfg.cacheTtlSec = 30;
+
+        RedisCache cache(cfg, pauseLog);
+
+        TEST_ASSERT(cache.Set(MakeCacheKey("inventory", "5b_delayed_warm"), {"{\"w\":1}", "1"}),
+            "Part 5: Initial warm Set must succeed");
+        proxy.Disconnect();
+
+        // Pause inside LogRedisFailure() AFTER InvalidateGeneration() updated state under PoolMutex
+        cap->PauseNextMatch("5b_delayed_handler");
+        std::optional<RedisCache::Entry> delayedRes;
+        std::thread failThread([&]() {
+            delayedRes = cache.Get(MakeCacheKey("inventory", "5b_delayed_handler"));
+        });
+        TEST_ASSERT(cap->WaitForPaused(std::chrono::seconds(5)),
+            "Part 5: Failure handler must pause in LogRedisFailure after state transition");
+
+        // Restore connectivity, wait out backoff, and recover on the SAME cache instance
+        proxy.Restore();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5300));
+
+        TEST_ASSERT(cache.Set(MakeCacheKey("inventory", "5b_rec_after_pause"), {"{\"ok\":1}", "1"}),
+            "Part 5: Recovery Set must succeed after backoff expires");
+        TEST_ASSERT(cache.IsRedisHealthy(), "Part 5: Cache healthy after recovery");
+        const uint64_t connsAfterReconnect = proxy.AcceptedConnections();
+
+        // Resume the delayed original LogRedisFailure() after gen-2 recovery succeeded
+        cap->ResumePaused();
+        failThread.join();
+        TEST_ASSERT(!delayedRes.has_value(), "Part 5: Original failing Get returned nullopt");
+
+        // Verify delayed handler did not overwrite recovered health, extend deadline, or purge pool
+        TEST_ASSERT(cache.IsRedisHealthy(),
+            "Part 5: Delayed LogRedisFailure must NOT mark recovered cache unhealthy");
+        const auto tPost = std::chrono::steady_clock::now();
+        bool postResumeOk = cache.Set(MakeCacheKey("inventory", "5b_post_resume"), {"{\"ok\":2}", "1"});
+        const auto postMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tPost).count();
+        TEST_ASSERT(postResumeOk && postMs < 500,
+            fmt::format("Part 5: Subsequent Set must succeed immediately without backoff (took {}ms)", postMs));
+        TEST_ASSERT(proxy.AcceptedConnections() == connsAfterReconnect,
+            "Part 5: Delayed handler must NOT trigger another reconnect or purge recovered pool");
+
+        pauseLog.setChannel(origChan);
+        proxy.Stop();
+    }
+
+    // =========================================================================
+    // Part 6 (Finding 9): Admission/backoff race when a non-transport setup error
+    //         starts backoff without advancing Generation.
+    // =========================================================================
+    {
+        ControlledTcpProxy proxy(host, redisPort);
+        TEST_ASSERT(proxy.Port() > 0, "Part 6: Proxy must bind");
+
+        RedisCacheConfig cfg;
+        cfg.enabled = true;
+        cfg.host = "127.0.0.1";
+        cfg.port = proxy.Port();
+        cfg.db = 1; // Triggers synchronous SELECT 1 during ConnectRedisClient()
+        cfg.timeoutMs = 15000;
+        cfg.maxTotalConnections = 4;
+        cfg.maxIdleConnections = 2;
+        cfg.cacheTtlSec = 30;
+
+        RedisCache cache(cfg, log);
+
+        // Hold Thread A inside ConnectRedisClient() SELECT 1 at generation 1
+        proxy.HoldNextSelect();
+        bool connectingOk = true;
+        std::thread connectingThread([&]() {
+            connectingOk = cache.Set(MakeCacheKey("inventory", "5b_adm_hold"), {"{\"h\":1}", "1"});
+        });
+        TEST_ASSERT(proxy.WaitForConnectingHeld(std::chrono::seconds(5)),
+            "Part 6: Thread A must pause in ConnectRedisClient SELECT 1");
+
+        // Trigger a non-transport SELECT server error on Thread B: starts backoff WITHOUT advancing Generation
+        proxy.InjectNextError("-ERR invalid DB index\r\n");
+        bool errSetOk = cache.Set(MakeCacheKey("inventory", "5b_adm_err"), {"{\"e\":1}", "1"});
+        TEST_ASSERT(!errSetOk, "Part 6: Setup server error must fail Set");
+        TEST_ASSERT(!cache.IsRedisHealthy(), "Part 6: Cache must enter unhealthy backoff");
+
+        // Release Thread A during active backoff: attemptGen == Generation (1 == 1),
+        // so TryMarkHealthy must still reject admission via !InBackoff and dispose the lease.
+        proxy.ReleaseConnectingHeld();
+        connectingThread.join();
+        TEST_ASSERT(!connectingOk, "Part 6: Lease finishing during backoff must be rejected");
+        TEST_ASSERT(!cache.IsRedisHealthy(),
+            "Part 6: Admission rejection must keep cache unhealthy during backoff");
+        TEST_ASSERT(proxy.WaitForConnectingClientClosed(std::chrono::seconds(5)),
+            "Part 6: Rejected lease socket must be disposed immediately");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5300));
+        TEST_ASSERT(cache.Set(MakeCacheKey("inventory", "5b_adm_rec"), {"{\"r\":1}", "1"}),
+            "Part 6: Request after backoff succeeds cleanly");
+        TEST_ASSERT(cache.IsRedisHealthy(), "Part 6: Cache healthy after backoff");
 
         proxy.Stop();
     }

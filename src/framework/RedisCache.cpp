@@ -511,6 +511,9 @@ struct RedisConnectionPool {
     std::unique_ptr<Poco::Redis::Client> Acquire(uint64_t &outGeneration,
                                                  const std::atomic<int64_t> &nextReconnect) {
         std::unique_lock<std::mutex> lock(PoolMutex);
+        if (InBackoff(nextReconnect)) {
+            return nullptr;
+        }
 
         // 1. Reuse existing idle client
         if (!IdleClients.empty()) {
@@ -580,9 +583,9 @@ struct RedisConnectionPool {
         return nullptr;
     }
 
-    bool TryMarkHealthy(uint64_t expectedGen, std::atomic<bool> &redisHealthy) {
+    bool TryMarkHealthy(uint64_t expectedGen, const std::atomic<int64_t> &nextReconnect, std::atomic<bool> &redisHealthy) {
         std::lock_guard<std::mutex> lock(PoolMutex);
-        if (expectedGen != Generation) return false;
+        if (expectedGen != Generation || InBackoff(nextReconnect)) return false;
         redisHealthy.store(true, std::memory_order_relaxed);
         return true;
     }
@@ -681,7 +684,7 @@ struct RedisCache::Impl {
                          RedisCache &cache, std::string *failureReason) {
         if (transport || isConnect) {
             if (Pool.InvalidateGeneration(gen, transport, nextReconnect, redisHealthy)) {
-                cache.OnRedisFailure(op, key, reason);
+                cache.LogRedisFailure(op, key, reason);
             }
         } else {
             poco_warning(cache.Log_, fmt::format("RedisCache: {} error for key '{}': {}", op, key, reason));
@@ -717,13 +720,13 @@ struct RedisCache::Impl {
                 return std::nullopt;
             }
             PooledClientLease lease(Pool, std::move(client), attemptGen);
-            if (InBackoff(nextReconnect)) {
+            if (!Pool.TryMarkHealthy(attemptGen, nextReconnect, redisHealthy)) {
                 lease.MarkUnhealthy();
-                if (failureReason) *failureReason = "Redis connection entered reconnect backoff while acquiring";
-                return std::nullopt;
-            }
-            if (!Pool.TryMarkHealthy(attemptGen, redisHealthy)) {
-                if (failureReason) *failureReason = "Redis pool generation invalidated while connecting";
+                if (failureReason) {
+                    *failureReason = InBackoff(nextReconnect)
+                        ? "Redis connection entered reconnect backoff while acquiring"
+                        : "Redis pool generation invalidated while connecting";
+                }
                 return std::nullopt;
             }
             return lease;
@@ -786,18 +789,15 @@ RedisCache::RedisCache(RedisCacheConfig Config, Poco::Logger &Logger)
 
 RedisCache::~RedisCache() = default;
 
-// Consolidated error handler for all Redis connection and command failures.
-// Activates the 5-second backoff window and marks Redis unhealthy.
-void RedisCache::OnRedisFailure(const std::string &Operation, const std::string &Key, const std::string &Reason) {
+// Logs a Redis connection or command failure outside PoolMutex.
+// Reconnect backoff and failure-state transitions are owned exclusively by
+// RedisConnectionPool::InvalidateGeneration() under PoolMutex.
+void RedisCache::LogRedisFailure(const std::string &Operation, const std::string &Key, const std::string &Reason) {
     if (Key.empty()) {
         poco_warning(Log_, fmt::format("RedisCache: {} failed: {}. Bypassing Redis for {}ms.", Operation, Reason, RECONNECT_BACKOFF_MS));
     } else {
         poco_warning(Log_, fmt::format("RedisCache: {} failed for key '{}': {}. Bypassing Redis for {}ms.", Operation, Key, Reason, RECONNECT_BACKOFF_MS));
     }
-    auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    NextReconnectTimeMs_.store(nowMs + RECONNECT_BACKOFF_MS, std::memory_order_relaxed);
-    RedisHealthy_.store(false, std::memory_order_relaxed);
 }
 
 // Cache-aside read operation with authoritative loader fallback.
