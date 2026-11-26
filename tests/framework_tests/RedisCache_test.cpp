@@ -13,13 +13,18 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "Poco/AutoPtr.h"
+#include "Poco/Channel.h"
 #include "Poco/Logger.h"
+#include "Poco/Message.h"
 #include "Poco/Net/StreamSocket.h"
 #include "Poco/Net/SocketAddress.h"
 #include "fmt/format.h"
 
 #ifdef USE_POCO_REDIS
+#include "Poco/Net/ServerSocket.h"
 #include "Poco/Redis/Array.h"
 #include "Poco/Redis/Client.h"
 #include "Poco/Redis/Command.h"
@@ -29,6 +34,7 @@
 
 #include "Poco/Data/SQLite/Connector.h"
 #include "Poco/Data/Session.h"
+#include "Poco/Data/Statement.h"
 #include "framework/DbTransaction.h"
 #include "framework/RedisCache.h"
 #include "framework/RedisCacheInvalidation.h"
@@ -1533,6 +1539,443 @@ static void test_post_commit_and_rollback(int redisPort) {
     cleanup();
     std::cout << "  PASS: test_post_commit_and_rollback" << std::endl;
 }
+
+// ---------------------------------------------------------------------------
+// Controlled TCP Proxy for Network Outage Simulation
+// ---------------------------------------------------------------------------
+class ControlledTcpProxy {
+  public:
+    ControlledTcpProxy(const std::string &targetHost, int targetPort)
+        : TargetHost_(targetHost), TargetPort_(targetPort),
+          Server_(Poco::Net::SocketAddress("127.0.0.1", 0)) {
+        ProxyPort_ = Server_.address().port();
+        Server_.setReceiveTimeout(Poco::Timespan(200 * 1000LL));
+        Thread_ = std::thread(&ControlledTcpProxy::AcceptLoop, this);
+    }
+
+    ~ControlledTcpProxy() {
+        Stop();
+    }
+
+    [[nodiscard]] int Port() const noexcept {
+        return ProxyPort_;
+    }
+
+    [[nodiscard]] uint64_t AcceptedConnections() const noexcept {
+        return AcceptedConnections_.load();
+    }
+
+    void Disconnect() {
+        Enabled_.store(false);
+        std::lock_guard<std::mutex> lock(SocketsMutex_);
+        for (auto &sock : ActiveSockets_) {
+            try { sock.shutdown(); } catch (...) {}
+            try { sock.close(); } catch (...) {}
+        }
+        ActiveSockets_.clear();
+    }
+
+    void Restore() {
+        Enabled_.store(true);
+    }
+
+    void Stop() {
+        Stop_.store(true);
+        Disconnect();
+        try { Server_.close(); } catch (...) {}
+        if (Thread_.joinable()) {
+            Thread_.join();
+        }
+        std::lock_guard<std::mutex> lock(SocketsMutex_);
+        for (auto &t : ForwardThreads_) {
+            if (t.joinable()) t.join();
+        }
+        ForwardThreads_.clear();
+    }
+
+  private:
+    void Forward(Poco::Net::StreamSocket src, Poco::Net::StreamSocket dst) {
+        char buf[8192];
+        src.setReceiveTimeout(Poco::Timespan(200 * 1000LL));
+        while (!Stop_.load() && Enabled_.load()) {
+            try {
+                int n = src.receiveBytes(buf, sizeof(buf));
+                if (n <= 0) break;
+                dst.sendBytes(buf, n);
+            } catch (const Poco::TimeoutException &) {
+                continue;
+            } catch (...) {
+                break;
+            }
+        }
+        try { src.shutdown(); } catch (...) {}
+        try { src.close(); } catch (...) {}
+        try { dst.shutdown(); } catch (...) {}
+        try { dst.close(); } catch (...) {}
+    }
+
+    void AcceptLoop() {
+        while (!Stop_.load()) {
+            try {
+                Poco::Net::StreamSocket clientSock = Server_.acceptConnection();
+                ++AcceptedConnections_;
+                if (!Enabled_.load()) {
+                    try { clientSock.shutdown(); } catch (...) {}
+                    try { clientSock.close(); } catch (...) {}
+                    continue;
+                }
+                try {
+                    Poco::Net::StreamSocket redisSock(
+                        Poco::Net::SocketAddress(TargetHost_, static_cast<Poco::UInt16>(TargetPort_)));
+                    std::lock_guard<std::mutex> lock(SocketsMutex_);
+                    ActiveSockets_.push_back(clientSock);
+                    ActiveSockets_.push_back(redisSock);
+                    ForwardThreads_.emplace_back(&ControlledTcpProxy::Forward, this, clientSock, redisSock);
+                    ForwardThreads_.emplace_back(&ControlledTcpProxy::Forward, this, redisSock, clientSock);
+                } catch (...) {
+                    try { clientSock.shutdown(); } catch (...) {}
+                    try { clientSock.close(); } catch (...) {}
+                }
+            } catch (const Poco::TimeoutException &) {
+            } catch (...) {}
+        }
+    }
+
+    std::string TargetHost_;
+    int TargetPort_;
+    Poco::Net::ServerSocket Server_;
+    int ProxyPort_ = 0;
+    std::atomic<bool> Enabled_{true};
+    std::atomic<bool> Stop_{false};
+    std::atomic<uint64_t> AcceptedConnections_{0};
+    std::thread Thread_;
+    std::mutex SocketsMutex_;
+    std::vector<Poco::Net::StreamSocket> ActiveSockets_;
+    std::vector<std::thread> ForwardThreads_;
+};
+
+// ---------------------------------------------------------------------------
+// Custom Poco Channel to Capture and Assert Log Messages
+// ---------------------------------------------------------------------------
+class TestLogCaptureChannel : public Poco::Channel {
+  public:
+    explicit TestLogCaptureChannel(Poco::Channel *passthrough = nullptr)
+        : Passthrough_(passthrough, true) {}
+
+    void log(const Poco::Message &msg) override {
+        {
+            std::lock_guard<std::mutex> lock(Mutex_);
+            Messages_.push_back(msg);
+        }
+        if (Passthrough_) {
+            try { Passthrough_->log(msg); } catch (...) {}
+        }
+    }
+
+    [[nodiscard]] bool HasErrorContaining(const std::string &sub) const {
+        std::lock_guard<std::mutex> lock(Mutex_);
+        for (const auto &m : Messages_) {
+            if (m.getPriority() <= Poco::Message::PRIO_ERROR &&
+                m.getText().find(sub) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Clear() {
+        std::lock_guard<std::mutex> lock(Mutex_);
+        Messages_.clear();
+    }
+
+    [[nodiscard]] Poco::Channel *Passthrough() noexcept {
+        return Passthrough_.get();
+    }
+
+  private:
+    mutable std::mutex Mutex_;
+    std::vector<Poco::Message> Messages_;
+    Poco::AutoPtr<Poco::Channel> Passthrough_;
+};
+
+// ---------------------------------------------------------------------------
+// Suite 5 - Test E: Live Redis Outage & Recovery (Finding 5A)
+// ---------------------------------------------------------------------------
+static void test_live_redis_outage_and_recovery(int redisPort) {
+    std::cout << "--- Suite 5 - Test E: Live Redis Outage & Recovery (Port " << redisPort << ") ---" << std::endl;
+    Poco::Logger &log = Poco::Logger::get("TestLiveOutage");
+    Poco::AutoPtr<Poco::Channel> origChannel = log.getChannel();
+    Poco::AutoPtr<TestLogCaptureChannel> logCapture = new TestLogCaptureChannel(origChannel.get());
+    log.setChannel(logCapture);
+    log.setLevel(Poco::Message::PRIO_DEBUG);
+
+    const std::string host = GetTestRedisHost();
+
+    // Start controlled TCP proxy pointing to the live test Redis
+    ControlledTcpProxy proxy(host, redisPort);
+    const int proxyPort = proxy.Port();
+    TEST_ASSERT(proxyPort > 0, "Proxy port must be bound successfully");
+
+    // Configure both independent cache instances through the local controlled proxy.
+    // Use short TTL (10s) to test bounded-staleness window and small pool limits.
+    RedisCacheConfig cfg;
+    cfg.enabled = true;
+    cfg.host = "127.0.0.1";
+    cfg.port = proxyPort;
+    cfg.cacheTtlSec = 10;
+    cfg.timeoutMs = 1000;
+    cfg.maxTotalConnections = 4;
+    cfg.maxIdleConnections = 2;
+
+    // Keep the EXACT same cache instances throughout all stages of the test (requirement)
+    RedisCache cache1(cfg, log);
+    RedisCache cache2(cfg, log);
+
+    const std::string key = MakeCacheKey("inventory", "outage_recovery_key");
+    const std::string verKey = MakeVersionKey(key);
+    const std::string recoveryProbe = MakeCacheKey("inventory", "outage_recovery_probe");
+    const std::string verRecoveryProbe = MakeVersionKey(recoveryProbe);
+
+    Poco::Redis::Client directRc(host, redisPort);
+    auto cleanup = [&]() {
+        try {
+            Poco::Redis::Array cmd;
+            cmd << "DEL" << key << verKey << recoveryProbe << verRecoveryProbe;
+            directRc.execute<Poco::Int64>(cmd);
+        } catch (...) {}
+    };
+
+    cleanup();
+
+    Poco::Data::SQLite::Connector::registerConnector();
+    Poco::Data::Session dbSession("SQLite", ":memory:");
+    try {
+        dbSession << "DROP TABLE IF EXISTS outage_test", Poco::Data::Keywords::now;
+    } catch (...) {}
+    dbSession << "CREATE TABLE IF NOT EXISTS outage_test (id INTEGER PRIMARY KEY, version INTEGER)", Poco::Data::Keywords::now;
+
+    // =======================================================================
+    // Stage 1: Warm the pool and verify cache hits across independent instances
+    // =======================================================================
+    {
+        bool loaderCalled = false;
+        auto loaderV1 = [&]() -> std::optional<RedisCache::Entry> {
+            loaderCalled = true;
+            return RedisCache::Entry{R"({"name":"device-outage","version":"100"})", "100"};
+        };
+
+        // Cache miss on cache1 triggers loader and populates Redis
+        auto missOutcome = cache1.Get(key, loaderV1);
+        TEST_ASSERT(loaderCalled, "Stage 1: Initial miss on cache1 must invoke loader");
+        TEST_ASSERT(missOutcome.result == RedisCache::Result::Miss,
+                    "Stage 1: cache1 must report Result::Miss (populated)");
+        TEST_ASSERT(missOutcome.entry.has_value() && missOutcome.entry->version == "100",
+                    "Stage 1: Populated entry must have version 100");
+        TEST_ASSERT(cache1.IsRedisHealthy(), "Stage 1: cache1 must report healthy");
+
+        // Direct cache hit on cache1
+        auto hit1 = cache1.Get(key);
+        TEST_ASSERT(hit1.has_value() && hit1->version == "100",
+                    "Stage 1: cache1 must return cache hit with version 100");
+
+        // Shared cache hit on independent cache2
+        auto hit2 = cache2.Get(key);
+        TEST_ASSERT(hit2.has_value() && hit2->version == "100",
+                    "Stage 1: cache2 must return shared cache hit with version 100");
+        TEST_ASSERT(cache2.IsRedisHealthy(), "Stage 1: cache2 must report healthy");
+    }
+
+    // =======================================================================
+    // Stage 2: Disconnect Redis and verify authoritative-loader fallback
+    // =======================================================================
+    {
+        proxy.Disconnect();
+
+        // cache1 encounters severed socket, disposes stale pooled client, falls back to loader
+        bool fallbackLoader1Called = false;
+        auto fbLoader1 = [&]() -> std::optional<RedisCache::Entry> {
+            fallbackLoader1Called = true;
+            return RedisCache::Entry{R"({"name":"device-outage","version":"100"})", "100"};
+        };
+        auto fbOutcome1 = cache1.Get(key, fbLoader1);
+        TEST_ASSERT(fallbackLoader1Called, "Stage 2: cache1 authoritative loader must be invoked during outage");
+        TEST_ASSERT(fbOutcome1.result == RedisCache::Result::Fallback,
+                    "Stage 2: cache1 must return Result::Fallback during outage");
+        TEST_ASSERT(fbOutcome1.entry.has_value() && fbOutcome1.entry->version == "100",
+                    "Stage 2: cache1 must return authoritative fallback entry");
+        TEST_ASSERT(!cache1.IsRedisHealthy(), "Stage 2: cache1 must be marked unhealthy during outage");
+
+        // cache2 encounters severed socket, disposes stale pooled client, falls back to loader
+        bool fallbackLoader2Called = false;
+        auto fbLoader2 = [&]() -> std::optional<RedisCache::Entry> {
+            fallbackLoader2Called = true;
+            return RedisCache::Entry{R"({"name":"device-outage","version":"100"})", "100"};
+        };
+        auto fbOutcome2 = cache2.Get(key, fbLoader2);
+        TEST_ASSERT(fallbackLoader2Called, "Stage 2: cache2 authoritative loader must be invoked during outage");
+        TEST_ASSERT(fbOutcome2.result == RedisCache::Result::Fallback,
+                    "Stage 2: cache2 must return Result::Fallback during outage");
+        TEST_ASSERT(fbOutcome2.entry.has_value() && fbOutcome2.entry->version == "100",
+                    "Stage 2: cache2 must return authoritative fallback entry");
+        TEST_ASSERT(!cache2.IsRedisHealthy(), "Stage 2: cache2 must be marked unhealthy during outage");
+
+        // Verify fail-fast during backoff window: direct Get() immediately returns nullopt without blocking
+        auto fastFail1 = cache1.Get(key);
+        TEST_ASSERT(!fastFail1.has_value(), "Stage 2: Direct Get() during backoff must fail fast");
+    }
+
+    // =======================================================================
+    // Stage 3: Commit DB mutation during outage; verify commit, ERROR log, and counter increment
+    // =======================================================================
+    {
+        logCapture->Clear();
+        const uint64_t failuresBefore = GetRedisInvalidationFailuresTotal();
+        {
+            DbTransaction tx(dbSession, log);
+
+            // Execute an actual DB mutation (INSERT) inside the transaction before commit
+            dbSession << "INSERT INTO outage_test (id, version) VALUES (1, 200)",
+                Poco::Data::Keywords::now;
+
+            bool regOk = RegisterCacheInvalidationAfterCommit(tx, cache1, {{key, "200"}});
+            TEST_ASSERT(regOk, "Stage 3: RegisterCacheInvalidationAfterCommit must return true");
+
+            // Transaction commit MUST succeed even though post-commit invalidation fails
+            bool commitOk = tx.Commit();
+            TEST_ASSERT(commitOk, "Stage 3: DB mutation tx.Commit() must succeed despite Redis outage");
+            TEST_ASSERT(!tx.HasFailed(), "Stage 3: Transaction must NOT be marked failed");
+        }
+
+        // Verify that the actual DB mutation was committed and persisted to SQLite table
+        int persistedVersion = 0;
+        dbSession << "SELECT version FROM outage_test WHERE id = 1",
+            Poco::Data::Keywords::into(persistedVersion),
+            Poco::Data::Keywords::now;
+        TEST_ASSERT(persistedVersion == 200, "Stage 3: Actual DB mutation must be committed and visible in table");
+
+        // Verify that post-commit invalidation failure emitted the required ERROR log
+        TEST_ASSERT(logCapture->HasErrorContaining("RedisCache: Invalidation failed for key '" + key + "' version '200'"),
+                    "Stage 3: Must emit required ERROR log for invalidation failure during outage");
+
+        // Verify telemetry metric increment
+        const uint64_t failuresAfter = GetRedisInvalidationFailuresTotal();
+        TEST_ASSERT(failuresAfter == failuresBefore + 1,
+                    "Stage 3: owprov_redis_invalidation_failures_total must increment by 1");
+        TEST_ASSERT(cache1.InvalidationFailures() == failuresAfter,
+                    "Stage 3: cache1.InvalidationFailures() must match global metric");
+    }
+
+    // =======================================================================
+    // Stage 4: Restore connectivity
+    // =======================================================================
+    const auto connectionsBeforeRecovery = proxy.AcceptedConnections();
+    {
+        proxy.Restore();
+    }
+
+    // =======================================================================
+    // Stage 5: Verify recovery after configured backoff & disposal of stale pooled connections
+    // =======================================================================
+    {
+        // Wait 5200ms to exceed the 5000ms RECONNECT_BACKOFF_MS window
+        std::this_thread::sleep_for(std::chrono::milliseconds(5200));
+
+        // Immediately test that the SAME cache1 instance recovers right after backoff
+        // on a separate probe key, before waiting for the stale target key's TTL.
+        bool recovered = cache1.Set(
+            recoveryProbe,
+            RedisCache::Entry{R"({"probe":"ok","version":"1"})", "1"},
+            10);
+
+        TEST_ASSERT(recovered,
+                    "Stage 5: Same RedisCache instance must reconnect and succeed immediately after backoff");
+        TEST_ASSERT(cache1.IsRedisHealthy(),
+                    "Stage 5: Cache must be healthy after post-backoff reconnection");
+
+        // Verify that recovery established a fresh TCP connection after stale pooled socket failure
+        TEST_ASSERT(
+            proxy.AcceptedConnections() > connectionsBeforeRecovery,
+            "Recovery must establish a fresh TCP connection after stale pooled socket failure");
+
+        // Verify cache hit on the probe key via independent cache2 as well
+        auto probeHit2 = cache2.Get(recoveryProbe);
+        TEST_ASSERT(probeHit2.has_value() && probeHit2->version == "1",
+                    "Stage 5: cache2 must also read recovery probe key");
+        TEST_ASSERT(cache2.IsRedisHealthy(),
+                    "Stage 5: cache2 must be healthy after post-backoff reconnection");
+
+        try {
+            Poco::Redis::Array cmd;
+            cmd << "DEL" << recoveryProbe << verRecoveryProbe;
+            directRc.execute<Poco::Int64>(cmd);
+        } catch (...) {}
+
+        // Respect short-TTL (10s) bounded-staleness policy:
+        // Poll EXISTS until the stale cache entry is actually gone, with a bounded timeout.
+        bool expired = false;
+        for (int i = 0; i < 120; ++i) {
+            Poco::Redis::Array existsCmd;
+            existsCmd << "EXISTS" << key;
+
+            if (directRc.execute<Poco::Int64>(existsCmd) == 0) {
+                expired = true;
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        TEST_ASSERT(
+            expired,
+            "Stale cache entry must expire within bounded TTL window");
+    }
+
+    // =======================================================================
+    // Stage 6: Verify latest authoritative version populates miss & shared hits resume
+    // =======================================================================
+    {
+        // Stale pooled connections were already disposed upon failure in Stage 2.
+        // cache1 now acquires a fresh connection through restored proxy.
+        bool loaderV2Called = false;
+        auto loaderV2 = [&]() -> std::optional<RedisCache::Entry> {
+            loaderV2Called = true;
+            return RedisCache::Entry{R"({"name":"device-outage","version":"200"})", "200"};
+        };
+
+        // Cache miss on cache1 triggers loaderV2 and populates restored Redis
+        auto recOutcome = cache1.Get(key, loaderV2);
+        TEST_ASSERT(loaderV2Called, "Stage 6: loaderV2 must be invoked on cache miss");
+        TEST_ASSERT(recOutcome.result == RedisCache::Result::Miss,
+                    "Stage 6: cache1 must report Result::Miss (populated) after recovery");
+        TEST_ASSERT(recOutcome.entry.has_value() && recOutcome.entry->version == "200",
+                    "Stage 6: Populated entry must have latest version 200");
+        TEST_ASSERT(cache1.IsRedisHealthy(), "Stage 6: cache1 must report healthy after recovery");
+
+        // Independent instance cache2 reads the updated entry from restored Redis
+        auto hitCache2 = cache2.Get(key);
+        TEST_ASSERT(hitCache2.has_value() && hitCache2->version == "200",
+                    "Stage 6: cache2 must return shared cache hit with version 200");
+        TEST_ASSERT(cache2.IsRedisHealthy(), "Stage 6: cache2 must report healthy after recovery");
+
+        // Subsequent reads on both instances continue to hit version 200
+        auto subsequentHit1 = cache1.Get(key);
+        TEST_ASSERT(subsequentHit1.has_value() && subsequentHit1->version == "200",
+                    "Stage 6: Subsequent cache1 hit must return version 200");
+
+        auto subsequentHit2 = cache2.Get(key);
+        TEST_ASSERT(subsequentHit2.has_value() && subsequentHit2->version == "200",
+                    "Stage 6: Subsequent cache2 hit must return version 200");
+    }
+
+    try {
+        dbSession << "DROP TABLE IF EXISTS outage_test", Poco::Data::Keywords::now;
+    } catch (...) {}
+
+    cleanup();
+    proxy.Stop();
+    log.setChannel(origChannel);
+    std::cout << "  PASS: test_live_redis_outage_and_recovery" << std::endl;
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -1558,6 +2001,7 @@ int main(int argc, char **argv) {
         test_deterministic_stale_repopulation_race(redisPort);
         test_concurrent_and_out_of_order_invalidation(redisPort);
         test_post_commit_and_rollback(redisPort);
+        test_live_redis_outage_and_recovery(redisPort);
 #endif
     }
 
