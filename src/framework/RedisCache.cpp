@@ -31,6 +31,8 @@
 #ifdef USE_POCO_REDIS
 #include "Poco/Exception.h"
 #include "Poco/Net/NetException.h"
+#include "Poco/Net/SocketAddress.h"
+#include "Poco/Net/StreamSocket.h"
 #include "Poco/Redis/Array.h"
 #include "Poco/Redis/Client.h"
 #include "Poco/Redis/Command.h"
@@ -341,9 +343,12 @@ void ConnectRedisClient(Poco::Redis::Client &client,
                         const std::string &host, int port,
                         const std::string &password, int db,
                         int timeoutMs) {
-    const Poco::Timespan connTimeout(static_cast<long>(timeoutMs) * 1000LL);
-    client.connect(host, port, connTimeout);
-    client.setReceiveTimeout(connTimeout);
+    const Poco::Timespan timeout(static_cast<Poco::Int64>(timeoutMs) * 1000);
+    Poco::Net::StreamSocket socket;
+    socket.connect(Poco::Net::SocketAddress(host, static_cast<Poco::UInt16>(port)), timeout);
+    socket.setSendTimeout(timeout);
+    socket.setReceiveTimeout(timeout);
+    client.connect(socket);
 
     if (!password.empty()) {
         Poco::Redis::Array authCmd;

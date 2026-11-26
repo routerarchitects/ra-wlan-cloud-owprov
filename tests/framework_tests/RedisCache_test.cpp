@@ -4,10 +4,12 @@
  * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -2567,6 +2569,157 @@ static void test_stale_pool_purge_on_transport_failure(int redisPort) {
     cleanup5b(1);
     std::cout << "  PASS: test_stale_pool_purge_on_transport_failure" << std::endl;
 }
+
+// ---------------------------------------------------------------------------
+// Finding 1: Socket send timeout on stalled TCP peer (send-buffer saturation)
+// Verifies timely failure/backoff, authoritative-loader fallback, unhealthy
+// socket disposal, and pool lease release when peer stops consuming TCP data.
+// ---------------------------------------------------------------------------
+static void test_send_timeout_on_stalled_peer() {
+    std::cout << "--- Finding 1: Socket Send Timeout on Stalled Peer ---" << std::endl;
+    Poco::Logger &log = Poco::Logger::get("TestSendTimeout");
+
+    // Bind allocates the socket fd; set SO_RCVBUF before listen() so SYN-ACK advertises small window.
+    Poco::Net::ServerSocket server;
+    server.bind(Poco::Net::SocketAddress("127.0.0.1", 0), true);
+    server.setReceiveBufferSize(4096);
+    server.listen(16);
+    const int port = server.address().port();
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> acceptedCount{0};
+    std::mutex sockMtx;
+    std::vector<Poco::Net::StreamSocket> acceptedSocks;
+    std::thread acceptThread([&]() {
+        while (!stop.load()) {
+            try {
+                if (!server.poll(Poco::Timespan(50 * 1000LL), Poco::Net::Socket::SELECT_READ)) {
+                    continue;
+                }
+                // Accept connections but intentionally never read from them.
+                Poco::Net::StreamSocket s = server.acceptConnection();
+                ++acceptedCount;
+                std::lock_guard<std::mutex> lk(sockMtx);
+                acceptedSocks.push_back(s);
+            } catch (...) {
+                if (stop.load()) break;
+            }
+        }
+    });
+
+    // Compute a payload guaranteed to exceed kernel tcp_wmem max + peer receive buffer.
+    size_t tcpWmemMax = 4 * 1024 * 1024;
+    if (std::ifstream f("/proc/sys/net/ipv4/tcp_wmem"); f.is_open()) {
+        size_t wMin = 0, wDef = 0, wMax = 0;
+        if (f >> wMin >> wDef >> wMax && wMax > 0) {
+            tcpWmemMax = wMax;
+        }
+    }
+    const size_t payloadBytes = tcpWmemMax + 4 * 1024 * 1024;
+
+    RedisCacheConfig cfg;
+    cfg.enabled = true;
+    cfg.host = "127.0.0.1";
+    cfg.port = port;
+    cfg.timeoutMs = 250;
+    cfg.maxTotalConnections = 1;
+    cfg.maxIdleConnections = 1;
+
+    RedisCache cache(cfg, log);
+    const std::string key = MakeCacheKey("inventory", "send_timeout_item");
+    std::string largePayload(payloadBytes, 'x');
+    const std::string endSentinel = "__PAYLOAD_END__";
+    largePayload.replace(largePayload.size() - endSentinel.size(), endSentinel.size(), endSentinel);
+
+    // 1. Large Set() must saturate send buffer and abort mid-write via socket send timeout (~250ms)
+    const auto t0 = std::chrono::steady_clock::now();
+    bool setOk = cache.Set(key, {largePayload, "1"});
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    TEST_ASSERT(!setOk, "Set() must fail on stalled TCP peer");
+    TEST_ASSERT(elapsedMs >= 180 && elapsedMs < 2000,
+        fmt::format("Send timeout (~250ms) must trigger promptly without blocking (took {}ms)", elapsedMs));
+    TEST_ASSERT(!cache.IsRedisHealthy(), "Cache must be marked unhealthy after send timeout");
+    TEST_ASSERT(acceptedCount.load() == 1, "Initial attempt must have opened 1 TCP connection");
+
+    // Verify write aborted before sending the end of the payload (proves send timeout fired, not receive timeout)
+    size_t drainedBytes = 0;
+    bool sawSentinel = false;
+    {
+        Poco::Net::StreamSocket peerSock;
+        {
+            std::lock_guard<std::mutex> lk(sockMtx);
+            peerSock = acceptedSocks.at(0);
+        }
+        peerSock.setReceiveTimeout(Poco::Timespan(200 * 1000LL));
+        std::vector<char> buf(65536);
+        std::string tail;
+        while (true) {
+            try {
+                int n = peerSock.receiveBytes(buf.data(), static_cast<int>(buf.size()));
+                if (n <= 0) break;
+                drainedBytes += static_cast<size_t>(n);
+                tail.append(buf.data(), static_cast<size_t>(n));
+                if (tail.size() > endSentinel.size() * 2) {
+                    tail.erase(0, tail.size() - endSentinel.size() * 2);
+                }
+                if (tail.find(endSentinel) != std::string::npos) {
+                    sawSentinel = true;
+                }
+            } catch (...) {
+                break;
+            }
+        }
+    }
+    TEST_ASSERT(drainedBytes > 0 && drainedBytes < largePayload.size(),
+        fmt::format("Client must abort mid-write on send timeout (drained={} bytes, payload={} bytes)",
+                    drainedBytes, largePayload.size()));
+    TEST_ASSERT(!sawSentinel,
+        "End-of-payload sentinel must NOT arrive when send timeout aborts saturated write");
+
+    // 2. Subsequent Get() must fall back promptly to the authoritative loader
+    int loaderCalls = 0;
+    const auto fbStart = std::chrono::steady_clock::now();
+    auto out = cache.Get(key, [&]() -> std::optional<RedisCache::Entry> {
+        ++loaderCalls;
+        return RedisCache::Entry{"{\"fallback\":true}", "10"};
+    });
+    const auto fbMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - fbStart).count();
+
+    TEST_ASSERT(loaderCalls == 1, "Authoritative loader must be invoked on fallback");
+    TEST_ASSERT(out.result == RedisCache::Result::Fallback, "Must return Result::Fallback");
+    TEST_ASSERT(out.entry.has_value() && out.entry->data == "{\"fallback\":true}", "Fallback data matches");
+    TEST_ASSERT(fbMs < 200, fmt::format("Fallback Get() during backoff must not block (took {}ms)", fbMs));
+
+    // 3. After backoff expires, next Set() on maxTotalConnections=1 opens a fresh socket
+    //    (proving the stalled connection was disposed and the single pool lease was released).
+    std::this_thread::sleep_for(std::chrono::milliseconds(5200));
+    const auto t1 = std::chrono::steady_clock::now();
+    bool retryOk = cache.Set(key, {largePayload, "2"});
+    const auto retryMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t1).count();
+
+    TEST_ASSERT(!retryOk, "Retry against stalled peer must also fail");
+    TEST_ASSERT(retryMs >= 180 && retryMs < 2000,
+        fmt::format("Retry send timeout must remain bounded (took {}ms)", retryMs));
+    TEST_ASSERT(acceptedCount.load() == 2,
+        fmt::format("Second attempt must open a fresh TCP connection (got {}, elapsedMs={}, retryMs={})",
+                    acceptedCount.load(), elapsedMs, retryMs));
+
+    stop.store(true);
+    try { server.close(); } catch (...) {}
+    acceptThread.join();
+    {
+        std::lock_guard<std::mutex> lk(sockMtx);
+        for (auto &s : acceptedSocks) {
+            try { s.close(); } catch (...) {}
+        }
+    }
+
+    std::cout << "  PASS: test_send_timeout_on_stalled_peer" << std::endl;
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -2576,6 +2729,9 @@ int main(int argc, char **argv) {
     // Suites 1 and 2 run in all environments (including GitHub Actions CI without Redis)
     test_config_and_namespaces();
     test_fallback_and_validation();
+#ifdef USE_POCO_REDIS
+    test_send_timeout_on_stalled_peer();
+#endif
 
     // Suite 3, 4, 5 run if a test Redis instance is running locally, otherwise cleanly skips.
     // When REQUIRE_REDIS_TESTS=1, DetectRedisPort() fails immediately with fatal exit if Redis is unavailable.
