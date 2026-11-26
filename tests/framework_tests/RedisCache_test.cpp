@@ -10,8 +10,10 @@
 #include <cstdlib>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -1541,7 +1543,7 @@ static void test_post_commit_and_rollback(int redisPort) {
 }
 
 // ---------------------------------------------------------------------------
-// Controlled TCP Proxy for Network Outage Simulation
+// Controlled TCP Proxy for Network Outage & Concurrency Fault Simulation
 // ---------------------------------------------------------------------------
 class ControlledTcpProxy {
   public:
@@ -1568,50 +1570,263 @@ class ControlledTcpProxy {
     void Disconnect() {
         Enabled_.store(false);
         std::lock_guard<std::mutex> lock(SocketsMutex_);
-        for (auto &sock : ActiveSockets_) {
-            try { sock.shutdown(); } catch (...) {}
-            try { sock.close(); } catch (...) {}
+        for (auto &conn : Conns_) {
+            if (conn->pinned.load()) continue;
+            CloseConnSockets(*conn);
         }
-        ActiveSockets_.clear();
     }
 
     void Restore() {
         Enabled_.store(true);
     }
 
+    // Hold all client commands at a barrier until N distinct connections arrive.
+    void SetBarrier(int targetCount) {
+        std::lock_guard<std::mutex> lock(HookMutex_);
+        BarrierTarget_ = targetCount;
+        BarrierArrived_ = 0;
+        BarrierReleased_ = false;
+    }
+
+    bool WaitForBarrier(int targetCount, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(HookMutex_);
+        return HookCv_.wait_for(lock, timeout, [&]() {
+            return BarrierArrived_ >= targetCount || Stop_.load();
+        }) && !Stop_.load();
+    }
+
+    void ReleaseBarrier() {
+        {
+            std::lock_guard<std::mutex> lock(HookMutex_);
+            BarrierReleased_ = true;
+            BarrierTarget_ = 0;
+        }
+        HookCv_.notify_all();
+    }
+
+    // Inject a raw RESP error string (e.g. "-NOPERM ...\r\n") on the very next client command
+    // instead of forwarding it to Redis. Keeps the TCP socket healthy and stream synchronized.
+    void InjectNextError(std::string respError) {
+        std::lock_guard<std::mutex> lock(HookMutex_);
+        InjectedError_ = std::move(respError);
+    }
+
+    // Intercept and pin the next `count` client commands in flight (immune to Disconnect).
+    void HoldNextReplies(int count) {
+        std::lock_guard<std::mutex> lock(HookMutex_);
+        HoldRepliesRemaining_ += count;
+    }
+
+    bool WaitForHeldReplies(size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(HookMutex_);
+        return HookCv_.wait_for(lock, timeout, [&]() {
+            return HeldConns_.size() >= count || Stop_.load();
+        }) && !Stop_.load();
+    }
+
+    void ReleaseHeldReply(size_t index) {
+        std::shared_ptr<ConnState> conn;
+        {
+            std::lock_guard<std::mutex> lock(HookMutex_);
+            if (index >= HeldConns_.size()) return;
+            conn = HeldConns_[index];
+            conn->action = ConnAction::Release;
+        }
+        HookCv_.notify_all();
+    }
+
+    void FailHeldReply(size_t index) {
+        std::shared_ptr<ConnState> conn;
+        {
+            std::lock_guard<std::mutex> lock(HookMutex_);
+            if (index >= HeldConns_.size()) return;
+            conn = HeldConns_[index];
+            conn->action = ConnAction::Fail;
+        }
+        CloseConnSockets(*conn);
+        HookCv_.notify_all();
+    }
+
+    bool WaitForHeldClientClosed(size_t index, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(HookMutex_);
+        if (index >= HeldConns_.size()) return false;
+        auto conn = HeldConns_[index];
+        return HookCv_.wait_for(lock, timeout, [&]() {
+            return conn->clientClosed.load() || Stop_.load();
+        }) && conn->clientClosed.load();
+    }
+
+    // Intercept and pin the next connection's SELECT command during ConnectRedisClient().
+    void HoldNextSelect() {
+        std::lock_guard<std::mutex> lock(HookMutex_);
+        HoldNextSelect_ = true;
+        ConnectingConn_.reset();
+    }
+
+    bool WaitForConnectingHeld(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(HookMutex_);
+        return HookCv_.wait_for(lock, timeout, [&]() {
+            return ConnectingConn_ != nullptr || Stop_.load();
+        }) && !Stop_.load();
+    }
+
+    void ReleaseConnectingHeld() {
+        {
+            std::lock_guard<std::mutex> lock(HookMutex_);
+            if (!ConnectingConn_) return;
+            ConnectingConn_->action = ConnAction::Release;
+        }
+        HookCv_.notify_all();
+    }
+
+    bool WaitForConnectingClientClosed(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(HookMutex_);
+        if (!ConnectingConn_) return false;
+        auto conn = ConnectingConn_;
+        return HookCv_.wait_for(lock, timeout, [&]() {
+            return conn->clientClosed.load() || Stop_.load();
+        }) && conn->clientClosed.load();
+    }
+
     void Stop() {
         Stop_.store(true);
-        Disconnect();
+        Enabled_.store(false);
+        {
+            std::lock_guard<std::mutex> lock(SocketsMutex_);
+            for (auto &conn : Conns_) {
+                conn->pinned.store(false);
+                CloseConnSockets(*conn);
+            }
+            Conns_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(HookMutex_);
+            for (auto &c : HeldConns_) c->action = ConnAction::Fail;
+            if (ConnectingConn_) ConnectingConn_->action = ConnAction::Fail;
+        }
+        HookCv_.notify_all();
         try { Server_.close(); } catch (...) {}
         if (Thread_.joinable()) {
             Thread_.join();
         }
-        std::lock_guard<std::mutex> lock(SocketsMutex_);
-        for (auto &t : ForwardThreads_) {
+        std::vector<std::thread> toJoin;
+        {
+            std::lock_guard<std::mutex> lock(SocketsMutex_);
+            toJoin = std::move(ForwardThreads_);
+            ForwardThreads_.clear();
+        }
+        for (auto &t : toJoin) {
             if (t.joinable()) t.join();
         }
-        ForwardThreads_.clear();
     }
 
   private:
-    void Forward(Poco::Net::StreamSocket src, Poco::Net::StreamSocket dst) {
+    enum class ConnAction { Hold, Release, Fail };
+
+    struct ConnState {
+        Poco::Net::StreamSocket clientSock;
+        Poco::Net::StreamSocket redisSock;
+        std::atomic<bool> pinned{false};
+        std::atomic<bool> clientClosed{false};
+        ConnAction action{ConnAction::Release};
+    };
+
+    static void CloseConnSockets(ConnState &conn) {
+        try { conn.clientSock.shutdown(); } catch (...) {}
+        try { conn.clientSock.close(); } catch (...) {}
+        try { conn.redisSock.shutdown(); } catch (...) {}
+        try { conn.redisSock.close(); } catch (...) {}
+    }
+
+    void Forward(std::shared_ptr<ConnState> conn, bool clientToRedis) {
+        Poco::Net::StreamSocket src = clientToRedis ? conn->clientSock : conn->redisSock;
+        Poco::Net::StreamSocket dst = clientToRedis ? conn->redisSock : conn->clientSock;
         char buf[8192];
         src.setReceiveTimeout(Poco::Timespan(200 * 1000LL));
-        while (!Stop_.load() && Enabled_.load()) {
+        while (!Stop_.load() && (Enabled_.load() || conn->pinned.load())) {
             try {
                 int n = src.receiveBytes(buf, sizeof(buf));
-                if (n <= 0) break;
+                if (n <= 0) {
+                    if (clientToRedis) {
+                        conn->clientClosed.store(true);
+                        HookCv_.notify_all();
+                    }
+                    break;
+                }
+
+                if (clientToRedis) {
+                    // 1. Optional synthetic RESP error injection
+                    std::string errToSend;
+                    {
+                        std::lock_guard<std::mutex> lock(HookMutex_);
+                        if (!InjectedError_.empty()) {
+                            errToSend = std::move(InjectedError_);
+                            InjectedError_.clear();
+                        }
+                    }
+                    if (!errToSend.empty()) {
+                        src.sendBytes(errToSend.data(), static_cast<int>(errToSend.size()));
+                        continue;
+                    }
+
+                    // 2. Optional SELECT handshake interception during ConnectRedisClient
+                    bool waitAction = false;
+                    {
+                        std::unique_lock<std::mutex> lock(HookMutex_);
+                        const std::string_view payload(buf, static_cast<size_t>(n));
+                        if (HoldNextSelect_ && payload.find("SELECT") != std::string_view::npos) {
+                            HoldNextSelect_ = false;
+                            conn->pinned.store(true);
+                            conn->action = ConnAction::Hold;
+                            ConnectingConn_ = conn;
+                            waitAction = true;
+                            HookCv_.notify_all();
+                        } else if (HoldRepliesRemaining_ > 0) {
+                            --HoldRepliesRemaining_;
+                            conn->pinned.store(true);
+                            conn->action = ConnAction::Hold;
+                            HeldConns_.push_back(conn);
+                            waitAction = true;
+                            HookCv_.notify_all();
+                        }
+                        if (waitAction) {
+                            HookCv_.wait(lock, [&]() {
+                                return conn->action != ConnAction::Hold || Stop_.load();
+                            });
+                            if (Stop_.load() || conn->action == ConnAction::Fail) break;
+                        }
+                    }
+
+                    // 3. Optional multi-connection warmup barrier
+                    {
+                        std::unique_lock<std::mutex> lock(HookMutex_);
+                        if (BarrierTarget_ > 0 && !BarrierReleased_) {
+                            ++BarrierArrived_;
+                            HookCv_.notify_all();
+                            HookCv_.wait_for(lock, std::chrono::seconds(10), [&]() {
+                                return BarrierReleased_ || Stop_.load();
+                            });
+                            if (Stop_.load()) break;
+                        }
+                    }
+                }
+
                 dst.sendBytes(buf, n);
             } catch (const Poco::TimeoutException &) {
                 continue;
             } catch (...) {
+                if (clientToRedis) {
+                    conn->clientClosed.store(true);
+                    HookCv_.notify_all();
+                }
                 break;
             }
         }
-        try { src.shutdown(); } catch (...) {}
-        try { src.close(); } catch (...) {}
-        try { dst.shutdown(); } catch (...) {}
-        try { dst.close(); } catch (...) {}
+        if (clientToRedis) {
+            conn->clientClosed.store(true);
+            HookCv_.notify_all();
+        }
+        CloseConnSockets(*conn);
     }
 
     void AcceptLoop() {
@@ -1627,11 +1842,13 @@ class ControlledTcpProxy {
                 try {
                     Poco::Net::StreamSocket redisSock(
                         Poco::Net::SocketAddress(TargetHost_, static_cast<Poco::UInt16>(TargetPort_)));
+                    auto conn = std::make_shared<ConnState>();
+                    conn->clientSock = clientSock;
+                    conn->redisSock = redisSock;
                     std::lock_guard<std::mutex> lock(SocketsMutex_);
-                    ActiveSockets_.push_back(clientSock);
-                    ActiveSockets_.push_back(redisSock);
-                    ForwardThreads_.emplace_back(&ControlledTcpProxy::Forward, this, clientSock, redisSock);
-                    ForwardThreads_.emplace_back(&ControlledTcpProxy::Forward, this, redisSock, clientSock);
+                    Conns_.push_back(conn);
+                    ForwardThreads_.emplace_back(&ControlledTcpProxy::Forward, this, conn, true);
+                    ForwardThreads_.emplace_back(&ControlledTcpProxy::Forward, this, conn, false);
                 } catch (...) {
                     try { clientSock.shutdown(); } catch (...) {}
                     try { clientSock.close(); } catch (...) {}
@@ -1650,8 +1867,19 @@ class ControlledTcpProxy {
     std::atomic<uint64_t> AcceptedConnections_{0};
     std::thread Thread_;
     std::mutex SocketsMutex_;
-    std::vector<Poco::Net::StreamSocket> ActiveSockets_;
+    std::vector<std::shared_ptr<ConnState>> Conns_;
     std::vector<std::thread> ForwardThreads_;
+
+    std::mutex HookMutex_;
+    std::condition_variable HookCv_;
+    int BarrierTarget_ = 0;
+    int BarrierArrived_ = 0;
+    bool BarrierReleased_ = false;
+    std::string InjectedError_;
+    int HoldRepliesRemaining_ = 0;
+    std::vector<std::shared_ptr<ConnState>> HeldConns_;
+    bool HoldNextSelect_ = false;
+    std::shared_ptr<ConnState> ConnectingConn_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1976,6 +2204,369 @@ static void test_live_redis_outage_and_recovery(int redisPort) {
     log.setChannel(origChannel);
     std::cout << "  PASS: test_live_redis_outage_and_recovery" << std::endl;
 }
+
+// ---------------------------------------------------------------------------
+// Suite 5 - Test F: Finding 5B — Pool Generation Invalidation & Stale Socket Fencing
+//
+// Verifies all Finding 5B requirements deterministically:
+//   1. Valid Redis server errors (WRONGTYPE, NOPERM) do NOT invalidate the pool or start backoff.
+//   2. Warming multiple concurrent pooled sockets via proxy barrier, then disconnecting,
+//      invalidates the generation and discards all idle stale sockets so recovery finishes
+//      within a single 5s backoff window across all subsequent requests.
+//   3. Older-generation leased connections kept alive across invalidation and recovery:
+//      (a) healthy release disconnects the obsolete socket instead of re-entering IdleClients;
+//      (b) late transport failure does NOT purge the recovered pool or reset backoff.
+//   4. Older-generation connecting clients suspended in ConnectRedisClient() across a
+//      generation bump do NOT mark Redis healthy during backoff and are discarded on release.
+// ---------------------------------------------------------------------------
+static void test_stale_pool_purge_on_transport_failure(int redisPort) {
+    std::cout << "--- Suite 5 - Test F: Finding 5B Stale Pool & Generation Fencing (Port " << redisPort << ") ---" << std::endl;
+    Poco::Logger &log = Poco::Logger::get("Test5B");
+    const std::string host = GetTestRedisHost();
+
+    auto cleanup5b = [&](int db) {
+        try {
+            Poco::Redis::Client rc(host, redisPort);
+            if (db != 0) {
+                Poco::Redis::Array sel; sel << "SELECT" << std::to_string(db);
+                rc.execute<std::string>(sel);
+            }
+            Poco::Redis::Array delCmd;
+            delCmd << "DEL";
+            for (const char *name : {"5b_wrongtype_key", "5b_healthcheck", "5b_held_release",
+                                     "5b_held_fail", "5b_trigger_fail", "5b_post_late",
+                                     "5b_conn_warm", "5b_conn_active", "5b_connecting", "5b_conn_rec",
+                                     "5b_waiter_block", "5b_waiter"}) {
+                const auto k = MakeCacheKey("inventory", name);
+                delCmd << k << MakeVersionKey(k);
+            }
+            for (int i = 0; i < 6; ++i) {
+                for (const char *pfx : {"5b_p1_{}", "5b_warm_{}", "5b_rec_{}"}) {
+                    const auto k = MakeCacheKey("inventory", fmt::format(pfx, i));
+                    delCmd << k << MakeVersionKey(k);
+                }
+            }
+            rc.execute<Poco::Int64>(delCmd);
+        } catch (...) {}
+    };
+    cleanup5b(0);
+    cleanup5b(1);
+
+    // =========================================================================
+    // Part 1: Valid Redis server errors (WRONGTYPE & NOPERM) must NOT purge
+    //         the idle pool or trigger reconnect backoff.
+    // =========================================================================
+    {
+        ControlledTcpProxy proxy(host, redisPort);
+        TEST_ASSERT(proxy.Port() > 0, "Part 1: Proxy must bind");
+
+        Poco::Redis::Client directRc(host, redisPort);
+        const std::string wrongTypeKey = MakeCacheKey("inventory", "5b_wrongtype_key");
+        const std::string wrongTypeVerKey = MakeVersionKey(wrongTypeKey);
+        const std::string healthKey = MakeCacheKey("inventory", "5b_healthcheck");
+        try {
+            Poco::Redis::Array delCmd; delCmd << "DEL" << wrongTypeKey << wrongTypeVerKey << healthKey << MakeVersionKey(healthKey);
+            directRc.execute<Poco::Int64>(delCmd);
+            Poco::Redis::Array lpushCmd; lpushCmd << "LPUSH" << wrongTypeKey << "value1";
+            directRc.execute<Poco::Int64>(lpushCmd);
+        } catch (...) {}
+
+        RedisCacheConfig cfgWT;
+        cfgWT.enabled = true;
+        cfgWT.host = "127.0.0.1";
+        cfgWT.port = proxy.Port();
+        cfgWT.timeoutMs = 2000;
+        cfgWT.maxTotalConnections = 4;
+        cfgWT.maxIdleConnections = 3;
+        cfgWT.cacheTtlSec = 30;
+
+        RedisCache wtCache(cfgWT, log);
+
+        // Warm 3 idle sockets deterministically so after 2 server-error commands,
+        // an untouched idle socket must still remain in the pool (no pool purge).
+        {
+            proxy.SetBarrier(3);
+            std::vector<std::thread> t;
+            for (int i = 0; i < 3; ++i) {
+                t.emplace_back([&, i]() {
+                    bool ok = wtCache.Set(MakeCacheKey("inventory", fmt::format("5b_p1_{}", i)), {"d", "1"});
+                    TEST_ASSERT(ok, "Part 1: Warmup Set must succeed");
+                });
+            }
+            TEST_ASSERT(proxy.WaitForBarrier(3, std::chrono::seconds(10)), "Part 1: 3 sockets must reach barrier");
+            proxy.ReleaseBarrier();
+            for (auto &th : t) th.join();
+        }
+        const uint64_t connsBeforeErrors = proxy.AcceptedConnections();
+        TEST_ASSERT(connsBeforeErrors == 3, "Part 1: Exactly 3 connections warmed");
+        TEST_ASSERT(wtCache.IsRedisHealthy(), "Part 1: Cache healthy after warmup");
+
+        // 1a. Live WRONGTYPE reply from Redis
+        auto wtResult = wtCache.Get(wrongTypeKey);
+        TEST_ASSERT(!wtResult.has_value(), "Part 1: WRONGTYPE GET returns nullopt");
+        TEST_ASSERT(wtCache.IsRedisHealthy(), "Part 1: WRONGTYPE must NOT trigger backoff");
+
+        // 1b. Non-whitelist server error (NOPERM) injected over healthy socket
+        proxy.InjectNextError("-NOPERM this user has no permissions to run 'get'\r\n");
+        auto npResult = wtCache.Get(healthKey);
+        TEST_ASSERT(!npResult.has_value(), "Part 1: NOPERM GET returns nullopt");
+        TEST_ASSERT(wtCache.IsRedisHealthy(), "Part 1: NOPERM must NOT trigger backoff");
+
+        // Remaining idle socket must still be reused without establishing new connections
+        TEST_ASSERT(wtCache.Set(healthKey, {"{\"ok\":1}", "1"}), "Part 1: Subsequent Set succeeds without backoff");
+        TEST_ASSERT(proxy.AcceptedConnections() == connsBeforeErrors,
+            "Part 1: Server errors must NOT purge idle pool (no reconnects opened)");
+
+        try {
+            Poco::Redis::Array delCmd; delCmd << "DEL" << wrongTypeKey << wrongTypeVerKey << healthKey << MakeVersionKey(healthKey);
+            directRc.execute<Poco::Int64>(delCmd);
+        } catch (...) {}
+        proxy.Stop();
+    }
+
+    // =========================================================================
+    // Part 2: Generation invalidation, single-backoff recovery across multiple
+    //         stale idle sockets, and fencing of old-generation leased clients
+    // =========================================================================
+    {
+        ControlledTcpProxy proxy(host, redisPort);
+        TEST_ASSERT(proxy.Port() > 0, "Part 2: Proxy must bind successfully");
+
+        RedisCacheConfig cfg;
+        cfg.enabled = true;
+        cfg.host = "127.0.0.1";
+        cfg.port = proxy.Port();
+        cfg.timeoutMs = 15000; // Kept above backoff window so held gen-1 sockets do not timeout
+        cfg.maxTotalConnections = 10;
+        cfg.maxIdleConnections = 6;
+        cfg.cacheTtlSec = 30;
+
+        RedisCache cache(cfg, log);
+
+        // --- Stage 1: Deterministically warm 6 concurrent connections into IdleClients (gen 1) ---
+        {
+            const int N = 6;
+            proxy.SetBarrier(N);
+            std::vector<std::thread> workers;
+            std::vector<int> ok(N, 0);
+            for (int i = 0; i < N; ++i) {
+                workers.emplace_back([&, i]() {
+                    ok[i] = cache.Set(MakeCacheKey("inventory", fmt::format("5b_warm_{}", i)),
+                                      {fmt::format("{{\"v\":{}}}", i), "1"}) ? 1 : 0;
+                });
+            }
+            TEST_ASSERT(proxy.WaitForBarrier(N, std::chrono::seconds(10)),
+                "Part 2 Stage 1: All 6 concurrent Redis Sets must enter proxy barrier");
+            proxy.ReleaseBarrier();
+            for (auto &w : workers) w.join();
+            for (int i = 0; i < N; ++i) {
+                TEST_ASSERT(ok[i], fmt::format("Part 2 Stage 1: Warmup Set {} must succeed", i));
+            }
+        }
+        TEST_ASSERT(proxy.AcceptedConnections() == 6, "Part 2 Stage 1: Pool holds 6 gen-1 connections");
+        TEST_ASSERT(cache.IsRedisHealthy(), "Part 2 Stage 1: Cache healthy after warmup");
+
+        // --- Stage 2: Hold 2 gen-1 leased connections in flight across invalidation ---
+        // Hold sequentially so HeldConns_[0] deterministically owns threadHeldRelease
+        // and HeldConns_[1] deterministically owns threadHeldFail.
+        proxy.HoldNextReplies(1);
+        bool heldReleaseOk = false;
+        std::thread threadHeldRelease([&]() {
+            heldReleaseOk = cache.Set(MakeCacheKey("inventory", "5b_held_release"), {"{\"held\":0}", "1"});
+        });
+        TEST_ASSERT(proxy.WaitForHeldReplies(1, std::chrono::seconds(10)),
+            "Part 2 Stage 2: Proxy must pin first gen-1 in-flight request (release candidate)");
+
+        proxy.HoldNextReplies(1);
+        std::optional<RedisCache::Entry> heldFailRes = RedisCache::Entry{"sentinel", "99"};
+        std::thread threadHeldFail([&]() {
+            heldFailRes = cache.Get(MakeCacheKey("inventory", "5b_held_fail"));
+        });
+        TEST_ASSERT(proxy.WaitForHeldReplies(2, std::chrono::seconds(10)),
+            "Part 2 Stage 2: Proxy must pin second gen-1 in-flight request (late-failure candidate)");
+
+        // --- Stage 3: Disconnect the 4 idle gen-1 sockets and trigger generation 1 -> 2 ---
+        proxy.Disconnect();
+
+        // Next request pops 1 of the 4 broken idle sockets, fails, invalidates gen 1 -> 2,
+        // discards the other 3 stale idle sockets, and starts one 5s backoff window.
+        auto triggerFail = cache.Get(MakeCacheKey("inventory", "5b_trigger_fail"));
+        TEST_ASSERT(!triggerFail.has_value(), "Part 2 Stage 3: Outage Get must fail");
+        TEST_ASSERT(!cache.IsRedisHealthy(), "Part 2 Stage 3: Cache unhealthy during backoff");
+
+        // --- Stage 4: Restore connectivity, wait 1 backoff, verify all 6 calls succeed cleanly ---
+        proxy.Restore();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5300));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        int recoverySuccess = 0;
+        for (int i = 0; i < 6; ++i) {
+            if (cache.Set(MakeCacheKey("inventory", fmt::format("5b_rec_{}", i)),
+                          {fmt::format("{{\"r\":{}}}", i), "1"})) {
+                ++recoverySuccess;
+            }
+        }
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+
+        TEST_ASSERT(recoverySuccess == 6,
+            fmt::format("Part 2 Stage 4: All 6 Sets must succeed after single backoff (got {})", recoverySuccess));
+        TEST_ASSERT(elapsedMs < 1500,
+            fmt::format("Part 2 Stage 4: Recovery took {}ms (>1500ms implies stepping through stale sockets)", elapsedMs));
+        TEST_ASSERT(cache.IsRedisHealthy(), "Part 2 Stage 4: Cache must be healthy at gen 2");
+        const uint64_t connsAfterRecovery = proxy.AcceptedConnections();
+        TEST_ASSERT(connsAfterRecovery > 6, "Part 2 Stage 4: Fresh gen-2 connection established");
+
+        // --- Stage 5a: Healthy release of gen-1 leased connection must NOT re-enter IdleClients ---
+        proxy.ReleaseHeldReply(0);
+        threadHeldRelease.join();
+        TEST_ASSERT(heldReleaseOk, "Part 2 Stage 5a: Released gen-1 Set succeeds");
+        TEST_ASSERT(proxy.WaitForHeldClientClosed(0, std::chrono::seconds(5)),
+            "Part 2 Stage 5a: Release() must disconnect obsolete gen-1 socket instead of pooling it");
+        TEST_ASSERT(cache.IsRedisHealthy(), "Part 2 Stage 5a: Pool remains healthy");
+
+        // --- Stage 5b: Late transport failure from gen-1 leased connection must NOT reset recovery ---
+        proxy.FailHeldReply(1);
+        threadHeldFail.join();
+        TEST_ASSERT(!heldFailRes.has_value(), "Part 2 Stage 5b: Failed gen-1 Get returns nullopt");
+        TEST_ASSERT(cache.IsRedisHealthy(),
+            "Part 2 Stage 5b: Obsolete gen-1 late failure must NOT mark recovered gen-2 cache unhealthy");
+
+        // Healthy gen-2 idle connection must still work immediately with no new backoff and no new connect
+        const auto tLate0 = std::chrono::steady_clock::now();
+        bool postLateOk = cache.Set(MakeCacheKey("inventory", "5b_post_late"), {"{\"ok\":2}", "1"});
+        const auto lateMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tLate0).count();
+        TEST_ASSERT(postLateOk && lateMs < 500,
+            "Part 2 Stage 5b: Subsequent request must succeed immediately without backoff");
+        TEST_ASSERT(proxy.AcceptedConnections() == connsAfterRecovery,
+            "Part 2 Stage 5b: Late obsolete failure must NOT purge recovered gen-2 idle pool");
+
+        proxy.Stop();
+    }
+
+    // =========================================================================
+    // Part 3: Older-generation connecting client suspended inside ConnectRedisClient()
+    //         across generation invalidation must NOT mark Redis healthy during
+    //         backoff and must NOT enter IdleClients upon release.
+    // =========================================================================
+    {
+        ControlledTcpProxy proxy(host, redisPort);
+        TEST_ASSERT(proxy.Port() > 0, "Part 3: Proxy must bind");
+
+        RedisCacheConfig cfg;
+        cfg.enabled = true;
+        cfg.host = "127.0.0.1";
+        cfg.port = proxy.Port();
+        cfg.db = 1; // Triggers synchronous SELECT 1 during ConnectRedisClient()
+        cfg.timeoutMs = 15000;
+        cfg.maxTotalConnections = 4;
+        cfg.maxIdleConnections = 2;
+        cfg.cacheTtlSec = 30;
+
+        RedisCache cache(cfg, log);
+
+        // 1. Establish 1 gen-1 socket in IdleClients
+        TEST_ASSERT(cache.Set(MakeCacheKey("inventory", "5b_conn_warm"), {"{\"w\":1}", "1"}),
+            "Part 3: Initial warm Set must succeed");
+
+        // 2. Borrow that 1 idle socket so IdleClients is now empty
+        proxy.HoldNextReplies(1);
+        std::optional<RedisCache::Entry> activeRes;
+        std::thread activeThread([&]() {
+            activeRes = cache.Get(MakeCacheKey("inventory", "5b_conn_active"));
+        });
+        TEST_ASSERT(proxy.WaitForHeldReplies(1, std::chrono::seconds(5)),
+            "Part 3: Active gen-1 socket must be held in flight");
+
+        // 3. Start a new connecting client at gen 1 and suspend it mid-SELECT inside ConnectRedisClient()
+        proxy.HoldNextSelect();
+        bool connectingSetOk = true;
+        std::thread connectingThread([&]() {
+            connectingSetOk = cache.Set(MakeCacheKey("inventory", "5b_connecting"), {"{\"c\":1}", "1"});
+        });
+        TEST_ASSERT(proxy.WaitForConnectingHeld(std::chrono::seconds(5)),
+            "Part 3: Connecting client must be paused inside ConnectRedisClient() SELECT 1");
+
+        // 4. Fail the active gen-1 socket -> bumps generation 1 -> 2, enters 5s backoff
+        proxy.FailHeldReply(0);
+        activeThread.join();
+        TEST_ASSERT(!activeRes.has_value(), "Part 3: Active socket failed");
+        TEST_ASSERT(!cache.IsRedisHealthy(), "Part 3: Cache must be unhealthy in gen-2 backoff");
+
+        // 5. While STILL inside gen-2 backoff, let the gen-1 ConnectRedisClient() finish
+        proxy.ReleaseConnectingHeld();
+        connectingThread.join();
+        TEST_ASSERT(!connectingSetOk,
+            "Part 3: Obsolete connecting client must fall back cleanly instead of poisoning gen 2");
+        TEST_ASSERT(!cache.IsRedisHealthy(),
+            "Part 3: Obsolete connecting client completing after invalidation must NOT mark Redis healthy");
+        TEST_ASSERT(proxy.WaitForConnectingClientClosed(std::chrono::seconds(5)),
+            "Part 3: Obsolete connecting socket must be closed instead of entering IdleClients");
+
+        // 6. After backoff expires, a fresh gen-2 connection succeeds cleanly
+        std::this_thread::sleep_for(std::chrono::milliseconds(5300));
+        TEST_ASSERT(cache.Set(MakeCacheKey("inventory", "5b_conn_rec"), {"{\"rec\":1}", "1"}),
+            "Part 3: Fresh gen-2 connection must succeed after backoff");
+        TEST_ASSERT(cache.IsRedisHealthy(), "Part 3: Cache healthy after recovery");
+
+        proxy.Stop();
+    }
+
+    // =========================================================================
+    // Part 4: A request already waiting for pool capacity inside Acquire() must
+    //         NOT establish or use a fresh connection if backoff begins while waiting.
+    // =========================================================================
+    {
+        ControlledTcpProxy proxy(host, redisPort);
+        TEST_ASSERT(proxy.Port() > 0, "Part 4: Proxy must bind");
+
+        RedisCacheConfig cfg;
+        cfg.enabled = true;
+        cfg.host = "127.0.0.1";
+        cfg.port = proxy.Port();
+        cfg.timeoutMs = 5000;
+        cfg.maxTotalConnections = 1;
+        cfg.maxIdleConnections = 1;
+        cfg.cacheTtlSec = 30;
+
+        RedisCache cache(cfg, log);
+
+        // Occupy the single pool slot (MaxTotal = 1) in flight
+        proxy.HoldNextReplies(1);
+        std::optional<RedisCache::Entry> holderRes;
+        std::thread holderThread([&]() {
+            holderRes = cache.Get(MakeCacheKey("inventory", "5b_waiter_block"));
+        });
+        TEST_ASSERT(proxy.WaitForHeldReplies(1, std::chrono::seconds(5)),
+            "Part 4: Holder request must occupy the single pool connection");
+        TEST_ASSERT(proxy.AcceptedConnections() == 1, "Part 4: Only 1 connection opened");
+
+        // Launch a second request that blocks inside Pool.Acquire() waiting for capacity
+        bool waiterOk = true;
+        std::thread waiterThread([&]() {
+            waiterOk = cache.Set(MakeCacheKey("inventory", "5b_waiter"), {"{\"w\":2}", "1"});
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        // Fail the holder connection -> triggers generation bump and 5s backoff while waiter is waiting
+        proxy.FailHeldReply(0);
+        holderThread.join();
+        waiterThread.join();
+
+        TEST_ASSERT(!holderRes.has_value(), "Part 4: Holder failed");
+        TEST_ASSERT(!waiterOk, "Part 4: Waiter must abort into fallback instead of connecting during backoff");
+        TEST_ASSERT(!cache.IsRedisHealthy(), "Part 4: Waiter must NOT mark Redis healthy during backoff");
+        TEST_ASSERT(proxy.AcceptedConnections() == 1,
+            "Part 4: Waiter must NOT open a new TCP connection during active backoff");
+
+        proxy.Stop();
+    }
+
+    cleanup5b(0);
+    cleanup5b(1);
+    std::cout << "  PASS: test_stale_pool_purge_on_transport_failure" << std::endl;
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -2002,6 +2593,7 @@ int main(int argc, char **argv) {
         test_concurrent_and_out_of_order_invalidation(redisPort);
         test_post_commit_and_rollback(redisPort);
         test_live_redis_outage_and_recovery(redisPort);
+        test_stale_pool_purge_on_transport_failure(redisPort); // Finding 5B regression
 #endif
     }
 

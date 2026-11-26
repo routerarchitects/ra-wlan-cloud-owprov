@@ -6,6 +6,7 @@
 
 #include "framework/RedisCache.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -28,6 +29,8 @@
 #include "framework/MicroServiceFuncs.h"
 
 #ifdef USE_POCO_REDIS
+#include "Poco/Exception.h"
+#include "Poco/Net/NetException.h"
 #include "Poco/Redis/Array.h"
 #include "Poco/Redis/Client.h"
 #include "Poco/Redis/Command.h"
@@ -359,6 +362,35 @@ void ConnectRedisClient(Poco::Redis::Client &client,
         }
     }
 }
+
+inline bool InBackoff(const std::atomic<int64_t> &nextReconnect) noexcept {
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return nowMs < nextReconnect.load(std::memory_order_relaxed);
+}
+
+// Distinguishes connection/transport failures from valid RESP server error replies.
+// Poco throws RedisException for both; server replies start with an uppercase ASCII
+// error category token (e.g. "ERR", "WRONGTYPE", "NOPERM", "LOADING").
+static bool IsTransportError(const std::exception &e) noexcept {
+    if (dynamic_cast<const Poco::IOException *>(&e) != nullptr ||
+        dynamic_cast<const Poco::TimeoutException *>(&e) != nullptr) {
+        return true;
+    }
+    if (const auto *re = dynamic_cast<const Poco::Redis::RedisException *>(&e)) {
+        const std::string_view msg = re->message();
+        if (msg.empty()) return true;
+        const std::string_view cat = msg.substr(0, msg.find(' '));
+        if (!cat.empty() && cat[0] >= 'A' && cat[0] <= 'Z' &&
+            std::all_of(cat.begin(), cat.end(), [](unsigned char c) {
+                return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+            })) {
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
 #endif
 
 } // anonymous namespace
@@ -454,6 +486,7 @@ struct RedisConnectionPool {
     size_t                  MaxIdle;
     size_t                  MaxTotal;
     size_t                  ActiveCount = 0; // Number of connections currently leased or connecting
+    uint64_t                Generation  = 1; // Fences obsolete connections across pool invalidations
 
     RedisConnectionPool(const RedisCacheConfig &cfg, Poco::Logger &log)
         : Config(cfg), Log(log),
@@ -470,7 +503,8 @@ struct RedisConnectionPool {
 
     // Borrows an idle client or creates a new connection up to MaxTotal.
     // If the pool is at capacity, waits up to 100ms for a slot or returns nullptr for safe fallback.
-    std::unique_ptr<Poco::Redis::Client> Acquire() {
+    std::unique_ptr<Poco::Redis::Client> Acquire(uint64_t &outGeneration,
+                                                 const std::atomic<int64_t> &nextReconnect) {
         std::unique_lock<std::mutex> lock(PoolMutex);
 
         // 1. Reuse existing idle client
@@ -478,11 +512,13 @@ struct RedisConnectionPool {
             auto client = std::move(IdleClients.back());
             IdleClients.pop_back();
             ActiveCount++;
+            outGeneration = Generation;
             return client;
         }
 
         // 2. Connect new client if below MaxTotal limit
         if (ActiveCount < MaxTotal) {
+            outGeneration = Generation;
             ActiveCount++;
             lock.unlock(); // Connect outside mutex to avoid blocking other threads
             auto client = std::make_unique<Poco::Redis::Client>();
@@ -504,14 +540,20 @@ struct RedisConnectionPool {
             return !IdleClients.empty() || ActiveCount < MaxTotal;
         });
 
+        if (InBackoff(nextReconnect)) {
+            return nullptr;
+        }
+
         if (acquired) {
             if (!IdleClients.empty()) {
                 auto client = std::move(IdleClients.back());
                 IdleClients.pop_back();
                 ActiveCount++;
+                outGeneration = Generation;
                 return client;
             }
             if (ActiveCount < MaxTotal) {
+                outGeneration = Generation;
                 ActiveCount++;
                 lock.unlock();
                 auto client = std::make_unique<Poco::Redis::Client>();
@@ -533,13 +575,42 @@ struct RedisConnectionPool {
         return nullptr;
     }
 
-    // Returns a healthy client to the pool, or disconnects and drops it if unhealthy/full.
-    void Release(std::unique_ptr<Poco::Redis::Client> client, bool healthy) {
+    bool TryMarkHealthy(uint64_t expectedGen, std::atomic<bool> &redisHealthy) {
+        std::lock_guard<std::mutex> lock(PoolMutex);
+        if (expectedGen != Generation) return false;
+        redisHealthy.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+    bool InvalidateGeneration(uint64_t expectedGen, bool purgeIdle,
+                              std::atomic<int64_t> &nextReconnect,
+                              std::atomic<bool> &redisHealthy) {
+        std::vector<std::unique_ptr<Poco::Redis::Client>> toClose;
+        {
+            std::lock_guard<std::mutex> lock(PoolMutex);
+            if (expectedGen != Generation) return false;
+            if (purgeIdle) {
+                ++Generation;
+                toClose = std::move(IdleClients);
+                IdleClients.clear();
+            }
+            auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            nextReconnect.store(nowMs + RECONNECT_BACKOFF_MS, std::memory_order_relaxed);
+            redisHealthy.store(false, std::memory_order_relaxed);
+        }
+        for (auto &c : toClose) try { c->disconnect(); } catch (...) {}
+        if (purgeIdle) PoolCv.notify_all();
+        return true;
+    }
+
+    // Returns a healthy current-generation client to the pool, or disconnects and drops it.
+    void Release(std::unique_ptr<Poco::Redis::Client> client, uint64_t clientGeneration, bool healthy) {
         if (!client) return;
         {
             std::lock_guard<std::mutex> lock(PoolMutex);
             if (ActiveCount > 0) ActiveCount--;
-            if (healthy && IdleClients.size() < MaxIdle) {
+            if (healthy && clientGeneration == Generation && IdleClients.size() < MaxIdle) {
                 IdleClients.push_back(std::move(client));
                 PoolCv.notify_one();
                 return;
@@ -553,24 +624,28 @@ struct RedisConnectionPool {
 // RAII wrapper ensuring borrowed Redis clients are safely returned or cleaned up upon scope exit.
 class PooledClientLease {
   public:
-    PooledClientLease(RedisConnectionPool &pool, std::unique_ptr<Poco::Redis::Client> client)
-        : Pool_(&pool), Client_(std::move(client)) {}
+    PooledClientLease(RedisConnectionPool &pool,
+                      std::unique_ptr<Poco::Redis::Client> client,
+                      uint64_t generation)
+        : Pool_(&pool), Client_(std::move(client)), Generation_(generation) {}
 
     ~PooledClientLease() {
-        if (Pool_ && Client_) Pool_->Release(std::move(Client_), Healthy_);
+        if (Pool_ && Client_) Pool_->Release(std::move(Client_), Generation_, Healthy_);
     }
 
     PooledClientLease(const PooledClientLease &) = delete;
     PooledClientLease &operator=(const PooledClientLease &) = delete;
     PooledClientLease(PooledClientLease &&other) noexcept
-        : Pool_(other.Pool_), Client_(std::move(other.Client_)), Healthy_(other.Healthy_) {
+        : Pool_(other.Pool_), Client_(std::move(other.Client_)),
+          Generation_(other.Generation_), Healthy_(other.Healthy_) {
         other.Pool_ = nullptr;
     }
     PooledClientLease &operator=(PooledClientLease &&other) noexcept {
         if (this != &other) {
-            if (Pool_ && Client_) Pool_->Release(std::move(Client_), Healthy_);
+            if (Pool_ && Client_) Pool_->Release(std::move(Client_), Generation_, Healthy_);
             Pool_ = other.Pool_;
             Client_ = std::move(other.Client_);
+            Generation_ = other.Generation_;
             Healthy_ = other.Healthy_;
             other.Pool_ = nullptr;
         }
@@ -578,11 +653,13 @@ class PooledClientLease {
     }
 
     [[nodiscard]] Poco::Redis::Client &Client() noexcept { return *Client_; }
+    [[nodiscard]] uint64_t Generation() const noexcept { return Generation_; }
     void MarkUnhealthy() noexcept { Healthy_ = false; }
 
   private:
     RedisConnectionPool *Pool_ = nullptr;
     std::unique_ptr<Poco::Redis::Client> Client_;
+    uint64_t Generation_ = 0;
     bool Healthy_ = true;
 };
 #endif
@@ -592,6 +669,20 @@ struct RedisCache::Impl {
 #ifdef USE_POCO_REDIS
     RedisConnectionPool Pool;
     explicit Impl(const RedisCacheConfig &cfg, Poco::Logger &log) : Pool(cfg, log) {}
+
+    void HandleException(uint64_t gen, bool transport, bool isConnect,
+                         const std::string &op, const std::string &key, const char *reason,
+                         std::atomic<int64_t> &nextReconnect, std::atomic<bool> &redisHealthy,
+                         RedisCache &cache, std::string *failureReason) {
+        if (transport || isConnect) {
+            if (Pool.InvalidateGeneration(gen, transport, nextReconnect, redisHealthy)) {
+                cache.OnRedisFailure(op, key, reason);
+            }
+        } else {
+            poco_warning(cache.Log_, fmt::format("RedisCache: {} error for key '{}': {}", op, key, reason));
+        }
+        if (failureReason) *failureReason = reason;
+    }
 
     // Acquires a client lease if Redis is enabled, not in backoff, and pool not exhausted.
     std::optional<PooledClientLease> AcquireLease(std::atomic<int64_t> &nextReconnect,
@@ -604,33 +695,45 @@ struct RedisCache::Impl {
         }
 
         // Fail-fast check during reconnect backoff window
-        auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (nowMs < nextReconnect.load(std::memory_order_relaxed)) {
+        if (InBackoff(nextReconnect)) {
             if (failureReason) *failureReason = "Redis connection is in reconnect backoff window";
             return std::nullopt;
         }
 
+        uint64_t attemptGen = 0;
         try {
-            auto client = Pool.Acquire();
+            auto client = Pool.Acquire(attemptGen, nextReconnect);
             if (!client) {
-                if (failureReason) *failureReason = "Redis connection pool exhausted (maxTotalConnections limit reached)";
+                if (failureReason) {
+                    *failureReason = InBackoff(nextReconnect)
+                        ? "Redis connection entered reconnect backoff while acquiring"
+                        : "Redis connection pool exhausted (maxTotalConnections limit reached)";
+                }
                 return std::nullopt;
             }
-            redisHealthy.store(true, std::memory_order_relaxed);
-            return PooledClientLease(Pool, std::move(client));
+            PooledClientLease lease(Pool, std::move(client), attemptGen);
+            if (InBackoff(nextReconnect)) {
+                lease.MarkUnhealthy();
+                if (failureReason) *failureReason = "Redis connection entered reconnect backoff while acquiring";
+                return std::nullopt;
+            }
+            if (!Pool.TryMarkHealthy(attemptGen, redisHealthy)) {
+                if (failureReason) *failureReason = "Redis pool generation invalidated while connecting";
+                return std::nullopt;
+            }
+            return lease;
         } catch (const std::exception &e) {
-            cache.OnRedisFailure("CONNECT", "", e.what());
-            if (failureReason) *failureReason = e.what();
+            HandleException(attemptGen, IsTransportError(e), true, "CONNECT", "", e.what(),
+                            nextReconnect, redisHealthy, cache, failureReason);
         } catch (...) {
-            cache.OnRedisFailure("CONNECT", "", "Unknown connection error");
-            if (failureReason) *failureReason = "Unknown connection error";
+            HandleException(attemptGen, true, true, "CONNECT", "", "Unknown connection error",
+                            nextReconnect, redisHealthy, cache, failureReason);
         }
         return std::nullopt;
     }
 
     // Central command execution helper: acquires lease, executes command lambda,
-    // and unified error handling (backoff activation, lease marking, socket cleanup).
+    // and unified error handling (generation invalidation, backoff activation, lease fencing).
     template <typename Func>
     bool Execute(const std::string &op, const std::string &key,
                  std::atomic<int64_t> &nextReconnect,
@@ -644,17 +747,18 @@ struct RedisCache::Impl {
             if (failureReason) *failureReason = std::move(acquireReason);
             return false;
         }
+        const uint64_t leaseGen = lease->Generation();
         try {
             fn(lease->Client());
             return true;
         } catch (const std::exception &e) {
             lease->MarkUnhealthy();
-            cache.OnRedisFailure(op, key, e.what());
-            if (failureReason) *failureReason = e.what();
+            HandleException(leaseGen, IsTransportError(e), false, op, key, e.what(),
+                            nextReconnect, redisHealthy, cache, failureReason);
         } catch (...) {
             lease->MarkUnhealthy();
-            cache.OnRedisFailure(op, key, "Unknown exception");
-            if (failureReason) *failureReason = "Unknown exception";
+            HandleException(leaseGen, true, false, op, key, "Unknown exception",
+                            nextReconnect, redisHealthy, cache, failureReason);
         }
         return false;
     }
